@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Query parameters for filtering log output.
 pub struct LogQuery {
@@ -176,6 +176,53 @@ where
     }
 }
 
+/// Return current time in microseconds since Unix epoch.
+fn now_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_micros() as u64
+}
+
+/// Parse a "since" value into a microsecond epoch threshold.
+///
+/// Accepts:
+/// - Duration suffixes: `"30s"`, `"5m"`, `"2h"`, `"1d"` (relative to now)
+/// - Plain epoch seconds: `"1000000"` (converted to microseconds)
+pub fn parse_since(value: &str) -> Result<u64, String> {
+    if value.is_empty() {
+        return Err("empty value".to_owned());
+    }
+
+    // Check for duration suffix.
+    let last = value.as_bytes()[value.len() - 1];
+    let multiplier = match last {
+        b's' => Some(1_000_000u64),
+        b'm' => Some(60_000_000u64),
+        b'h' => Some(3_600_000_000u64),
+        b'd' => Some(86_400_000_000u64),
+        _ => None,
+    };
+
+    if let Some(mult) = multiplier {
+        let num_str = &value[..value.len() - 1];
+        let n: u64 = num_str
+            .parse()
+            .map_err(|_| format!("invalid duration number: {num_str:?}"))?;
+        let duration_us = n
+            .checked_mul(mult)
+            .ok_or_else(|| format!("duration overflow: {value:?}"))?;
+        return Ok(now_us().saturating_sub(duration_us));
+    }
+
+    // Plain epoch seconds.
+    let secs: u64 = value
+        .parse()
+        .map_err(|_| format!("invalid since value: {value:?}"))?;
+    secs.checked_mul(1_000_000)
+        .ok_or_else(|| format!("epoch overflow: {value:?}"))
+}
+
 /// Parsed representation of a single sidecar log line.
 ///
 /// The on-disk format produced by `sidecar::capture_stream` is:
@@ -333,7 +380,7 @@ mod tests {
         path
     }
 
-    // --- query_log tests ---
+    // --- Task 2: query_log tests ---
 
     #[test]
     fn query_full_log() {
@@ -386,6 +433,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_log(dir.path());
         let mut buf = Vec::new();
+        // since_us = 1000002_000000 should include lines at ts 1000002, 1000003, 1000004
         let query = LogQuery {
             since_us: Some(1_000_002_000_000),
             ..Default::default()
@@ -411,6 +459,7 @@ mod tests {
         let count = query_log(&path, &query, &mut buf).unwrap();
         assert_eq!(count, 5);
         let output = String::from_utf8(buf).unwrap();
+        // Raw output should not contain timestamp digits.
         assert!(!output.contains("1000000.000000"));
         assert!(output.contains("line one"));
     }
@@ -420,6 +469,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_log(dir.path());
         let mut buf = Vec::new();
+        // grep "error" gives 2 hits, tail 1 should give only the last one.
         let query = LogQuery {
             grep: Some("error".to_owned()),
             tail: Some(1),
@@ -442,13 +492,14 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- follow_log tests ---
+    // --- Task 3: follow_log tests ---
 
     #[test]
     fn follow_stops_on_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_log(dir.path());
         let mut buf = Vec::new();
+        // With tail set, should read existing content then stop immediately.
         let query = LogQuery {
             tail: Some(100),
             ..Default::default()
@@ -464,6 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.log");
 
+        // Create initial file.
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, "1000000.000000 O initial line").unwrap();
@@ -486,8 +538,10 @@ mod tests {
             String::from_utf8(buf).unwrap()
         });
 
+        // Give the follow thread time to start tailing.
         thread::sleep(Duration::from_millis(250));
 
+        // Append a new line.
         {
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
@@ -496,6 +550,7 @@ mod tests {
             writeln!(f, "1000001.000000 O appended line").unwrap();
         }
 
+        // Give it time to pick up the new line, then stop.
         thread::sleep(Duration::from_millis(350));
         stop.store(true, Ordering::Relaxed);
 
@@ -526,16 +581,60 @@ mod tests {
             String::from_utf8(buf).unwrap()
         });
 
+        // Wait, then create the file.
         thread::sleep(Duration::from_millis(300));
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, "1000000.000000 O delayed line").unwrap();
         }
 
+        // Let it pick up the line.
         thread::sleep(Duration::from_millis(350));
         stop.store(true, Ordering::Relaxed);
 
         let output = handle.join().unwrap();
         assert!(output.contains("delayed line"));
+    }
+
+    // --- Task 4: parse_since tests ---
+
+    #[test]
+    fn parse_since_epoch_seconds() {
+        let result = parse_since("1000000").unwrap();
+        assert_eq!(result, 1_000_000_000_000);
+    }
+
+    #[test]
+    fn parse_since_seconds_duration() {
+        let before = now_us();
+        let result = parse_since("30s").unwrap();
+        let after = now_us();
+        // Result should be approximately now - 30s.
+        let expected_low = before - 30_000_000;
+        let expected_high = after - 30_000_000;
+        assert!(
+            result >= expected_low.saturating_sub(1000) && result <= expected_high + 1000,
+            "result {result} not in expected range [{expected_low}, {expected_high}]"
+        );
+    }
+
+    #[test]
+    fn parse_since_minutes_duration() {
+        let before = now_us();
+        let result = parse_since("5m").unwrap();
+        let after = now_us();
+        let expected_low = before - 300_000_000;
+        let expected_high = after - 300_000_000;
+        assert!(
+            result >= expected_low.saturating_sub(1000) && result <= expected_high + 1000,
+            "result {result} not in expected range [{expected_low}, {expected_high}]"
+        );
+    }
+
+    #[test]
+    fn parse_since_invalid() {
+        assert!(parse_since("abc").is_err());
+        assert!(parse_since("5x").is_err());
+        assert!(parse_since("").is_err());
     }
 }
