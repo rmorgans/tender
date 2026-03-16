@@ -107,7 +107,11 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool) -> anyhow::Result<()> {
 
     // Build launch spec
     let mut launch_spec = LaunchSpec::new(cmd)?;
-    launch_spec.stdin_mode = if stdin { StdinMode::Pipe } else { StdinMode::None };
+    launch_spec.stdin_mode = if stdin {
+        StdinMode::Pipe
+    } else {
+        StdinMode::None
+    };
 
     // Create session directory
     let session = session::create(&root, &session_name)?;

@@ -105,8 +105,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     } else {
         cmd.stdin(Stdio::null());
     }
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // Make child its own process group leader so kill(-pgid) kills the whole tree
     unsafe {
