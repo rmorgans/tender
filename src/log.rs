@@ -45,10 +45,12 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
         }
 
         if let Some(n) = tail_n {
-            if ring.len() == n {
-                ring.pop_front();
+            if n > 0 {
+                if ring.len() == n {
+                    ring.pop_front();
+                }
+                ring.push_back(parsed);
             }
-            ring.push_back(parsed);
         } else {
             write_line(out, &parsed, query.raw)?;
             count += 1;
@@ -128,10 +130,12 @@ where
                     continue;
                 }
             }
-            if ring.len() == n {
-                ring.pop_front();
+            if n > 0 {
+                if ring.len() == n {
+                    ring.pop_front();
+                }
+                ring.push_back(parsed);
             }
-            ring.push_back(parsed);
         }
         for line in &ring {
             write_line(out, line, query.raw)?;
@@ -406,6 +410,20 @@ mod tests {
         assert!(output.contains("line four"));
         assert!(output.contains("line five with error word"));
         assert!(!output.contains("line one"));
+    }
+
+    #[test]
+    fn query_tail_0_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            tail: Some(0),
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 0);
+        assert!(buf.is_empty());
     }
 
     #[test]
