@@ -280,19 +280,12 @@ fn cmd_log(
     let log_path = session.path().join("output.log");
 
     if follow {
-        let session_path = session.path().to_owned();
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         follow_log(&log_path, &query, &mut out, || {
-            // Stop when session reaches terminal state
-            let meta_path = session_path.join("meta.json");
-            if let Ok(content) = std::fs::read_to_string(&meta_path) {
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let status = meta["status"].as_str().unwrap_or("");
-                    return status != "Starting" && status != "Running";
-                }
-            }
-            false
+            session::read_meta(&session)
+                .map(|m| m.status().is_terminal())
+                .unwrap_or(false)
         })?;
     } else {
         if !log_path.exists() {

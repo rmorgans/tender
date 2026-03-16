@@ -200,3 +200,70 @@ fn log_stderr_captured() {
         "expected stderr tag ' E ' in output: {stdout}"
     );
 }
+
+#[test]
+fn log_since_filters_by_time() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start a job that produces output, wait for it to finish
+    run_tender(
+        &root,
+        &[
+            "start",
+            "log-since",
+            "sh",
+            "-c",
+            "echo early; sleep 1; echo late",
+        ],
+    );
+    wait_terminal(&root, "log-since");
+
+    // --since 1s should only show lines from the last second.
+    // "late" was written ~0s ago, "early" was written ~1-2s ago.
+    // Use a generous window: --since 2s should get both, --since 0s should get none.
+    // The reliable test: full log has 2 lines, --since with a future epoch has 0.
+    let full = run_tender(&root, &["log", "log-since"]);
+    let full_stdout = String::from_utf8_lossy(&full.stdout);
+    assert!(
+        full_stdout.contains("early") && full_stdout.contains("late"),
+        "full log should have both lines: {full_stdout}"
+    );
+
+    // Use epoch far in the future — should return 0 lines
+    let output = run_tender(&root, &["log", "--since", "9999999999", "log-since"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "since far-future should return nothing: {stdout}"
+    );
+}
+
+#[test]
+fn log_follow_stops_on_terminal_session() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start a short-lived job
+    run_tender(&root, &["start", "log-follow", "echo", "follow me"]);
+    wait_terminal(&root, "log-follow");
+
+    // --follow --tail 10 on an already-terminal session should read existing output
+    // and exit (not block forever). Without --tail, follow seeks to EOF and shows
+    // only new lines — which for a terminal session is nothing.
+    let start = std::time::Instant::now();
+    let output = run_tender(&root, &["log", "--follow", "--tail", "10", "log-follow"]);
+    let elapsed = start.elapsed();
+
+    assert!(output.status.success());
+    assert!(
+        elapsed.as_secs() < 5,
+        "follow on terminal session blocked for {elapsed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("follow me"),
+        "follow should show existing output: {stdout}"
+    );
+}

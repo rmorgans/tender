@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread;
@@ -19,7 +20,12 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
 
-    let mut lines: Vec<LogLine> = Vec::new();
+    // When tail is set, use a ring buffer capped at N to avoid unbounded
+    // memory growth on long-running sessions. Without tail, stream directly.
+    let tail_n = query.tail;
+    let mut ring: VecDeque<LogLine> = VecDeque::with_capacity(tail_n.unwrap_or(0));
+    let mut count = 0usize;
+
     for raw_line in reader.lines() {
         let raw_line = raw_line?;
         let Some(parsed) = LogLine::parse(&raw_line) else {
@@ -38,24 +44,32 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
             }
         }
 
-        lines.push(parsed);
-    }
-
-    if let Some(n) = query.tail {
-        let start = lines.len().saturating_sub(n);
-        lines = lines.split_off(start);
-    }
-
-    let count = lines.len();
-    for line in &lines {
-        if query.raw {
-            writeln!(out, "{}", line.format_raw())?;
+        if let Some(n) = tail_n {
+            if ring.len() == n {
+                ring.pop_front();
+            }
+            ring.push_back(parsed);
         } else {
-            writeln!(out, "{}", line.format_prefixed())?;
+            write_line(out, &parsed, query.raw)?;
+            count += 1;
         }
     }
 
+    // Flush the ring buffer (tail mode)
+    for line in &ring {
+        write_line(out, line, query.raw)?;
+        count += 1;
+    }
+
     Ok(count)
+}
+
+fn write_line(out: &mut dyn Write, line: &LogLine, raw: bool) -> io::Result<()> {
+    if raw {
+        writeln!(out, "{}", line.format_raw())
+    } else {
+        writeln!(out, "{}", line.format_prefixed())
+    }
 }
 
 /// Follow a log file, writing new lines as they appear.
@@ -89,10 +103,10 @@ where
         reader.seek(SeekFrom::End(0))?;
     }
 
-    // If tail is set, we need to read all existing lines, apply filters,
-    // then only keep the last N before entering the live loop.
+    // If tail is set, read existing lines into a ring buffer (O(N) memory),
+    // apply filters, flush the last N, then enter the live loop.
     if let Some(n) = query.tail {
-        let mut backlog: Vec<LogLine> = Vec::new();
+        let mut ring: VecDeque<LogLine> = VecDeque::with_capacity(n);
         let mut buf = String::new();
         loop {
             buf.clear();
@@ -114,15 +128,13 @@ where
                     continue;
                 }
             }
-            backlog.push(parsed);
-        }
-        let start = backlog.len().saturating_sub(n);
-        for line in &backlog[start..] {
-            if query.raw {
-                writeln!(out, "{}", line.format_raw())?;
-            } else {
-                writeln!(out, "{}", line.format_prefixed())?;
+            if ring.len() == n {
+                ring.pop_front();
             }
+            ring.push_back(parsed);
+        }
+        for line in &ring {
+            write_line(out, line, query.raw)?;
             out.flush()?;
         }
     }
@@ -157,11 +169,7 @@ where
             }
         }
 
-        if query.raw {
-            writeln!(out, "{}", parsed.format_raw())?;
-        } else {
-            writeln!(out, "{}", parsed.format_prefixed())?;
-        }
+        write_line(out, &parsed, query.raw)?;
         out.flush()?;
     }
 }
