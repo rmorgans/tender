@@ -1,0 +1,169 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+use std::num::NonZeroU32;
+use thiserror::Error;
+
+/// Globally unique execution identity. UUID v7 (time-sortable).
+/// The authoritative identifier for a run — all lifecycle decisions use this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RunId(uuid::Uuid);
+
+impl Default for RunId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+
+    #[cfg(test)]
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for RunId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let uuid = uuid::Uuid::deserialize(deserializer)?;
+        if uuid.get_version_num() != 7 {
+            return Err(serde::de::Error::custom(format!(
+                "expected UUID v7, got v{}",
+                uuid.get_version_num()
+            )));
+        }
+        Ok(Self(uuid))
+    }
+}
+
+/// Monotonic counter per session name. Starts at 1, never zero.
+/// Human-readable, useful for debugging. NOT used for lifecycle decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Generation(u64);
+
+impl Generation {
+    pub fn first() -> Self {
+        Self(1)
+    }
+
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Generation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for Generation {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Generation {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u64::deserialize(deserializer)?;
+        if value == 0 {
+            return Err(serde::de::Error::custom("generation cannot be zero"));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Validated session name. Non-empty, no slashes, no dots, no whitespace,
+/// no underscore prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionName(String);
+
+#[derive(Debug, Error)]
+pub enum SessionNameError {
+    #[error("session name cannot be empty")]
+    Empty,
+    #[error("session name cannot contain '/'")]
+    ContainsSlash,
+    #[error("session name cannot contain '.'")]
+    ContainsDot,
+    #[error("session name cannot contain whitespace")]
+    ContainsWhitespace,
+    #[error("session name cannot start with '_'")]
+    StartsWithUnderscore,
+}
+
+impl SessionName {
+    pub fn new(name: &str) -> Result<Self, SessionNameError> {
+        Self::validate(name)?;
+        Ok(Self(name.to_owned()))
+    }
+
+    fn validate(name: &str) -> Result<(), SessionNameError> {
+        if name.is_empty() {
+            return Err(SessionNameError::Empty);
+        }
+        if name.contains('/') {
+            return Err(SessionNameError::ContainsSlash);
+        }
+        if name.contains('.') {
+            return Err(SessionNameError::ContainsDot);
+        }
+        if name.chars().any(|c| c.is_whitespace()) {
+            return Err(SessionNameError::ContainsWhitespace);
+        }
+        if name.starts_with('_') {
+            return Err(SessionNameError::StartsWithUnderscore);
+        }
+        Ok(())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for SessionName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::validate(&s).map_err(serde::de::Error::custom)?;
+        Ok(Self(s))
+    }
+}
+
+/// Identity of a running process. PID alone is unsafe due to reuse —
+/// always pair with birth time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub pid: NonZeroU32,
+    pub start_time_ns: u64,
+}
