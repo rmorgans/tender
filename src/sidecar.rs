@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::ids::{Generation, RunId, SessionName};
 use crate::model::meta::Meta;
-use crate::model::spec::LaunchSpec;
+use crate::model::spec::{LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
 use crate::platform::unix as platform;
 use crate::session::{self, LockGuard, SessionDir, SessionRoot};
@@ -100,8 +100,12 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
+    if meta.launch_spec().stdin_mode == StdinMode::Pipe {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     // Make child its own process group leader so kill(-pgid) kills the whole tree
@@ -148,11 +152,32 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     meta.transition_running(child_identity)?;
     session::write_meta_atomic(&session, &meta)?;
 
+    // Create stdin FIFO before signaling readiness — when `tender start --stdin`
+    // returns, the FIFO must exist with a reader waiting.
+    if meta.launch_spec().stdin_mode == StdinMode::Pipe {
+        let fifo_path = session_dir.join("stdin.pipe");
+        platform::mkfifo(&fifo_path)?;
+
+        // Take child stdin — forward fifo data into it
+        let child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
+
+        // Spawn forwarding thread (detached — not joined).
+        // Thread exits when child stdin breaks or fifo is removed.
+        let fifo_clone = fifo_path.clone();
+        std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin));
+    }
+
     // Send meta snapshot over pipe — CLI reads this directly, no disk race.
     signal_meta_snapshot(ready, &meta)?;
 
     // Capture output and supervise
     let exit_reason = supervise(&session, &mut child)?;
+
+    // Clean up stdin FIFO — forwarding thread will exit when open fails
+    let _ = std::fs::remove_file(session_dir.join("stdin.pipe"));
 
     // Clean up breadcrumb — no longer needed, meta has the child identity
     let _ = std::fs::remove_file(session_dir.join("child_pid"));
@@ -162,6 +187,31 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     session::write_meta_atomic(&session, &meta)?;
 
     Ok(())
+}
+
+/// Forward data from the stdin FIFO to the child's stdin pipe.
+/// Re-opens the FIFO after each writer disconnects to support multiple pushes.
+/// Exits when: child stdin write fails (child exited) or FIFO open fails (removed).
+fn forward_stdin(fifo_path: PathBuf, mut child_stdin: std::process::ChildStdin) {
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    loop {
+        // Open blocks until a writer connects
+        let mut fifo = match File::open(&fifo_path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        loop {
+            let n = match fifo.read(&mut buf) {
+                Ok(0) => break, // writer disconnected
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            if child_stdin.write_all(&buf[..n]).is_err() {
+                return; // child stdin closed
+            }
+        }
+    }
 }
 
 /// Send meta JSON over the readiness pipe. Consumes the fd.
