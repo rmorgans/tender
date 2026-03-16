@@ -73,16 +73,22 @@ impl SessionDir {
 }
 
 /// Create a new session directory. Fails if it already exists.
+/// Uses atomic mkdir to avoid TOCTOU race between exists() and create().
 pub fn create(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, SessionError> {
     let path = root.path().join(name.as_str());
-    if path.exists() {
-        return Err(SessionError::AlreadyExists(name.to_string()));
+    // Ensure parent exists
+    fs::create_dir_all(root.path())?;
+    // Atomic: create_dir fails if already exists, no race window
+    match fs::create_dir(&path) {
+        Ok(()) => Ok(SessionDir {
+            path,
+            name: name.clone(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(SessionError::AlreadyExists(name.to_string()))
+        }
+        Err(e) => Err(SessionError::Io(e)),
     }
-    fs::create_dir_all(&path)?;
-    Ok(SessionDir {
-        path,
-        name: name.clone(),
-    })
 }
 
 /// Open an existing session directory. Returns None if it doesn't exist.

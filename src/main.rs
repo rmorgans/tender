@@ -38,7 +38,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { name, cmd } => cmd_start(&name, &cmd),
+        Commands::Start { name, cmd } => cmd_start(&name, cmd),
         Commands::Status { name } => cmd_status(&name),
         Commands::List => cmd_list(),
         Commands::Sidecar { session_dir } => cmd_sidecar(session_dir),
@@ -50,7 +50,7 @@ fn main() {
     }
 }
 
-fn cmd_start(name: &str, cmd: &[String]) -> anyhow::Result<()> {
+fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
     use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
@@ -60,7 +60,7 @@ fn cmd_start(name: &str, cmd: &[String]) -> anyhow::Result<()> {
     let root = SessionRoot::default_path()?;
 
     // Build launch spec
-    let mut launch_spec = LaunchSpec::new(cmd.to_vec())?;
+    let mut launch_spec = LaunchSpec::new(cmd)?;
     launch_spec.stdin_mode = StdinMode::None;
 
     // Create session directory

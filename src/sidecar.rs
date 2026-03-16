@@ -74,13 +74,13 @@ fn run_inner(session_dir: &Path, ready_fd: RawFd) -> anyhow::Result<()> {
         generation,
         launch_spec,
         sidecar_identity,
-        now_iso8601(),
+        now_epoch_secs(),
     );
 
     // Slice 4+: spawn child here, transition to Running, then supervise.
     // For now, no child spawn — write SpawnFailed as the truthful terminal state.
     // The design requires: start only returns after durable Running or SpawnFailed.
-    meta.transition_spawn_failed(now_iso8601())?;
+    meta.transition_spawn_failed(now_epoch_secs())?;
     session::write_meta_atomic(&session, &meta)?;
 
     // Signal readiness — CLI is blocking on this.
@@ -91,7 +91,7 @@ fn run_inner(session_dir: &Path, ready_fd: RawFd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn now_iso8601() -> String {
+fn now_epoch_secs() -> String {
     use std::time::SystemTime;
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

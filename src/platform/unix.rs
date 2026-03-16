@@ -9,19 +9,39 @@ use std::process::Command;
 use crate::model::ids::ProcessIdentity;
 
 /// Create a pipe. Returns (read_fd, write_fd) as owned Files.
-/// Both fds have close-on-exec set by default.
+/// Both fds have close-on-exec set atomically where possible.
 pub fn pipe() -> io::Result<(File, File)> {
     let mut fds = [0i32; 2];
-    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // Set close-on-exec on both ends
-    for &fd in &fds {
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+
+    #[cfg(target_os = "linux")]
+    {
+        // Atomic CLOEXEC — no window for fd leak across fork
+        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
         }
     }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Set close-on-exec on both ends. Check return values.
+        for &fd in &fds {
+            let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            if ret == -1 {
+                let err = io::Error::last_os_error();
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(err);
+            }
+        }
+    }
+
     let read = unsafe { File::from_raw_fd(fds[0]) };
     let write = unsafe { File::from_raw_fd(fds[1]) };
     Ok((read, write))
