@@ -114,7 +114,11 @@ pub fn write_ready_signal(fd_num: RawFd, message: &str) -> io::Result<()> {
 
 /// Get the ProcessIdentity of the current process.
 pub fn self_identity() -> io::Result<ProcessIdentity> {
-    let pid = std::process::id();
+    process_identity(std::process::id())
+}
+
+/// Get the ProcessIdentity of a process by PID.
+pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     let pid = NonZeroU32::new(pid).ok_or_else(|| io::Error::other("pid is zero"))?;
     let start_time_ns = process_start_time(pid.get())?;
     Ok(ProcessIdentity { pid, start_time_ns })

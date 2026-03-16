@@ -43,13 +43,12 @@ fn start_creates_session_and_returns_json() {
 
     assert_eq!(meta["session"], "test-job");
     assert_eq!(meta["schema_version"], 1);
-    // Sidecar writes Starting, signals ready, then immediately transitions
-    // to SpawnFailed (no child spawn implemented in Slice 3).
-    // By the time CLI reads meta.json, sidecar has already exited.
-    assert_eq!(meta["status"], "SpawnFailed");
+    // Sidecar spawns child and signals Running
+    assert_eq!(meta["status"], "Running");
     assert!(meta["run_id"].is_string());
     assert!(meta["sidecar"]["pid"].is_number());
     assert!(meta["sidecar"]["start_time_ns"].is_number());
+    assert!(meta["child"]["pid"].is_number());
     assert_eq!(meta["launch_spec"]["argv"][0], "echo");
     assert_eq!(meta["launch_spec"]["argv"][1], "hello");
 }
@@ -156,8 +155,9 @@ fn lock_released_after_sidecar_exits() {
     let output = run_tender(&root, &["start", "lock-test", "echo", "hi"]);
     assert!(output.status.success());
 
-    // Sidecar should have exited and released the lock.
-    // We can verify by trying to acquire it ourselves.
+    // Wait for sidecar to finish supervising the child and exit
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     let lock_path = root.path().join(".tender/sessions/lock-test/lock");
 
     if lock_path.exists() {
