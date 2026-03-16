@@ -70,9 +70,14 @@ fn main() {
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
         Commands::List => cmd_list(),
-        Commands::Log { name, tail, follow, grep, since, raw } => {
-            cmd_log(&name, tail, follow, grep, since, raw)
-        }
+        Commands::Log {
+            name,
+            tail,
+            follow,
+            grep,
+            since,
+            raw,
+        } => cmd_log(&name, tail, follow, grep, since, raw),
         Commands::Sidecar { session_dir } => cmd_sidecar(session_dir),
     };
 
@@ -250,7 +255,7 @@ fn cmd_log(
     since: Option<String>,
     raw: bool,
 ) -> anyhow::Result<()> {
-    use tender::log::{follow_log, parse_since, query_log, LogQuery};
+    use tender::log::{LogQuery, follow_log, parse_since, query_log};
     use tender::model::ids::SessionName;
     use tender::session::{self, SessionRoot};
 

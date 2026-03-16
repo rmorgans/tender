@@ -61,7 +61,13 @@ fn log_tail() {
 
     run_tender(
         &root,
-        &["start", "log-tail", "sh", "-c", "echo line1; echo line2; echo line3"],
+        &[
+            "start",
+            "log-tail",
+            "sh",
+            "-c",
+            "echo line1; echo line2; echo line3",
+        ],
     );
     wait_terminal(&root, "log-tail");
 
@@ -85,14 +91,23 @@ fn log_grep() {
 
     run_tender(
         &root,
-        &["start", "log-grep", "sh", "-c", "echo good; echo bad; echo good again"],
+        &[
+            "start",
+            "log-grep",
+            "sh",
+            "-c",
+            "echo good; echo bad; echo good again",
+        ],
     );
     wait_terminal(&root, "log-grep");
 
     let output = run_tender(&root, &["log", "--grep", "good", "log-grep"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("good"), "expected 'good' in stdout: {stdout}");
+    assert!(
+        stdout.contains("good"),
+        "expected 'good' in stdout: {stdout}"
+    );
     assert!(
         stdout.contains("good again"),
         "expected 'good again' in stdout: {stdout}"
@@ -150,7 +165,11 @@ fn log_no_output_file_returns_empty() {
     // Start a binary that doesn't exist — SpawnFailed, no output.log created
     let start_out = run_tender(&root, &["start", "nolog-test", "/nonexistent/binary"]);
     // start exits 2 for SpawnFailed, that's expected
-    assert_eq!(start_out.status.code(), Some(2), "expected exit code 2 for SpawnFailed");
+    assert_eq!(
+        start_out.status.code(),
+        Some(2),
+        "expected exit code 2 for SpawnFailed"
+    );
 
     wait_terminal(&root, "nolog-test");
 
@@ -160,10 +179,7 @@ fn log_no_output_file_returns_empty() {
         "log should succeed for session with no output.log"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.is_empty(),
-        "expected empty stdout, got: {stdout}"
-    );
+    assert!(stdout.is_empty(), "expected empty stdout, got: {stdout}");
 }
 
 #[test]
@@ -171,19 +187,13 @@ fn log_stderr_captured() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
-    run_tender(
-        &root,
-        &["start", "log-stderr", "sh", "-c", "echo err >&2"],
-    );
+    run_tender(&root, &["start", "log-stderr", "sh", "-c", "echo err >&2"]);
     wait_terminal(&root, "log-stderr");
 
     let output = run_tender(&root, &["log", "log-stderr"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("err"),
-        "expected 'err' in stdout: {stdout}"
-    );
+    assert!(stdout.contains("err"), "expected 'err' in stdout: {stdout}");
     // Verify it has the E tag (stderr marker)
     assert!(
         stdout.contains(" E "),

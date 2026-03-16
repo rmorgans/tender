@@ -1,5 +1,8 @@
 use std::process::Command;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn tender_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_tender"))
@@ -23,6 +26,7 @@ fn run_tender_status(output: &std::process::Output) -> (i32, String, String) {
 
 #[test]
 fn start_returns_promptly_not_blocked_by_child() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
     let start = std::time::Instant::now();
@@ -43,6 +47,7 @@ fn start_returns_promptly_not_blocked_by_child() {
 
 #[test]
 fn start_creates_session_and_returns_json() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["start", "test-job", "echo", "hello"]);
     let (code, stdout, stderr) = run_tender_status(&output);
@@ -66,6 +71,7 @@ fn start_creates_session_and_returns_json() {
 
 #[test]
 fn start_writes_durable_meta_json() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["start", "durable-test", "echo", "hi"]);
     assert!(output.status.success());
@@ -81,6 +87,7 @@ fn start_writes_durable_meta_json() {
 
 #[test]
 fn start_same_name_after_completed_fails_already_exists() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
     // First start succeeds
@@ -99,6 +106,7 @@ fn start_same_name_after_completed_fails_already_exists() {
 
 #[test]
 fn status_reads_session() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
     // Create a session
@@ -116,6 +124,7 @@ fn status_reads_session() {
 
 #[test]
 fn status_nonexistent_fails() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["status", "nope"]);
     assert!(!output.status.success());
@@ -123,6 +132,7 @@ fn status_nonexistent_fails() {
 
 #[test]
 fn list_shows_sessions() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
     // Empty list
@@ -146,6 +156,7 @@ fn list_shows_sessions() {
 
 #[test]
 fn launch_spec_json_cleaned_up() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["start", "cleanup-test", "echo", "hi"]);
     assert!(output.status.success());
@@ -162,6 +173,7 @@ fn launch_spec_json_cleaned_up() {
 
 #[test]
 fn lock_released_after_sidecar_exits() {
+    let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["start", "lock-test", "echo", "hi"]);
     assert!(output.status.success());

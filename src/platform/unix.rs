@@ -325,12 +325,14 @@ mod tests {
         // Spawn a child in a new session (setsid), then probe from parent.
         // On macOS, proc_pidinfo returns EPERM for processes in other sessions.
         // On Linux, /proc/<pid>/stat is world-readable so this returns AliveVerified.
-        use std::process::{Command, Stdio};
         use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
 
         let mut cmd = Command::new("sleep");
         cmd.arg("10");
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         unsafe {
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -339,7 +341,7 @@ mod tests {
                 Ok(())
             });
         }
-        let child = cmd.spawn().unwrap();
+        let mut child = cmd.spawn().unwrap();
         let child_pid = child.id();
 
         // Small delay for process to be queryable
@@ -357,7 +359,8 @@ mod tests {
                     "expected Inaccessible or Missing for cross-session child, got {status:?}"
                 );
                 // Clean up
-                unsafe { libc::kill(child_pid as i32, libc::SIGKILL); }
+                let _ = child.kill();
+                let _ = child.wait();
                 return;
             }
         };
@@ -372,6 +375,7 @@ mod tests {
         );
 
         // Clean up
-        unsafe { libc::kill(child_pid as i32, libc::SIGKILL); }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

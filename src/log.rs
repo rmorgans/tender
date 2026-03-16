@@ -4,22 +4,12 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Query parameters for filtering log output.
+#[derive(Default)]
 pub struct LogQuery {
     pub tail: Option<usize>,
     pub grep: Option<String>,
     pub since_us: Option<u64>,
     pub raw: bool,
-}
-
-impl Default for LogQuery {
-    fn default() -> Self {
-        Self {
-            tail: None,
-            grep: None,
-            since_us: None,
-            raw: false,
-        }
-    }
 }
 
 /// Read and filter a log file, writing matching lines to `out`.
@@ -270,9 +260,7 @@ impl LogLine {
         let content = &rest[2..];
 
         Some(LogLine {
-            timestamp_us: secs
-                .checked_mul(1_000_000)?
-                .checked_add(micros)?,
+            timestamp_us: secs.checked_mul(1_000_000)?.checked_add(micros)?,
             tag,
             content: content.to_owned(),
         })
@@ -295,8 +283,8 @@ impl LogLine {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn parse_stdout_line() {

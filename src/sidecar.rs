@@ -87,7 +87,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     if let Some(fd) = ready.as_ref() {
         let ret = unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         if ret == -1 {
-            anyhow::bail!("failed to set CLOEXEC on ready fd: {}", std::io::Error::last_os_error());
+            anyhow::bail!(
+                "failed to set CLOEXEC on ready fd: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 
