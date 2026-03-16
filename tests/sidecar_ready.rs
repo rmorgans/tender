@@ -2,16 +2,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn tender_bin() -> std::path::PathBuf {
-    // Build first, then return path to binary
-    let status = Command::new("cargo")
-        .args(["build", "--quiet"])
-        .status()
-        .expect("cargo build failed");
-    assert!(status.success(), "cargo build failed");
-
-    let mut path = std::env::current_dir().unwrap();
-    path.push("target/debug/tender");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_tender"))
 }
 
 fn run_tender(root: &TempDir, args: &[&str]) -> std::process::Output {

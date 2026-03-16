@@ -76,7 +76,9 @@ pub fn spawn_sidecar(
     unsafe {
         cmd.pre_exec(move || {
             // Clear close-on-exec so the ready fd survives exec
-            libc::fcntl(write_fd_raw, libc::F_SETFD, 0);
+            if libc::fcntl(write_fd_raw, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
             // Detach into new session
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());

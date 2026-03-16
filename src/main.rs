@@ -98,15 +98,20 @@ fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
 
     if signal.starts_with("ERROR:") {
         let err_msg = signal.trim_start_matches("ERROR:").trim();
-        // Sidecar reported an error — clean up
         let _ = std::fs::remove_dir_all(session.path());
         anyhow::bail!("sidecar failed: {err_msg}");
     }
 
-    // Read meta and print JSON
-    let meta = session::read_meta(&session)?;
-    let json = serde_json::to_string_pretty(&meta)?;
-    println!("{json}");
+    // Sidecar sends "OK:<json>\n" — parse the meta snapshot directly from pipe.
+    // No disk re-read, no race with subsequent state transitions.
+    let meta_json = signal
+        .strip_prefix("OK:")
+        .ok_or_else(|| anyhow::anyhow!("unexpected readiness signal: {signal}"))?
+        .trim();
+
+    // Pretty-print for human output (re-parse to format)
+    let meta: serde_json::Value = serde_json::from_str(meta_json)?;
+    println!("{}", serde_json::to_string_pretty(&meta)?);
 
     Ok(())
 }

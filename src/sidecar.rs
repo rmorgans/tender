@@ -19,24 +19,30 @@ use crate::session::{self, LockGuard, SessionDir, SessionRoot};
 /// Contract:
 /// - Acquire session lock
 /// - Read launch spec from session dir
-/// - Spawn child process
+/// - Spawn child process (write child_pid breadcrumb immediately)
 /// - Write meta.json with Running state (or SpawnFailed)
-/// - Signal readiness via ready_fd
+/// - Send meta JSON snapshot over ready pipe (no race with disk state)
 /// - Capture child stdout/stderr to output.log with timestamps
 /// - Write terminal state when child exits
 /// - Release lock and exit
 pub fn run(session_dir: PathBuf, ready_fd: RawFd) -> anyhow::Result<()> {
-    match run_inner(&session_dir, ready_fd) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            // Try to signal the error to the waiting CLI.
-            let _ = platform::write_ready_signal(ready_fd, &format!("ERROR:{e}\n"));
-            Err(e)
+    // Wrap the fd so we can track whether it's been consumed.
+    // write_ready_signal takes ownership — Option prevents double-close.
+    let mut ready = Some(ready_fd);
+
+    let result = run_inner(&session_dir, &mut ready);
+
+    if let Err(ref e) = result {
+        // Only signal error if the fd hasn't been consumed yet
+        if let Some(fd) = ready.take() {
+            let _ = platform::write_ready_signal(fd, &format!("ERROR:{e}\n"));
         }
     }
+
+    result
 }
 
-fn run_inner(session_dir: &Path, ready_fd: RawFd) -> anyhow::Result<()> {
+fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()> {
     let sidecar_identity = platform::self_identity()?;
 
     let session_name_str = session_dir
@@ -85,27 +91,31 @@ fn run_inner(session_dir: &Path, ready_fd: RawFd) -> anyhow::Result<()> {
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            // Child failed to spawn — write SpawnFailed, signal, exit
+        Err(_) => {
             meta.transition_spawn_failed(now_epoch_secs())?;
             session::write_meta_atomic(&session, &meta)?;
-            platform::write_ready_signal(ready_fd, "OK\n")?;
-            return Err(anyhow::anyhow!("child spawn failed: {e}"));
+            signal_meta_snapshot(ready, &meta)?;
+            return Ok(()); // Not an error — SpawnFailed is a valid terminal state
         }
     };
 
-    // Get child identity
+    // Write child PID breadcrumb immediately — before anything else.
+    // If sidecar crashes after spawn but before meta write, the reconciler
+    // can find and kill the orphaned child using this file.
     let child_pid = child.id();
+    let _ = std::fs::write(session_dir.join("child_pid"), child_pid.to_string());
+
+    // Get child identity
     let child_identity = match platform::process_identity(child_pid) {
         Ok(id) => id,
-        Err(e) => {
-            // Can't identify child — kill it, write SpawnFailed
+        Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = std::fs::remove_file(session_dir.join("child_pid"));
             meta.transition_spawn_failed(now_epoch_secs())?;
             session::write_meta_atomic(&session, &meta)?;
-            platform::write_ready_signal(ready_fd, "OK\n")?;
-            return Err(anyhow::anyhow!("failed to get child identity: {e}"));
+            signal_meta_snapshot(ready, &meta)?;
+            return Ok(());
         }
     };
 
@@ -113,16 +123,30 @@ fn run_inner(session_dir: &Path, ready_fd: RawFd) -> anyhow::Result<()> {
     meta.transition_running(child_identity)?;
     session::write_meta_atomic(&session, &meta)?;
 
-    // Signal readiness — CLI reads Running state
-    platform::write_ready_signal(ready_fd, "OK\n")?;
+    // Send meta snapshot over pipe — CLI reads this directly, no disk race.
+    signal_meta_snapshot(ready, &meta)?;
 
     // Capture output and supervise
     let exit_reason = supervise(&session, &mut child)?;
+
+    // Clean up breadcrumb — no longer needed, meta has the child identity
+    let _ = std::fs::remove_file(session_dir.join("child_pid"));
 
     // Write terminal state
     meta.transition_exited(exit_reason, now_epoch_secs())?;
     session::write_meta_atomic(&session, &meta)?;
 
+    Ok(())
+}
+
+/// Send meta JSON over the readiness pipe. Consumes the fd.
+/// The CLI reads this snapshot directly — no race with subsequent disk writes.
+fn signal_meta_snapshot(ready: &mut Option<RawFd>, meta: &Meta) -> anyhow::Result<()> {
+    let fd = ready
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("readiness pipe already consumed"))?;
+    let json = serde_json::to_string(meta)?;
+    platform::write_ready_signal(fd, &format!("OK:{json}\n"))?;
     Ok(())
 }
 
@@ -136,58 +160,63 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
         .open(&log_path)?;
     let log = Mutex::new(log_file);
 
-    // Take ownership of child's stdout/stderr pipes
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    // Spawn reader threads for concurrent capture without deadlock
+    // Spawn reader threads. Capture errors rather than silently discarding.
     let log_ref = &log;
-    std::thread::scope(|scope| {
+    let (stdout_result, stderr_result) = std::thread::scope(|scope| {
         let stdout_handle = scope.spawn(move || capture_stream(stdout, 'O', log_ref));
         let stderr_handle = scope.spawn(move || capture_stream(stderr, 'E', log_ref));
 
-        // Wait for both readers to finish (pipes close when child exits)
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
+        let stdout_r = stdout_handle
+            .join()
+            .unwrap_or_else(|_| Err("stdout capture thread panicked".into()));
+        let stderr_r = stderr_handle
+            .join()
+            .unwrap_or_else(|_| Err("stderr capture thread panicked".into()));
+        (stdout_r, stderr_r)
     });
 
-    // Wait for child to fully exit and get status
+    // Log capture failures but don't fail the supervision —
+    // the child's exit status is still meaningful even if output was truncated.
+    if let Err(e) = stdout_result {
+        eprintln!("tender: stdout capture error: {e}");
+    }
+    if let Err(e) = stderr_result {
+        eprintln!("tender: stderr capture error: {e}");
+    }
+
     let status = child.wait()?;
 
     let reason = match status.code() {
         Some(0) => ExitReason::ExitedOk,
         Some(code) => {
-            // code is non-zero — safe to unwrap NonZeroI32
-            let code = NonZeroI32::new(code).unwrap_or_else(|| {
-                // Shouldn't happen since we checked Some(0) above, but be safe
-                NonZeroI32::new(1).unwrap()
-            });
+            let code = NonZeroI32::new(code).expect("already excluded zero");
             ExitReason::ExitedError { code }
         }
-        None => {
-            // Killed by signal
-            ExitReason::Killed
-        }
+        None => ExitReason::Killed,
     };
 
     Ok(reason)
 }
 
 /// Read lines from a stream and write to the shared log file.
-/// Each line is prefixed with `<epoch_us> <tag> `.
-fn capture_stream<R: std::io::Read>(stream: R, tag: char, log: &Mutex<File>) {
+/// Returns an error if log writing fails persistently.
+fn capture_stream<R: std::io::Read>(stream: R, tag: char, log: &Mutex<File>) -> Result<(), String> {
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break, // pipe closed or read error
+            Err(_) => break, // pipe closed
         };
         let ts = timestamp_micros();
         let formatted = format!("{ts} {tag} {line}\n");
-        if let Ok(mut f) = log.lock() {
-            let _ = f.write_all(formatted.as_bytes());
-        }
+        let mut f = log.lock().map_err(|e| format!("log mutex poisoned: {e}"))?;
+        f.write_all(formatted.as_bytes())
+            .map_err(|e| format!("log write failed: {e}"))?;
     }
+    Ok(())
 }
 
 fn timestamp_micros() -> String {
