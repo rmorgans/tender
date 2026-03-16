@@ -8,6 +8,20 @@ use std::process::Command;
 
 use crate::model::ids::ProcessIdentity;
 
+/// Create a named pipe (FIFO) at `path` with mode 0600.
+pub fn mkfifo(path: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+    let ret = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Create a pipe. Returns (read_fd, write_fd) as owned Files.
 /// Both fds have close-on-exec set atomically where possible.
 pub fn pipe() -> io::Result<(File, File)> {
