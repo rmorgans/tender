@@ -19,6 +19,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Send stdin to a running session's child process
+    Push {
+        /// Session name
+        name: String,
+    },
     /// Show session status
     Status {
         /// Session name
@@ -67,6 +72,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::Start { name, cmd } => cmd_start(&name, cmd),
+        Commands::Push { name } => cmd_push(&name),
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
         Commands::List => cmd_list(),
@@ -157,6 +163,42 @@ fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
     if meta.get("status").and_then(|s| s.as_str()) == Some("SpawnFailed") {
         std::process::exit(2); // exit code 2 = process error per contract
     }
+
+    Ok(())
+}
+
+fn cmd_push(name: &str) -> anyhow::Result<()> {
+    use tender::model::ids::SessionName;
+    use tender::model::spec::StdinMode;
+    use tender::model::state::RunStatus;
+    use tender::session::{self, SessionRoot};
+
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    let session = session::open(&root, &session_name)?
+        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+
+    let meta = session::read_meta(&session)?;
+
+    // Push requires Running state explicitly
+    if !matches!(meta.status(), RunStatus::Running { .. }) {
+        anyhow::bail!("session is not running");
+    }
+
+    if meta.launch_spec().stdin_mode != StdinMode::Pipe {
+        anyhow::bail!("session was not started with --stdin");
+    }
+
+    let fifo_path = session.path().join("stdin.pipe");
+
+    let mut fifo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo_path)
+        .map_err(|e| anyhow::anyhow!("failed to open stdin pipe: {e}"))?;
+
+    let mut stdin = std::io::stdin().lock();
+    std::io::copy(&mut stdin, &mut fifo)?;
 
     Ok(())
 }
