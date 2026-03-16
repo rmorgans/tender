@@ -34,6 +34,26 @@ enum Commands {
     },
     /// List all sessions
     List,
+    /// Query session output log
+    Log {
+        /// Session name
+        name: String,
+        /// Show last N lines
+        #[arg(short = 'n', long)]
+        tail: Option<usize>,
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Filter lines containing PATTERN
+        #[arg(short, long)]
+        grep: Option<String>,
+        /// Show lines since TIME (epoch seconds or duration: 30s, 5m, 2h, 1d)
+        #[arg(short, long)]
+        since: Option<String>,
+        /// Strip timestamp and stream tag prefixes
+        #[arg(short, long)]
+        raw: bool,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
@@ -50,6 +70,9 @@ fn main() {
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
         Commands::List => cmd_list(),
+        Commands::Log { name, tail, follow, grep, since, raw } => {
+            cmd_log(&name, tail, follow, grep, since, raw)
+        }
         Commands::Sidecar { session_dir } => cmd_sidecar(session_dir),
     };
 
@@ -215,6 +238,65 @@ fn cmd_list() -> anyhow::Result<()> {
     let names: Vec<&str> = sessions.iter().map(|s| s.as_str()).collect();
     let json = serde_json::to_string_pretty(&names)?;
     println!("{json}");
+
+    Ok(())
+}
+
+fn cmd_log(
+    name: &str,
+    tail: Option<usize>,
+    follow: bool,
+    grep: Option<String>,
+    since: Option<String>,
+    raw: bool,
+) -> anyhow::Result<()> {
+    use tender::log::{follow_log, parse_since, query_log, LogQuery};
+    use tender::model::ids::SessionName;
+    use tender::session::{self, SessionRoot};
+
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    let session = session::open(&root, &session_name)?
+        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+
+    let since_us = match since {
+        Some(ref v) => Some(parse_since(v).map_err(|e| anyhow::anyhow!("invalid --since: {e}"))?),
+        None => None,
+    };
+
+    let query = LogQuery {
+        tail,
+        grep,
+        since_us,
+        raw,
+    };
+
+    let log_path = session.path().join("output.log");
+
+    if follow {
+        let session_path = session.path().to_owned();
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        follow_log(&log_path, &query, &mut out, || {
+            // Stop when session reaches terminal state
+            let meta_path = session_path.join("meta.json");
+            if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let status = meta["status"].as_str().unwrap_or("");
+                    return status != "Starting" && status != "Running";
+                }
+            }
+            false
+        })?;
+    } else {
+        if !log_path.exists() {
+            return Ok(());
+        }
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        query_log(&log_path, &query, &mut out)?;
+    }
 
     Ok(())
 }
