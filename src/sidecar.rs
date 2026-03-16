@@ -147,12 +147,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     };
 
-    // Transition to Running
-    meta.transition_running(child_identity)?;
-    session::write_meta_atomic(&session, &meta)?;
-
-    // Create stdin FIFO before signaling readiness — when `tender start --stdin`
-    // returns, the FIFO must exist with a reader waiting.
+    // Create stdin FIFO BEFORE transitioning to Running or signaling readiness.
+    // Running must mean "fully externally usable" — concurrent status/push clients
+    // can observe Running in meta.json, so stdin.pipe must exist before that write.
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
         let fifo_path = session_dir.join("stdin.pipe");
         platform::mkfifo(&fifo_path)?;
@@ -168,6 +165,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         let fifo_clone = fifo_path.clone();
         std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin));
     }
+
+    // Transition to Running — stdin FIFO is ready, state is now externally consistent
+    meta.transition_running(child_identity)?;
+    session::write_meta_atomic(&session, &meta)?;
 
     // Send meta snapshot over pipe — CLI reads this directly, no disk race.
     signal_meta_snapshot(ready, &meta)?;
