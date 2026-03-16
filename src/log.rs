@@ -1,5 +1,7 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 /// Query parameters for filtering log output.
 pub struct LogQuery {
@@ -64,6 +66,114 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
     }
 
     Ok(count)
+}
+
+/// Follow a log file, writing new lines as they appear.
+///
+/// Waits for the file to exist, then tails it. Applies grep/since/raw
+/// filters from the query. If neither `tail` nor `since_us` is set,
+/// seeks to end of file (only showing new lines). Polls every 100ms
+/// and returns `Ok(())` when `should_stop` returns true.
+pub fn follow_log<F>(
+    path: &Path,
+    query: &LogQuery,
+    out: &mut dyn Write,
+    should_stop: F,
+) -> io::Result<()>
+where
+    F: Fn() -> bool,
+{
+    // Wait for file to exist.
+    while !path.exists() {
+        if should_stop() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    // If no tail/since constraint, seek to end (only show new lines).
+    if query.tail.is_none() && query.since_us.is_none() {
+        reader.seek(SeekFrom::End(0))?;
+    }
+
+    // If tail is set, we need to read all existing lines, apply filters,
+    // then only keep the last N before entering the live loop.
+    if let Some(n) = query.tail {
+        let mut backlog: Vec<LogLine> = Vec::new();
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let bytes = reader.read_line(&mut buf)?;
+            if bytes == 0 {
+                break;
+            }
+            let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+            let Some(parsed) = LogLine::parse(trimmed) else {
+                continue;
+            };
+            if let Some(threshold) = query.since_us {
+                if parsed.timestamp_us < threshold {
+                    continue;
+                }
+            }
+            if let Some(ref pattern) = query.grep {
+                if !parsed.content.contains(pattern.as_str()) {
+                    continue;
+                }
+            }
+            backlog.push(parsed);
+        }
+        let start = backlog.len().saturating_sub(n);
+        for line in &backlog[start..] {
+            if query.raw {
+                writeln!(out, "{}", line.format_raw())?;
+            } else {
+                writeln!(out, "{}", line.format_prefixed())?;
+            }
+            out.flush()?;
+        }
+    }
+
+    // Live tail loop.
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let bytes = reader.read_line(&mut buf)?;
+        if bytes == 0 {
+            if should_stop() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+        let Some(parsed) = LogLine::parse(trimmed) else {
+            continue;
+        };
+
+        if let Some(threshold) = query.since_us {
+            if parsed.timestamp_us < threshold {
+                continue;
+            }
+        }
+
+        if let Some(ref pattern) = query.grep {
+            if !parsed.content.contains(pattern.as_str()) {
+                continue;
+            }
+        }
+
+        if query.raw {
+            writeln!(out, "{}", parsed.format_raw())?;
+        } else {
+            writeln!(out, "{}", parsed.format_prefixed())?;
+        }
+        out.flush()?;
+    }
 }
 
 /// Parsed representation of a single sidecar log line.
@@ -138,6 +248,8 @@ impl LogLine {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn parse_stdout_line() {
@@ -328,5 +440,102 @@ mod tests {
         let query = LogQuery::default();
         let result = query_log(&path, &query, &mut buf);
         assert!(result.is_err());
+    }
+
+    // --- follow_log tests ---
+
+    #[test]
+    fn follow_stops_on_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            tail: Some(100),
+            ..Default::default()
+        };
+        follow_log(&path, &query, &mut buf, || true).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("line one"));
+        assert!(output.contains("line five"));
+    }
+
+    #[test]
+    fn follow_picks_up_new_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.log");
+
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "1000000.000000 O initial line").unwrap();
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let path_clone = path.clone();
+
+        let handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let query = LogQuery {
+                tail: Some(100),
+                ..Default::default()
+            };
+            follow_log(&path_clone, &query, &mut buf, || {
+                stop_clone.load(Ordering::Relaxed)
+            })
+            .unwrap();
+            String::from_utf8(buf).unwrap()
+        });
+
+        thread::sleep(Duration::from_millis(250));
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "1000001.000000 O appended line").unwrap();
+        }
+
+        thread::sleep(Duration::from_millis(350));
+        stop.store(true, Ordering::Relaxed);
+
+        let output = handle.join().unwrap();
+        assert!(output.contains("initial line"));
+        assert!(output.contains("appended line"));
+    }
+
+    #[test]
+    fn follow_waits_for_file_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delayed.log");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let path_clone = path.clone();
+
+        let handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            let query = LogQuery {
+                tail: Some(100),
+                ..Default::default()
+            };
+            follow_log(&path_clone, &query, &mut buf, || {
+                stop_clone.load(Ordering::Relaxed)
+            })
+            .unwrap();
+            String::from_utf8(buf).unwrap()
+        });
+
+        thread::sleep(Duration::from_millis(300));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "1000000.000000 O delayed line").unwrap();
+        }
+
+        thread::sleep(Duration::from_millis(350));
+        stop.store(true, Ordering::Relaxed);
+
+        let output = handle.join().unwrap();
+        assert!(output.contains("delayed line"));
     }
 }
