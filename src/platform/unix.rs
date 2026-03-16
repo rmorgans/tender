@@ -177,3 +177,57 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
     let usecs = info.pbi_start_tvusec;
     Ok(secs * 1_000_000_000 + usecs * 1_000)
 }
+
+/// Check if a process is alive AND matches the expected identity.
+/// Returns false if the PID doesn't exist or was recycled (different start time).
+pub fn is_alive(id: &ProcessIdentity) -> bool {
+    match process_identity(id.pid.get()) {
+        Ok(current) => current == *id,
+        Err(_) => false, // process doesn't exist or can't be queried
+    }
+}
+
+/// Kill a process. Sends SIGTERM first, waits briefly, then SIGKILL.
+/// Tries process group kill first (kill(-pgid)), falls back to direct kill.
+/// Verifies process identity before signaling to prevent killing recycled PIDs.
+/// Returns Ok(()) if the process is already dead (idempotent).
+pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
+    if !is_alive(id) {
+        return Ok(());
+    }
+
+    let pid = id.pid.get() as i32;
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+
+    // Try process group first (kills descendants), fall back to direct
+    send_signal(-pid, signal).or_else(|_| send_signal(pid, signal))?;
+
+    if force {
+        return Ok(());
+    }
+
+    // Wait up to 5 seconds for graceful exit
+    for _ in 0..50 {
+        if !is_alive(id) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Still alive — escalate to SIGKILL
+    send_signal(-pid, libc::SIGKILL).or_else(|_| send_signal(pid, libc::SIGKILL))?;
+
+    Ok(())
+}
+
+fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
+    let ret = unsafe { libc::kill(pid, signal) };
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(()); // already dead
+        }
+        return Err(err);
+    }
+    Ok(())
+}

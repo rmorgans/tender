@@ -24,6 +24,14 @@ enum Commands {
         /// Session name
         name: String,
     },
+    /// Kill a supervised run
+    Kill {
+        /// Session name
+        name: String,
+        /// Force kill (SIGKILL immediately, no grace period)
+        #[arg(short, long)]
+        force: bool,
+    },
     /// List all sessions
     List,
     /// Internal: sidecar process (not for direct use)
@@ -40,6 +48,7 @@ fn main() {
     let result = match cli.command {
         Commands::Start { name, cmd } => cmd_start(&name, cmd),
         Commands::Status { name } => cmd_status(&name),
+        Commands::Kill { name, force } => cmd_kill(&name, force),
         Commands::List => cmd_list(),
         Commands::Sidecar { session_dir } => cmd_sidecar(session_dir),
     };
@@ -121,6 +130,62 @@ fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
         std::process::exit(2); // exit code 2 = process error per contract
     }
 
+    Ok(())
+}
+
+fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
+    use tender::model::ids::SessionName;
+    use tender::platform::unix as platform;
+    use tender::session::{self, SessionRoot};
+
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    // Session doesn't exist — idempotent success
+    let session = match session::open(&root, &session_name)? {
+        Some(s) => s,
+        None => {
+            println!(r#"{{"session":"{name}","result":"not_found"}}"#);
+            return Ok(());
+        }
+    };
+
+    let meta = session::read_meta(&session)?;
+
+    // Already terminal — idempotent success
+    if meta.status().is_terminal() {
+        let json = serde_json::to_string_pretty(&meta)?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    // Get child identity from Running state
+    let child = match meta.status().child() {
+        Some(c) => *c,
+        None => {
+            // Starting state with no child — nothing to kill
+            println!(r#"{{"session":"{name}","result":"no_child"}}"#);
+            return Ok(());
+        }
+    };
+
+    // Kill the child's process group. Verifies identity first.
+    platform::kill_process(&child, force)?;
+
+    // Wait briefly for sidecar to write terminal state, then re-read
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(m) = session::read_meta(&session) {
+            if m.status().is_terminal() {
+                let json = serde_json::to_string_pretty(&m)?;
+                println!("{json}");
+                return Ok(());
+            }
+        }
+    }
+
+    // Sidecar didn't write terminal state in time — report what we know
+    println!(r#"{{"session":"{name}","result":"kill_sent","force":{force}}}"#);
     Ok(())
 }
 
