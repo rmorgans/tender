@@ -1,3 +1,71 @@
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::Path;
+
+/// Query parameters for filtering log output.
+pub struct LogQuery {
+    pub tail: Option<usize>,
+    pub grep: Option<String>,
+    pub since_us: Option<u64>,
+    pub raw: bool,
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            tail: None,
+            grep: None,
+            since_us: None,
+            raw: false,
+        }
+    }
+}
+
+/// Read and filter a log file, writing matching lines to `out`.
+///
+/// Returns the number of lines written. Malformed lines are silently skipped.
+pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Result<usize> {
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let mut lines: Vec<LogLine> = Vec::new();
+    for raw_line in reader.lines() {
+        let raw_line = raw_line?;
+        let Some(parsed) = LogLine::parse(&raw_line) else {
+            continue;
+        };
+
+        if let Some(threshold) = query.since_us {
+            if parsed.timestamp_us < threshold {
+                continue;
+            }
+        }
+
+        if let Some(ref pattern) = query.grep {
+            if !parsed.content.contains(pattern.as_str()) {
+                continue;
+            }
+        }
+
+        lines.push(parsed);
+    }
+
+    if let Some(n) = query.tail {
+        let start = lines.len().saturating_sub(n);
+        lines = lines.split_off(start);
+    }
+
+    let count = lines.len();
+    for line in &lines {
+        if query.raw {
+            writeln!(out, "{}", line.format_raw())?;
+        } else {
+            writeln!(out, "{}", line.format_prefixed())?;
+        }
+    }
+
+    Ok(count)
+}
+
 /// Parsed representation of a single sidecar log line.
 ///
 /// The on-disk format produced by `sidecar::capture_stream` is:
@@ -69,6 +137,7 @@ impl LogLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn parse_stdout_line() {
@@ -137,5 +206,127 @@ mod tests {
         let line = "1773653954.012345 O hello world";
         let parsed = LogLine::parse(line).expect("should parse");
         assert_eq!(parsed.format_raw(), "hello world");
+    }
+
+    // --- Test helpers ---
+
+    fn write_test_log(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("output.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "1000000.000000 O line one").unwrap();
+        writeln!(f, "1000001.000000 O line two").unwrap();
+        writeln!(f, "1000002.000000 E error here").unwrap();
+        writeln!(f, "1000003.000000 O line four").unwrap();
+        writeln!(f, "1000004.000000 O line five with error word").unwrap();
+        path
+    }
+
+    // --- query_log tests ---
+
+    #[test]
+    fn query_full_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery::default();
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 5);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("line one"));
+        assert!(output.contains("line five with error word"));
+    }
+
+    #[test]
+    fn query_tail_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            tail: Some(2),
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 2);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("line four"));
+        assert!(output.contains("line five with error word"));
+        assert!(!output.contains("line one"));
+    }
+
+    #[test]
+    fn query_grep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            grep: Some("error".to_owned()),
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 2);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("error here"));
+        assert!(output.contains("line five with error word"));
+    }
+
+    #[test]
+    fn query_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            since_us: Some(1_000_002_000_000),
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 3);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("error here"));
+        assert!(output.contains("line four"));
+        assert!(output.contains("line five"));
+        assert!(!output.contains("line one"));
+    }
+
+    #[test]
+    fn query_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            raw: true,
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 5);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.contains("1000000.000000"));
+        assert!(output.contains("line one"));
+    }
+
+    #[test]
+    fn query_combined_grep_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_log(dir.path());
+        let mut buf = Vec::new();
+        let query = LogQuery {
+            grep: Some("error".to_owned()),
+            tail: Some(1),
+            ..Default::default()
+        };
+        let count = query_log(&path, &query, &mut buf).unwrap();
+        assert_eq!(count, 1);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("line five with error word"));
+        assert!(!output.contains("error here"));
+    }
+
+    #[test]
+    fn query_missing_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.log");
+        let mut buf = Vec::new();
+        let query = LogQuery::default();
+        let result = query_log(&path, &query, &mut buf);
+        assert!(result.is_err());
     }
 }
