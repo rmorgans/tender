@@ -22,6 +22,26 @@ fn run_tender_status(output: &std::process::Output) -> (i32, String, String) {
 }
 
 #[test]
+fn start_returns_promptly_not_blocked_by_child() {
+    let root = TempDir::new().unwrap();
+
+    let start = std::time::Instant::now();
+    let output = run_tender(&root, &["start", "prompt-test", "sleep", "60"]);
+    let elapsed = start.elapsed();
+
+    assert!(output.status.success(), "start failed");
+    // The readiness handshake must complete without waiting for the child.
+    // If the ready pipe fd leaks to the child, start blocks until child exits (60s).
+    assert!(
+        elapsed.as_secs() < 5,
+        "tender start blocked for {elapsed:?} — ready pipe fd likely leaked to child"
+    );
+
+    // Clean up: kill the child so it doesn't linger
+    let _ = run_tender(&root, &["kill", "--force", "prompt-test"]);
+}
+
+#[test]
 fn start_creates_session_and_returns_json() {
     let root = TempDir::new().unwrap();
     let output = run_tender(&root, &["start", "test-job", "echo", "hello"]);

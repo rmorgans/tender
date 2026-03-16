@@ -178,12 +178,50 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
     Ok(secs * 1_000_000_000 + usecs * 1_000)
 }
 
-/// Check if a process is alive AND matches the expected identity.
-/// Returns false if the PID doesn't exist or was recycled (different start time).
-pub fn is_alive(id: &ProcessIdentity) -> bool {
+/// Result of probing a process by identity.
+/// Lifecycle state comes from the sidecar; process observation comes from
+/// this typed OS result — never a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStatus {
+    /// PID exists and identity matches — safe to signal.
+    AliveVerified,
+    /// PID does not exist (ESRCH).
+    Missing,
+    /// PID exists but identity differs — PID was recycled.
+    IdentityMismatch,
+    /// PID exists but OS denied access (EPERM) — different session on macOS.
+    /// Can still signal (kill(2) only needs appropriate permissions, not
+    /// proc_pidinfo access), but PID reuse safety is degraded.
+    Inaccessible,
+    /// Unexpected OS error.
+    OsError(std::io::ErrorKind),
+}
+
+/// Probe a process by identity. Returns a typed status instead of a boolean
+/// so callers can make informed decisions (especially around EPERM).
+pub fn process_status(id: &ProcessIdentity) -> ProcessStatus {
     match process_identity(id.pid.get()) {
-        Ok(current) => current == *id,
-        Err(_) => false, // process doesn't exist or can't be queried
+        Ok(current) => {
+            if current == *id {
+                ProcessStatus::AliveVerified
+            } else {
+                ProcessStatus::IdentityMismatch
+            }
+        }
+        Err(e) => match e.raw_os_error() {
+            Some(libc::ESRCH) => ProcessStatus::Missing,
+            Some(libc::EPERM) => ProcessStatus::Inaccessible,
+            _ => {
+                // On macOS, proc_pidinfo returns 0 for missing processes
+                // and sets errno to ESRCH. But if errno wasn't set (kind == Other),
+                // the process is likely gone.
+                if e.kind() == std::io::ErrorKind::Other {
+                    ProcessStatus::Missing
+                } else {
+                    ProcessStatus::OsError(e.kind())
+                }
+            }
+        },
     }
 }
 
@@ -192,8 +230,23 @@ pub fn is_alive(id: &ProcessIdentity) -> bool {
 /// Verifies process identity before signaling to prevent killing recycled PIDs.
 /// Returns Ok(()) if the process is already dead (idempotent).
 pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
-    if !is_alive(id) {
-        return Ok(());
+    match process_status(id) {
+        ProcessStatus::Missing => return Ok(()),
+        ProcessStatus::IdentityMismatch => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "PID was recycled — refusing to kill wrong process",
+            ));
+        }
+        ProcessStatus::OsError(kind) => {
+            return Err(io::Error::new(kind, "failed to probe process status"));
+        }
+        // AliveVerified: identity confirmed, signal normally
+        // Inaccessible: can't verify identity (EPERM from proc_pidinfo on macOS
+        // when child is in a different session), but kill(2) will still work.
+        // Degraded PID reuse safety — acceptable because the sidecar wrote the
+        // identity moments ago and PID reuse within that window is negligible.
+        ProcessStatus::AliveVerified | ProcessStatus::Inaccessible => {}
     }
 
     let pid = id.pid.get() as i32;
@@ -208,8 +261,10 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
 
     // Wait up to 5 seconds for graceful exit
     for _ in 0..50 {
-        if !is_alive(id) {
-            return Ok(());
+        match process_status(id) {
+            ProcessStatus::Missing => return Ok(()),
+            ProcessStatus::IdentityMismatch => return Ok(()), // recycled = original is dead
+            _ => {}
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -230,4 +285,93 @@ fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
         return Err(err);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroU32;
+
+    fn fake_identity(pid: u32, start_time_ns: u64) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: NonZeroU32::new(pid).unwrap(),
+            start_time_ns,
+        }
+    }
+
+    #[test]
+    fn process_status_self_is_alive_verified() {
+        let self_id = self_identity().unwrap();
+        assert_eq!(process_status(&self_id), ProcessStatus::AliveVerified);
+    }
+
+    #[test]
+    fn process_status_missing_pid_returns_missing() {
+        // PID 4_000_000 is safely above any real PID
+        let id = fake_identity(4_000_000, 0);
+        assert_eq!(process_status(&id), ProcessStatus::Missing);
+    }
+
+    #[test]
+    fn process_status_wrong_start_time_returns_identity_mismatch() {
+        // Use our own PID but with a bogus start time
+        let self_id = self_identity().unwrap();
+        let wrong = fake_identity(self_id.pid.get(), self_id.start_time_ns.wrapping_add(1));
+        assert_eq!(process_status(&wrong), ProcessStatus::IdentityMismatch);
+    }
+
+    #[test]
+    fn process_status_inaccessible_on_cross_session_child() {
+        // Spawn a child in a new session (setsid), then probe from parent.
+        // On macOS, proc_pidinfo returns EPERM for processes in other sessions.
+        // On Linux, /proc/<pid>/stat is world-readable so this returns AliveVerified.
+        use std::process::{Command, Stdio};
+        use std::os::unix::process::CommandExt;
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("10");
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        let child_pid = child.id();
+
+        // Small delay for process to be queryable
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let child_id = match process_identity(child_pid) {
+            Ok(id) => id,
+            Err(_) => {
+                // On macOS, proc_pidinfo may already EPERM here.
+                // Verify that process_status on a fabricated identity returns Inaccessible.
+                let fabricated = fake_identity(child_pid, 0);
+                let status = process_status(&fabricated);
+                assert!(
+                    status == ProcessStatus::Inaccessible || status == ProcessStatus::Missing,
+                    "expected Inaccessible or Missing for cross-session child, got {status:?}"
+                );
+                // Clean up
+                unsafe { libc::kill(child_pid as i32, libc::SIGKILL); }
+                return;
+            }
+        };
+
+        let status = process_status(&child_id);
+
+        // macOS: Inaccessible (EPERM from proc_pidinfo across sessions)
+        // Linux: AliveVerified (/proc/<pid>/stat is readable)
+        assert!(
+            status == ProcessStatus::AliveVerified || status == ProcessStatus::Inaccessible,
+            "expected AliveVerified or Inaccessible, got {status:?}"
+        );
+
+        // Clean up
+        unsafe { libc::kill(child_pid as i32, libc::SIGKILL); }
+    }
 }

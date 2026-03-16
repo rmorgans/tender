@@ -80,6 +80,17 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         now_epoch_secs(),
     );
 
+    // Re-set CLOEXEC on the ready fd before spawning the child.
+    // The sidecar inherited this fd with CLOEXEC cleared (so it survived the sidecar's exec),
+    // but the child must NOT hold the pipe open — otherwise the CLI's read_to_string blocks
+    // until the child exits, defeating the readiness handshake.
+    if let Some(fd) = ready.as_ref() {
+        let ret = unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        if ret == -1 {
+            anyhow::bail!("failed to set CLOEXEC on ready fd: {}", std::io::Error::last_os_error());
+        }
+    }
+
     // Spawn child
     let argv = meta.launch_spec().argv();
     let mut cmd = Command::new(&argv[0]);
