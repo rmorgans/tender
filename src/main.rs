@@ -90,28 +90,36 @@ fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
     let signal = match platform::read_ready_signal(read_end) {
         Ok(s) => s,
         Err(e) => {
-            // Sidecar died before signaling — clean up
-            let _ = std::fs::remove_dir_all(session.path());
+            // Sidecar died before signaling. Only clean up if no child was spawned.
+            // If child_pid exists, a child may be alive — don't delete the evidence.
+            if !session.path().join("child_pid").exists() {
+                let _ = std::fs::remove_dir_all(session.path());
+            }
             anyhow::bail!("sidecar startup failed: {e}");
         }
     };
 
     if signal.starts_with("ERROR:") {
         let err_msg = signal.trim_start_matches("ERROR:").trim();
-        let _ = std::fs::remove_dir_all(session.path());
+        if !session.path().join("child_pid").exists() {
+            let _ = std::fs::remove_dir_all(session.path());
+        }
         anyhow::bail!("sidecar failed: {err_msg}");
     }
 
     // Sidecar sends "OK:<json>\n" — parse the meta snapshot directly from pipe.
-    // No disk re-read, no race with subsequent state transitions.
     let meta_json = signal
         .strip_prefix("OK:")
         .ok_or_else(|| anyhow::anyhow!("unexpected readiness signal: {signal}"))?
         .trim();
 
-    // Pretty-print for human output (re-parse to format)
     let meta: serde_json::Value = serde_json::from_str(meta_json)?;
     println!("{}", serde_json::to_string_pretty(&meta)?);
+
+    // Exit non-zero if the child failed to spawn — agents branch on exit code
+    if meta.get("status").and_then(|s| s.as_str()) == Some("SpawnFailed") {
+        std::process::exit(2); // exit code 2 = process error per contract
+    }
 
     Ok(())
 }

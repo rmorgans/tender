@@ -156,8 +156,8 @@ fn spawn_failure_produces_spawn_failed() {
         &root,
         &["start", "bad-cmd", "nonexistent-command-xyz-12345"],
     );
-    // CLI should still succeed (SpawnFailed is a valid durable state)
-    assert!(output.status.success());
+    // CLI exits with code 2 for spawn failure (process error per contract)
+    assert_eq!(output.status.code(), Some(2));
 
     let meta: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("output is not JSON");

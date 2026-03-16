@@ -178,13 +178,19 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
         (stdout_r, stderr_r)
     });
 
-    // Log capture failures but don't fail the supervision —
-    // the child's exit status is still meaningful even if output was truncated.
+    // Log capture failures to a file in the session dir.
+    // Sidecar stderr goes to /dev/null so eprintln is useless.
+    // Don't fail supervision — the child's exit status is still meaningful.
+    let mut capture_errors = Vec::new();
     if let Err(e) = stdout_result {
-        eprintln!("tender: stdout capture error: {e}");
+        capture_errors.push(format!("stdout capture: {e}"));
     }
     if let Err(e) = stderr_result {
-        eprintln!("tender: stderr capture error: {e}");
+        capture_errors.push(format!("stderr capture: {e}"));
+    }
+    if !capture_errors.is_empty() {
+        let err_path = session.path().join("capture_errors.log");
+        let _ = std::fs::write(&err_path, capture_errors.join("\n"));
     }
 
     let status = child.wait()?;
