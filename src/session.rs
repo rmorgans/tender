@@ -113,6 +113,26 @@ pub fn open(root: &SessionRoot, name: &SessionName) -> Result<Option<SessionDir>
     }))
 }
 
+/// Open a session directory without requiring meta.json.
+/// Used internally by the sidecar before it writes meta.
+/// Returns NotFound if the directory doesn't exist.
+pub fn open_raw(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, SessionError> {
+    let path = root.path().join(name.as_str());
+    if !path.exists() {
+        return Err(SessionError::NotFound(name.to_string()));
+    }
+    if !path.is_dir() {
+        return Err(SessionError::Corrupt {
+            session: name.to_string(),
+            reason: "not a directory".into(),
+        });
+    }
+    Ok(SessionDir {
+        path,
+        name: name.clone(),
+    })
+}
+
 /// List all session directory names under root.
 /// Returns only directories with valid session names.
 /// Non-directory entries and invalid names (hidden files, underscore-prefixed)
