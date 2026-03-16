@@ -15,6 +15,9 @@ enum Commands {
     Start {
         /// Session name
         name: String,
+        /// Enable stdin pipe for push command
+        #[arg(long)]
+        stdin: bool,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -71,7 +74,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { name, cmd } => cmd_start(&name, cmd),
+        Commands::Start { name, cmd, stdin } => cmd_start(&name, cmd, stdin),
         Commands::Push { name } => cmd_push(&name),
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
@@ -93,7 +96,7 @@ fn main() {
     }
 }
 
-fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
+fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
     use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
@@ -104,7 +107,7 @@ fn cmd_start(name: &str, cmd: Vec<String>) -> anyhow::Result<()> {
 
     // Build launch spec
     let mut launch_spec = LaunchSpec::new(cmd)?;
-    launch_spec.stdin_mode = StdinMode::None;
+    launch_spec.stdin_mode = if stdin { StdinMode::Pipe } else { StdinMode::None };
 
     // Create session directory
     let session = session::create(&root, &session_name)?;
