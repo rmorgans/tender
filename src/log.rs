@@ -32,16 +32,8 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
             continue;
         };
 
-        if let Some(threshold) = query.since_us {
-            if parsed.timestamp_us < threshold {
-                continue;
-            }
-        }
-
-        if let Some(ref pattern) = query.grep {
-            if !parsed.content.contains(pattern.as_str()) {
-                continue;
-            }
+        if !matches_query(&parsed, query) {
+            continue;
         }
 
         if let Some(n) = tail_n {
@@ -64,6 +56,21 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
     }
 
     Ok(count)
+}
+
+/// Check if a parsed log line passes the query filters (since + grep).
+fn matches_query(line: &LogLine, query: &LogQuery) -> bool {
+    if let Some(threshold) = query.since_us {
+        if line.timestamp_us < threshold {
+            return false;
+        }
+    }
+    if let Some(ref pattern) = query.grep {
+        if !line.content.contains(pattern.as_str()) {
+            return false;
+        }
+    }
+    true
 }
 
 fn write_line(out: &mut dyn Write, line: &LogLine, raw: bool) -> io::Result<()> {
@@ -120,15 +127,8 @@ where
             let Some(parsed) = LogLine::parse(trimmed) else {
                 continue;
             };
-            if let Some(threshold) = query.since_us {
-                if parsed.timestamp_us < threshold {
-                    continue;
-                }
-            }
-            if let Some(ref pattern) = query.grep {
-                if !parsed.content.contains(pattern.as_str()) {
-                    continue;
-                }
+            if !matches_query(&parsed, query) {
+                continue;
             }
             if n > 0 {
                 if ring.len() == n {
@@ -161,16 +161,8 @@ where
             continue;
         };
 
-        if let Some(threshold) = query.since_us {
-            if parsed.timestamp_us < threshold {
-                continue;
-            }
-        }
-
-        if let Some(ref pattern) = query.grep {
-            if !parsed.content.contains(pattern.as_str()) {
-                continue;
-            }
+        if !matches_query(&parsed, query) {
+            continue;
         }
 
         write_line(out, &parsed, query.raw)?;

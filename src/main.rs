@@ -173,7 +173,10 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     let session = match session::open(&root, &session_name)? {
         Some(s) => s,
         None => {
-            println!(r#"{{"session":"{name}","result":"not_found"}}"#);
+            println!(
+                "{}",
+                serde_json::json!({"session": name, "result": "not_found"})
+            );
             return Ok(());
         }
     };
@@ -192,7 +195,10 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
         Some(c) => *c,
         None => {
             // Starting state with no child — nothing to kill
-            println!(r#"{{"session":"{name}","result":"no_child"}}"#);
+            println!(
+                "{}",
+                serde_json::json!({"session": name, "result": "no_child"})
+            );
             return Ok(());
         }
     };
@@ -213,7 +219,10 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     }
 
     // Sidecar didn't write terminal state in time — report what we know
-    println!(r#"{{"session":"{name}","result":"kill_sent","force":{force}}}"#);
+    println!(
+        "{}",
+        serde_json::json!({"session": name, "result": "kill_sent", "force": force})
+    );
     Ok(())
 }
 
