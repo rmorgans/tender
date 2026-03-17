@@ -62,6 +62,14 @@ enum Commands {
         #[arg(short, long)]
         raw: bool,
     },
+    /// Block until session reaches terminal state
+    Wait {
+        /// Session name
+        name: String,
+        /// Timeout in seconds
+        #[arg(short, long)]
+        timeout: Option<u64>,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
@@ -87,6 +95,7 @@ fn main() {
             since,
             raw,
         } => cmd_log(&name, tail, follow, grep, since, raw),
+        Commands::Wait { name, timeout } => cmd_wait(&name, timeout),
         Commands::Sidecar { session_dir } => cmd_sidecar(session_dir),
     };
 
@@ -355,6 +364,63 @@ fn cmd_log(
     }
 
     Ok(())
+}
+
+fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
+    use tender::model::ids::SessionName;
+    use tender::model::state::{ExitReason, RunStatus};
+    use tender::session::{self, SessionRoot};
+
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    let session = session::open(&root, &session_name)?
+        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+
+    let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
+
+    loop {
+        let mut meta = session::read_meta(&session)?;
+
+        // Reconciliation: non-terminal + lock not held -> sidecar crashed
+        if !meta.status().is_terminal() && !session::is_locked(&session)? {
+            meta.reconcile_sidecar_lost(now_epoch_secs())?;
+            session::write_meta_atomic(&session, &meta)?;
+            // Fall through to terminal check below
+        }
+
+        if meta.status().is_terminal() {
+            let json = serde_json::to_string_pretty(&meta)?;
+            println!("{json}");
+
+            match meta.status() {
+                RunStatus::Exited { how, .. } => match how {
+                    ExitReason::ExitedOk => return Ok(()),
+                    ExitReason::ExitedError { .. } => std::process::exit(42),
+                    _ => return Ok(()), // Killed, KilledForced, TimedOut
+                },
+                RunStatus::SpawnFailed { .. } => std::process::exit(2),
+                RunStatus::SidecarLost { .. } => std::process::exit(3),
+                _ => return Ok(()),
+            }
+        }
+
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                anyhow::bail!("timeout waiting for session {name}");
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+fn now_epoch_secs() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}", duration.as_secs())
 }
 
 fn cmd_sidecar(session_dir: PathBuf) -> anyhow::Result<()> {

@@ -210,6 +210,20 @@ pub fn write_meta_atomic(session: &SessionDir, meta: &Meta) -> Result<(), Sessio
     Ok(())
 }
 
+/// Check if the session lock is currently held by another process.
+/// Returns true if locked, false if available. Does not acquire.
+pub fn is_locked(session: &SessionDir) -> Result<bool, SessionError> {
+    let lock_path = session.lock_path();
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    match LockGuard::try_acquire(session) {
+        Ok(_guard) => Ok(false), // We got it -> was not locked. Drop releases.
+        Err(SessionError::Locked(_)) => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// Exclusive file lock on a session. Drop releases the lock.
 /// Uses flock — exclusive across processes, not just threads.
 #[cfg(unix)]
