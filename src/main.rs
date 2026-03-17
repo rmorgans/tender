@@ -333,7 +333,10 @@ fn cmd_start(
 
     // Write generation hint for sidecar to pick up
     if let Some(next_gen) = next_generation {
-        let _ = std::fs::write(session.path().join("generation"), next_gen.as_u64().to_string());
+        let _ = std::fs::write(
+            session.path().join("generation"),
+            next_gen.as_u64().to_string(),
+        );
     }
 
     spawn_and_wait_ready(&session, &launch_spec)
@@ -518,8 +521,7 @@ fn cleanup_orphan_dir(dir: &std::path::Path) {
         // Try JSON ProcessIdentity (new format)
         if let Ok(identity) = serde_json::from_str::<ProcessIdentity>(&content) {
             match platform::process_status(&identity) {
-                platform::ProcessStatus::AliveVerified
-                | platform::ProcessStatus::Inaccessible => {
+                platform::ProcessStatus::AliveVerified | platform::ProcessStatus::Inaccessible => {
                     // Identity verified (or can't verify but process exists) — kill it
                     let _ = platform::kill_process(&identity, true);
                 }
