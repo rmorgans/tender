@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -647,9 +648,9 @@ fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
 
 fn cmd_sidecar(session_dir: PathBuf) -> anyhow::Result<()> {
     let ready_fd: std::os::unix::io::RawFd = std::env::var("TENDER_READY_FD")
-        .map_err(|_| anyhow::anyhow!("TENDER_READY_FD not set"))?
+        .context("TENDER_READY_FD not set")?
         .parse()
-        .map_err(|_| anyhow::anyhow!("TENDER_READY_FD is not a valid fd"))?;
+        .context("TENDER_READY_FD is not a valid fd")?;
 
     tender::sidecar::run(session_dir, ready_fd)
 }

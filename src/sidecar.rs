@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
+
 use crate::model::ids::{EpochTimestamp, Generation, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
@@ -176,9 +178,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Read launch spec
     let spec_path = session_dir.join("launch_spec.json");
     let spec_json = std::fs::read_to_string(&spec_path)
-        .map_err(|e| anyhow::anyhow!("failed to read launch_spec.json: {e}"))?;
+        .context("failed to read launch_spec.json")?;
     let launch_spec: LaunchSpec = serde_json::from_str(&spec_json)
-        .map_err(|e| anyhow::anyhow!("invalid launch_spec.json: {e}"))?;
+        .context("invalid launch_spec.json")?;
     let _ = std::fs::remove_file(&spec_path);
 
     let run_id = RunId::new();
