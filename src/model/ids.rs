@@ -16,6 +16,7 @@ impl Default for RunId {
 }
 
 impl RunId {
+    #[must_use]
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7())
     }
@@ -57,14 +58,17 @@ impl<'de> Deserialize<'de> for RunId {
 pub struct Generation(u64);
 
 impl Generation {
+    #[must_use]
     pub fn first() -> Self {
         Self(1)
     }
 
+    #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
+    #[must_use]
     pub fn as_u64(self) -> u64 {
         self.0
     }
@@ -112,6 +116,11 @@ pub enum SessionNameError {
 }
 
 impl SessionName {
+    /// Create a new validated session name.
+    ///
+    /// # Errors
+    /// Returns `SessionNameError` if the name is empty, contains invalid
+    /// characters, or starts with an underscore.
     pub fn new(name: &str) -> Result<Self, SessionNameError> {
         Self::validate(name)?;
         Ok(Self(name.to_owned()))
@@ -136,6 +145,7 @@ impl SessionName {
         Ok(())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -176,6 +186,7 @@ pub struct ProcessIdentity {
 pub struct EpochTimestamp(u64);
 
 impl EpochTimestamp {
+    #[must_use]
     pub fn now() -> Self {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -184,10 +195,12 @@ impl EpochTimestamp {
         Self(secs)
     }
 
+    #[must_use]
     pub fn from_secs(secs: u64) -> Self {
         Self(secs)
     }
 
+    #[must_use]
     pub fn as_secs(&self) -> u64 {
         self.0
     }

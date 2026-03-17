@@ -15,6 +15,8 @@ pub fn mkfifo(path: &Path) -> io::Result<()> {
 
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+    // SAFETY: c_path is a valid null-terminated C string (CString guarantees this).
+    // 0o600 is a valid mode. mkfifo may fail but won't cause UB.
     let ret = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
     if ret != 0 {
         return Err(io::Error::last_os_error());
@@ -30,6 +32,8 @@ pub fn pipe() -> io::Result<(File, File)> {
     #[cfg(target_os = "linux")]
     {
         // Atomic CLOEXEC — no window for fd leak across fork
+        // SAFETY: fds is a 2-element array, which is what pipe2 requires.
+        // O_CLOEXEC is a valid flag. pipe2 may fail but won't cause UB.
         let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
@@ -38,15 +42,21 @@ pub fn pipe() -> io::Result<(File, File)> {
 
     #[cfg(not(target_os = "linux"))]
     {
+        // SAFETY: fds is a 2-element array, which is what pipe() requires.
         let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
         }
         // Set close-on-exec on both ends. Check return values.
         for &fd in &fds {
+            // SAFETY: fd is a valid open file descriptor just returned by pipe().
+            // F_SETFD with FD_CLOEXEC is a valid fcntl operation.
             let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
             if ret == -1 {
                 let err = io::Error::last_os_error();
+                // SAFETY: fds[0] and fds[1] are valid open file descriptors from pipe().
+                // Closing them on error prevents fd leak. Double-close is avoided
+                // because we return immediately after this block.
                 unsafe {
                     libc::close(fds[0]);
                     libc::close(fds[1]);
@@ -56,6 +66,9 @@ pub fn pipe() -> io::Result<(File, File)> {
         }
     }
 
+    // SAFETY: fds[0] and fds[1] are valid open file descriptors just returned by
+    // pipe()/pipe2(). from_raw_fd takes ownership, so File will close them on drop.
+    // Each fd is consumed exactly once — no aliasing or double-close.
     let read = unsafe { File::from_raw_fd(fds[0]) };
     let write = unsafe { File::from_raw_fd(fds[1]) };
     Ok((read, write))
@@ -84,7 +97,9 @@ pub fn spawn_sidecar(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // Safety: pre_exec runs after fork, before exec in the child.
+    // SAFETY: pre_exec runs after fork() in the child process, before exec().
+    // The closure captures only write_fd_raw (a Copy integer), so no shared
+    // mutable state is accessed. fcntl and setsid are async-signal-safe.
     // We clear close-on-exec on the ready fd so it survives exec,
     // and call setsid to detach from the parent's session.
     unsafe {
@@ -129,17 +144,27 @@ pub fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
 
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+    // SAFETY: c_path is a valid null-terminated C string (CString guarantees this).
+    // O_WRONLY | O_NONBLOCK are valid flags. open may fail but won't cause UB.
     let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    // Clear O_NONBLOCK after connect so writes block normally
+    // Clear O_NONBLOCK after connect so writes block normally.
+    // SAFETY: fd is a valid open file descriptor (checked >= 0 above).
+    // F_SETFL with 0 clears all file status flags — valid operation.
     unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
+    // SAFETY: fd is a valid open file descriptor. from_raw_fd takes ownership;
+    // no other code uses this fd after this point.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Write a readiness signal to the pipe.
 pub fn write_ready_signal(fd_num: RawFd, message: &str) -> io::Result<()> {
+    // SAFETY: fd_num is the TENDER_READY_FD passed by spawn_sidecar, which was a
+    // valid open fd at exec time (close-on-exec was cleared in pre_exec).
+    // from_raw_fd takes ownership — the fd is closed when file is dropped at
+    // the end of this function, ensuring exactly one close.
     let mut file = unsafe { File::from_raw_fd(fd_num) };
     file.write_all(message.as_bytes())?;
     // file is dropped here, closing the fd
@@ -179,6 +204,8 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad starttime: {e}")))?;
     // Convert ticks to nanoseconds
+    // SAFETY: _SC_CLK_TCK is a valid sysconf name. sysconf never causes UB;
+    // it returns -1 on error (which won't happen for _SC_CLK_TCK on Linux).
     let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
     Ok(ticks * (1_000_000_000 / ticks_per_sec))
 }
@@ -187,9 +214,16 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
 fn process_start_time(pid: u32) -> io::Result<u64> {
     use std::mem;
 
+    // SAFETY: proc_bsdinfo is a POD type (plain data, no pointers that need
+    // initialization). Zeroing it produces a valid struct that proc_pidinfo
+    // will overwrite with actual process data.
     let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let size = mem::size_of::<libc::proc_bsdinfo>() as i32;
 
+    // SAFETY: info is a properly sized and aligned proc_bsdinfo buffer.
+    // pid is cast to i32 which is safe because macOS PIDs fit in i32.
+    // PROC_PIDTBSDINFO is the correct flavor for proc_bsdinfo.
+    // size matches the buffer — proc_pidinfo won't write out of bounds.
     let ret = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -214,6 +248,7 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
 /// Lifecycle state comes from the sidecar; process observation comes from
 /// this typed OS result — never a boolean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 pub enum ProcessStatus {
     /// PID exists and identity matches — safe to signal.
     AliveVerified,
@@ -308,6 +343,9 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
 }
 
 fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
+    // SAFETY: kill() with any pid/signal combination never causes UB.
+    // Negative pid targets the process group. The call may fail (ESRCH, EPERM)
+    // but failure is handled via the return value check below.
     let ret = unsafe { libc::kill(pid, signal) };
     if ret != 0 {
         let err = io::Error::last_os_error();
@@ -365,6 +403,8 @@ mod tests {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // SAFETY: pre_exec runs after fork() in the child, before exec().
+        // setsid is async-signal-safe. No shared mutable state is accessed.
         unsafe {
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {

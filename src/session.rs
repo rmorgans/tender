@@ -28,6 +28,9 @@ pub struct SessionRoot(PathBuf);
 
 impl SessionRoot {
     /// Default: ~/.tender/sessions/
+    ///
+    /// # Errors
+    /// Returns an error if `HOME` is not set.
     pub fn default_path() -> anyhow::Result<Self> {
         let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME not set"))?;
         Ok(Self(PathBuf::from(home).join(".tender").join("sessions")))
@@ -38,6 +41,7 @@ impl SessionRoot {
         Self(path)
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.0
     }
@@ -51,10 +55,12 @@ pub struct SessionDir {
 }
 
 impl SessionDir {
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    #[must_use]
     pub fn name(&self) -> &SessionName {
         &self.name
     }
@@ -241,6 +247,9 @@ impl LockGuard {
         let lock_path = session.lock_path();
         let file = File::create(&lock_path)?;
 
+        // SAFETY: file is an open File, so as_raw_fd() returns a valid fd.
+        // LOCK_EX | LOCK_NB is a valid flock operation (non-blocking exclusive).
+        // flock may fail (EWOULDBLOCK) but won't cause UB.
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
@@ -260,6 +269,8 @@ impl LockGuard {
         let lock_path = session.lock_path();
         let file = File::create(&lock_path)?;
 
+        // SAFETY: file is an open File, so as_raw_fd() returns a valid fd.
+        // LOCK_EX is a valid flock operation (blocking exclusive lock).
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
         if ret != 0 {
             return Err(SessionError::Io(std::io::Error::last_os_error()));

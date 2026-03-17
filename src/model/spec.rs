@@ -63,12 +63,14 @@ impl LaunchSpec {
         })
     }
 
+    #[must_use]
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
 
     /// Canonical SHA-256 hash of the launch spec.
     /// Uses sorted JSON serialization for determinism (BTreeMap is already sorted).
+    #[must_use]
     pub fn canonical_hash(&self) -> String {
         let json = serde_json::to_string(self).expect("LaunchSpec is always serializable");
         let hash = Sha256::digest(json.as_bytes());

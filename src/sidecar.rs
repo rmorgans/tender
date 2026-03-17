@@ -59,7 +59,10 @@ fn spawn_child(argv: &[String], stdin_piped: bool) -> std::io::Result<std::proce
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    // Make child its own process group leader so kill(-pgid) kills the whole tree
+    // Make child its own process group leader so kill(-pgid) kills the whole tree.
+    // SAFETY: pre_exec runs after fork() in the child process, before exec().
+    // setpgid(0,0) is async-signal-safe and only affects the forked child.
+    // No shared mutable state is accessed in the closure.
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) == -1 {
@@ -118,7 +121,12 @@ fn setup_timeout(child_pid: i32, timeout_s: u64, cancel: Arc<AtomicBool>) -> Arc
             return; // Final check after deadline
         }
         timed_out_clone.store(true, Ordering::Relaxed);
-        // Kill the process GROUP (negative PID), matching normal kill semantics
+        // Kill the process GROUP (negative PID), matching normal kill semantics.
+        // SAFETY: kill() with any pid/signal combination never causes UB.
+        // child_pid came from child.id() on a process we just spawned, cast to
+        // i32 (safe because PIDs on macOS/Linux are always < i32::MAX).
+        // The cancel flag is checked immediately before to avoid killing a
+        // recycled PID after the child exits naturally.
         unsafe {
             libc::kill(-child_pid, libc::SIGKILL);
         }
@@ -193,6 +201,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // but the child must NOT hold the pipe open — otherwise the CLI's read_to_string blocks
     // until the child exits, defeating the readiness handshake.
     if let Some(fd) = ready.as_ref() {
+        // SAFETY: *fd is the TENDER_READY_FD passed from spawn_sidecar — a valid
+        // open file descriptor. F_SETFD with FD_CLOEXEC is a valid fcntl operation.
+        // This prevents the child from inheriting the ready pipe.
         let ret = unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         if ret == -1 {
             anyhow::bail!(

@@ -49,11 +49,13 @@ pub enum ExitReason {
 }
 
 impl RunStatus {
+    #[must_use]
     pub fn is_terminal(&self) -> bool {
         !matches!(self, RunStatus::Starting | RunStatus::Running { .. })
     }
 
     /// Get child identity if available.
+    #[must_use]
     pub fn child(&self) -> Option<&ProcessIdentity> {
         match self {
             RunStatus::Starting | RunStatus::SpawnFailed { .. } => None,
@@ -63,6 +65,7 @@ impl RunStatus {
     }
 
     /// Get ended_at if terminal.
+    #[must_use]
     pub fn ended_at(&self) -> Option<&EpochTimestamp> {
         match self {
             RunStatus::Starting | RunStatus::Running { .. } => None,

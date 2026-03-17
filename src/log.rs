@@ -238,6 +238,7 @@ impl LogLine {
     ///
     /// Returns `None` if the line is malformed: wrong structure, invalid
     /// numbers, or a tag that is neither `O` nor `E`.
+    #[must_use]
     pub fn parse(line: &str) -> Option<Self> {
         // Split off the timestamp portion: "{secs}.{micros:06}"
         let (timestamp_str, rest) = line.split_once(' ')?;
@@ -271,6 +272,7 @@ impl LogLine {
     }
 
     /// Reconstruct the original sidecar log format.
+    #[must_use]
     pub fn format_prefixed(&self) -> String {
         let secs = self.timestamp_us / 1_000_000;
         let micros = self.timestamp_us % 1_000_000;
@@ -278,6 +280,7 @@ impl LogLine {
     }
 
     /// Return just the line content, without timestamp or tag prefix.
+    #[must_use]
     pub fn format_raw(&self) -> &str {
         &self.content
     }

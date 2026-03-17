@@ -53,47 +53,58 @@ impl Meta {
 
     // --- Accessors ---
 
+    #[must_use]
     pub fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
+    #[must_use]
     pub fn session(&self) -> &SessionName {
         &self.session
     }
 
+    #[must_use]
     pub fn run_id(&self) -> RunId {
         self.run_id
     }
 
+    #[must_use]
     pub fn generation(&self) -> Generation {
         self.generation
     }
 
     /// Compute canonical hash on demand. Never stale.
+    #[must_use]
     pub fn launch_spec_hash(&self) -> String {
         self.launch_spec.canonical_hash()
     }
 
+    #[must_use]
     pub fn launch_spec(&self) -> &LaunchSpec {
         &self.launch_spec
     }
 
+    #[must_use]
     pub fn sidecar(&self) -> &ProcessIdentity {
         &self.sidecar
     }
 
+    #[must_use]
     pub fn status(&self) -> &RunStatus {
         &self.status
     }
 
+    #[must_use]
     pub fn started_at(&self) -> &EpochTimestamp {
         &self.started_at
     }
 
+    #[must_use]
     pub fn restart_count(&self) -> u32 {
         self.restart_count
     }
 
+    #[must_use]
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
