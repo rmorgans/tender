@@ -73,13 +73,21 @@ fn start_same_spec_is_idempotent() {
 
     // Second start with exact same args
     let out2 = run_tender(&root, &["start", "idem-same", "sleep", "60"]);
-    assert!(out2.status.success(), "second start should succeed (idempotent)");
+    assert!(
+        out2.status.success(),
+        "second start should succeed (idempotent)"
+    );
 
     let meta2: serde_json::Value =
         serde_json::from_slice(&out2.stdout).expect("second output not JSON");
-    let run_id2 = meta2["run_id"].as_str().expect("no run_id in second output");
+    let run_id2 = meta2["run_id"]
+        .as_str()
+        .expect("no run_id in second output");
 
-    assert_eq!(run_id1, run_id2, "idempotent start should return same run_id");
+    assert_eq!(
+        run_id1, run_id2,
+        "idempotent start should return same run_id"
+    );
 
     // Clean up
     run_tender(&root, &["kill", "--force", "idem-same"]);
@@ -123,10 +131,7 @@ fn start_after_terminal_is_error() {
 
     // Try to start again with same name
     let out2 = run_tender(&root, &["start", "idem-term", "true"]);
-    assert!(
-        !out2.status.success(),
-        "start after terminal should fail"
-    );
+    assert!(!out2.status.success(), "start after terminal should fail");
 
     let stderr = String::from_utf8_lossy(&out2.stderr);
     assert!(

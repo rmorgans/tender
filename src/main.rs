@@ -85,7 +85,12 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { name, cmd, stdin, replace } => cmd_start(&name, cmd, stdin, replace),
+        Commands::Start {
+            name,
+            cmd,
+            stdin,
+            replace,
+        } => cmd_start(&name, cmd, stdin, replace),
         Commands::Push { name } => cmd_push(&name),
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
@@ -132,8 +137,7 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
                         let _ = platform::kill_process(child, true);
                     }
                     // Wait for sidecar to write terminal state AND release lock
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                     loop {
                         if let Ok(m) = session::read_meta(&existing) {
                             if m.status().is_terminal()

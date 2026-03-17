@@ -77,7 +77,9 @@ fn replace_running_session() {
 
     let meta2: serde_json::Value =
         serde_json::from_slice(&out2.stdout).expect("second output not JSON");
-    let run_id2 = meta2["run_id"].as_str().expect("no run_id in second output");
+    let run_id2 = meta2["run_id"]
+        .as_str()
+        .expect("no run_id in second output");
 
     // Should be a NEW session (different run_id)
     assert_ne!(run_id1, run_id2, "replace should create a new run_id");
@@ -123,7 +125,6 @@ fn replace_nonexistent_is_noop() {
         "replace on nonexistent session should succeed"
     );
 
-    let meta: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("output not JSON");
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("output not JSON");
     assert!(meta["run_id"].as_str().is_some(), "should have a run_id");
 }

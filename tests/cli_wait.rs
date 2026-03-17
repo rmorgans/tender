@@ -149,10 +149,7 @@ fn wait_exit_code_2_for_spawn_failed() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
-    run_tender(
-        &root,
-        &["start", "wait-spawn", "/nonexistent/binary"],
-    );
+    run_tender(&root, &["start", "wait-spawn", "/nonexistent/binary"]);
     // SpawnFailed is written by sidecar, wait for it
     wait_terminal(&root, "wait-spawn");
 
