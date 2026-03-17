@@ -179,23 +179,42 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Send meta snapshot over pipe — CLI reads this directly, no disk race.
     signal_meta_snapshot(ready, &meta)?;
 
-    // Set up timeout if configured
+    // Set up timeout if configured.
+    // The cancel flag prevents the thread from killing a reused PID after the child exits.
     let timed_out = Arc::new(AtomicBool::new(false));
+    let timeout_cancel = Arc::new(AtomicBool::new(false));
     if let Some(timeout_s) = meta.launch_spec().timeout_s {
         let timed_out_clone = Arc::clone(&timed_out);
-        let child_pid = child.id();
+        let cancel_clone = Arc::clone(&timeout_cancel);
+        let child_pid = child.id() as i32;
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(timeout_s));
+            // Sleep in small increments so we can check the cancel flag
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+            loop {
+                if cancel_clone.load(Ordering::Relaxed) {
+                    return; // Child exited before timeout — don't kill
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if cancel_clone.load(Ordering::Relaxed) {
+                return; // Final check after deadline
+            }
             timed_out_clone.store(true, Ordering::Relaxed);
-            // Kill the child — this triggers child.wait() to return
+            // Kill the process GROUP (negative PID), matching normal kill semantics
             unsafe {
-                libc::kill(child_pid as i32, libc::SIGKILL);
+                libc::kill(-child_pid, libc::SIGKILL);
             }
         });
     }
 
     // Capture output and supervise
     let exit_reason = supervise(&session, &mut child)?;
+
+    // Cancel timeout thread — child has exited, PID may be reused
+    timeout_cancel.store(true, Ordering::Relaxed);
 
     // Override reason if timeout fired (highest priority)
     let exit_reason = if timed_out.load(Ordering::Relaxed) {

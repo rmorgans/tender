@@ -376,12 +376,23 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     };
 
     // Write kill_forced marker before force-killing so sidecar can detect it
-    if force {
-        let _ = std::fs::write(session.path().join("kill_forced"), "");
-    }
+    let kill_forced_path = if force {
+        let p = session.path().join("kill_forced");
+        let _ = std::fs::write(&p, "");
+        Some(p)
+    } else {
+        None
+    };
 
     // Kill the child's process group. Verifies identity first.
-    platform::kill_process(&child, force)?;
+    if let Err(e) = platform::kill_process(&child, force) {
+        // Clean up marker on error — don't leave a stale marker that could
+        // mislabel a later exit as KilledForced
+        if let Some(ref p) = kill_forced_path {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e.into());
+    }
 
     // Wait briefly for sidecar to write terminal state, then re-read
     for _ in 0..50 {
