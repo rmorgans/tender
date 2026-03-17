@@ -199,7 +199,7 @@ fn try_idempotent_start(
         if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
             let json = serde_json::to_string_pretty(&existing_meta)?;
             println!("{json}");
-            return Ok(None);
+            Ok(None)
         } else {
             anyhow::bail!(
                 "session conflict: {name} is running with a different launch spec (use --replace to override)"
@@ -317,8 +317,8 @@ fn cmd_start(
         Ok(s) => s,
         Err(session::SessionError::AlreadyExists(_)) => {
             match try_idempotent_start(&root, &session_name, &launch_spec)? {
-                None => return Ok(()),    // idempotent return printed
-                Some(s) => s,             // orphan cleaned, session re-created
+                None => return Ok(()), // idempotent return printed
+                Some(s) => s,          // orphan cleaned, session re-created
             }
         }
         Err(e) => return Err(e.into()),

@@ -99,11 +99,7 @@ fn setup_stdin_forwarding(
 /// Spawn a timeout thread that kills the child's process group after `timeout_s` seconds.
 /// Returns the `timed_out` flag. The caller passes a `cancel` flag to prevent the kill
 /// after the child exits naturally (PID reuse safety).
-fn setup_timeout(
-    child_pid: i32,
-    timeout_s: u64,
-    cancel: Arc<AtomicBool>,
-) -> Arc<AtomicBool> {
+fn setup_timeout(child_pid: i32, timeout_s: u64, cancel: Arc<AtomicBool>) -> Arc<AtomicBool> {
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_clone = Arc::clone(&timed_out);
     std::thread::spawn(move || {
@@ -131,10 +127,7 @@ fn setup_timeout(
 }
 
 /// Collect capture errors and stdin forwarding errors into a warning list.
-fn collect_warnings(
-    session_dir: &Path,
-    stdin_errors: &Arc<Mutex<Vec<String>>>,
-) -> Vec<String> {
+fn collect_warnings(session_dir: &Path, stdin_errors: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
     let mut warnings = Vec::new();
 
     // Collect capture errors
@@ -177,10 +170,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
 
     // Read launch spec
     let spec_path = session_dir.join("launch_spec.json");
-    let spec_json = std::fs::read_to_string(&spec_path)
-        .context("failed to read launch_spec.json")?;
-    let launch_spec: LaunchSpec = serde_json::from_str(&spec_json)
-        .context("invalid launch_spec.json")?;
+    let spec_json =
+        std::fs::read_to_string(&spec_path).context("failed to read launch_spec.json")?;
+    let launch_spec: LaunchSpec =
+        serde_json::from_str(&spec_json).context("invalid launch_spec.json")?;
     let _ = std::fs::remove_file(&spec_path);
 
     let run_id = RunId::new();
