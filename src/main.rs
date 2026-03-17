@@ -366,6 +366,11 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
         }
     };
 
+    // Write kill_forced marker before force-killing so sidecar can detect it
+    if force {
+        let _ = std::fs::write(session.path().join("kill_forced"), "");
+    }
+
     // Kill the child's process group. Verifies identity first.
     platform::kill_process(&child, force)?;
 

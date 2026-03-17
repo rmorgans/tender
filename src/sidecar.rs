@@ -197,10 +197,22 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Capture output and supervise
     let exit_reason = supervise(&session, &mut child)?;
 
-    // Override reason if timeout fired
+    // Override reason if timeout fired (highest priority)
     let exit_reason = if timed_out.load(Ordering::Relaxed) {
         ExitReason::TimedOut
     } else {
+        exit_reason
+    };
+
+    // Check for force-kill marker (lower priority than timeout)
+    let kill_forced_path = session_dir.join("kill_forced");
+    let exit_reason = if !matches!(exit_reason, ExitReason::TimedOut)
+        && kill_forced_path.exists()
+    {
+        let _ = std::fs::remove_file(&kill_forced_path);
+        ExitReason::KilledForced
+    } else {
+        let _ = std::fs::remove_file(&kill_forced_path);
         exit_reason
     };
 
