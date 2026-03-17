@@ -279,3 +279,64 @@ impl LockGuard {
         Ok(Self { _file: file })
     }
 }
+
+/// Exclusive file lock on a session (Windows).
+/// Uses LockFileEx for cross-process exclusion.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct LockGuard {
+    _file: File,
+}
+
+#[cfg(windows)]
+impl LockGuard {
+    /// Try to acquire an exclusive lock. Returns Locked if held by another process.
+    pub fn try_acquire(session: &SessionDir) -> Result<Self, SessionError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+        use windows_sys::Win32::Storage::FileSystem::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+        };
+
+        let lock_path = session.lock_path();
+        let file = File::create(&lock_path)?;
+        let handle = file.as_raw_handle() as _;
+
+        let mut overlapped = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            LockFileEx(
+                handle,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if ret == 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+                return Err(SessionError::Locked(session.name().to_string()));
+            }
+            return Err(SessionError::Io(err));
+        }
+        Ok(Self { _file: file })
+    }
+
+    /// Blocking acquire — waits until lock is available.
+    pub fn acquire(session: &SessionDir) -> Result<Self, SessionError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
+
+        let lock_path = session.lock_path();
+        let file = File::create(&lock_path)?;
+        let handle = file.as_raw_handle() as _;
+
+        let mut overlapped = unsafe { std::mem::zeroed() };
+        let ret = unsafe { LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &mut overlapped) };
+        if ret == 0 {
+            return Err(SessionError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(Self { _file: file })
+    }
+}

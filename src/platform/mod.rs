@@ -7,9 +7,13 @@ use crate::model::ids::ProcessIdentity;
 
 #[cfg(unix)]
 pub mod unix;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(unix)]
 pub type Current = unix::UnixPlatform;
+#[cfg(windows)]
+pub type Current = windows::WindowsPlatform;
 
 /// Result of probing a process by identity.
 /// Lifecycle state comes from the sidecar; process observation comes from

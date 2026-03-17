@@ -727,6 +727,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]
