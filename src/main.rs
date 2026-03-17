@@ -286,19 +286,52 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
 
 fn cmd_status(name: &str) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
-    use tender::session::{self, SessionRoot};
+    use tender::session::{self, SessionError, SessionRoot};
 
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
-    let session = session::open(&root, &session_name)?
-        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+    // Try normal open first
+    let session = match session::open(&root, &session_name) {
+        Ok(Some(s)) => s,
+        Ok(None) => anyhow::bail!("session not found: {name}"),
+        Err(SessionError::Corrupt { .. }) => {
+            // Check for orphan dir (child_pid but no meta.json)
+            let orphan_dir = root.path().join(session_name.as_str());
+            if orphan_dir.exists() {
+                cleanup_orphan_dir(&orphan_dir);
+                anyhow::bail!("session {name} was orphaned (cleaned up)");
+            }
+            anyhow::bail!("session not found: {name}");
+        }
+        Err(e) => return Err(e.into()),
+    };
 
-    let meta = session::read_meta(&session)?;
+    let mut meta = session::read_meta(&session)?;
+
+    // Reconciliation: non-terminal + lock not held -> sidecar crashed
+    if !meta.status().is_terminal() && !session::is_locked(&session)? {
+        meta.reconcile_sidecar_lost(now_epoch_secs())?;
+        session::write_meta_atomic(&session, &meta)?;
+    }
+
     let json = serde_json::to_string_pretty(&meta)?;
     println!("{json}");
-
     Ok(())
+}
+
+/// Clean up an orphaned session dir that has child_pid but no meta.json.
+/// Kills the orphaned child process if still alive, then removes the dir.
+fn cleanup_orphan_dir(dir: &std::path::Path) {
+    let child_pid_path = dir.join("child_pid");
+    if let Ok(pid_str) = std::fs::read_to_string(&child_pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn cmd_list() -> anyhow::Result<()> {
