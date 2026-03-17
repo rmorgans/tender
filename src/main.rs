@@ -117,113 +117,112 @@ fn main() {
     }
 }
 
-fn cmd_start(
-    name: &str,
-    cmd: Vec<String>,
-    stdin: bool,
-    replace: bool,
-    timeout: Option<u64>,
+/// Handle `--replace`: kill any existing session and remove its directory.
+fn handle_replace(
+    root: &tender::session::SessionRoot,
+    session_name: &tender::model::ids::SessionName,
 ) -> anyhow::Result<()> {
-    use tender::model::ids::SessionName;
-    use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
-    use tender::session::{self, SessionRoot};
+    use tender::session;
 
-    let session_name = SessionName::new(name)?;
-    let root = SessionRoot::default_path()?;
-
-    // Handle --replace before session creation
-    if replace {
-        let session_path = root.path().join(session_name.as_str());
-        if session_path.exists() {
-            if !session_path.join("meta.json").exists() {
-                // Orphan dir — just clean up
-                cleanup_orphan_dir(&session_path);
-            } else if let Some(existing) = session::open(&root, &session_name)? {
-                let existing_meta = session::read_meta(&existing)?;
-                if !existing_meta.status().is_terminal() {
-                    // Kill the child
-                    if let Some(child) = existing_meta.status().child() {
-                        let _ = platform::kill_process(child, true);
-                    }
-                    // Wait for sidecar to write terminal state AND release lock
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    loop {
-                        if let Ok(m) = session::read_meta(&existing) {
-                            if m.status().is_terminal()
-                                && !session::is_locked(&existing).unwrap_or(true)
-                            {
-                                break; // Terminal + unlocked = safe to remove
-                            }
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            anyhow::bail!(
-                                "replace timed out: old sidecar for {name} did not exit within 10s"
-                            );
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
+    let session_path = root.path().join(session_name.as_str());
+    if session_path.exists() {
+        if !session_path.join("meta.json").exists() {
+            // Orphan dir — just clean up
+            cleanup_orphan_dir(&session_path);
+        } else if let Some(existing) = session::open(root, session_name)? {
+            let existing_meta = session::read_meta(&existing)?;
+            if !existing_meta.status().is_terminal() {
+                // Kill the child
+                if let Some(child) = existing_meta.status().child() {
+                    let _ = platform::kill_process(child, true);
                 }
-                // Safe to remove — sidecar has exited or timed out
-                std::fs::remove_dir_all(existing.path())?;
-            }
-        }
-    }
-
-    // Build launch spec
-    let mut launch_spec = LaunchSpec::new(cmd)?;
-    launch_spec.stdin_mode = if stdin {
-        StdinMode::Pipe
-    } else {
-        StdinMode::None
-    };
-    launch_spec.timeout_s = timeout;
-
-    // Create session directory (with idempotent handling)
-    let session = match session::create(&root, &session_name) {
-        Ok(s) => s,
-        Err(session::SessionError::AlreadyExists(_)) => {
-            let session_path = root.path().join(session_name.as_str());
-            // Orphan dir check: no meta.json means sidecar crashed before writing state
-            if !session_path.join("meta.json").exists() {
-                cleanup_orphan_dir(&session_path);
-                session::create(&root, &session_name)?
-            } else {
-                let existing = session::open(&root, &session_name)?
-                    .ok_or_else(|| anyhow::anyhow!("session exists but not openable"))?;
-                let existing_meta = session::read_meta(&existing)?;
-
-                if matches!(
-                    existing_meta.status(),
-                    tender::model::state::RunStatus::Running { .. }
-                ) {
-                    // Running — check spec match for idempotent return
-                    if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
-                        let json = serde_json::to_string_pretty(&existing_meta)?;
-                        println!("{json}");
-                        return Ok(());
-                    } else {
+                // Wait for sidecar to write terminal state AND release lock
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let name = session_name.as_str();
+                loop {
+                    if let Ok(m) = session::read_meta(&existing) {
+                        if m.status().is_terminal()
+                            && !session::is_locked(&existing).unwrap_or(true)
+                        {
+                            break; // Terminal + unlocked = safe to remove
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
                         anyhow::bail!(
-                            "session conflict: {name} is running with a different launch spec (use --replace to override)"
+                            "replace timed out: old sidecar for {name} did not exit within 10s"
                         );
                     }
-                } else if existing_meta.status().is_terminal() {
-                    anyhow::bail!(
-                        "session already exists in terminal state: {name} (use --replace to restart)"
-                    );
-                } else {
-                    // Starting — sidecar is still initializing
-                    anyhow::bail!(
-                        "session {name} is still starting (sidecar has not reached Running yet)"
-                    );
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
+            // Safe to remove — sidecar has exited or timed out
+            std::fs::remove_dir_all(existing.path())?;
         }
-        Err(e) => return Err(e.into()),
-    };
+    }
+    Ok(())
+}
+
+/// Handle `AlreadyExists` when creating a session.
+///
+/// Returns:
+/// - `Ok(None)` if idempotent return was already printed (caller should `return Ok(())`)
+/// - `Ok(Some(session))` if orphan was cleaned and session was re-created
+/// - `Err` for conflicts, terminal state, or Starting state
+fn try_idempotent_start(
+    root: &tender::session::SessionRoot,
+    session_name: &tender::model::ids::SessionName,
+    launch_spec: &tender::model::spec::LaunchSpec,
+) -> anyhow::Result<Option<tender::session::SessionDir>> {
+    use tender::session;
+
+    let session_path = root.path().join(session_name.as_str());
+    let name = session_name.as_str();
+
+    // Orphan dir check: no meta.json means sidecar crashed before writing state
+    if !session_path.join("meta.json").exists() {
+        cleanup_orphan_dir(&session_path);
+        let session = session::create(root, session_name)?;
+        return Ok(Some(session));
+    }
+
+    let existing = session::open(root, session_name)?
+        .ok_or_else(|| anyhow::anyhow!("session exists but not openable"))?;
+    let existing_meta = session::read_meta(&existing)?;
+
+    if matches!(
+        existing_meta.status(),
+        tender::model::state::RunStatus::Running { .. }
+    ) {
+        // Running — check spec match for idempotent return
+        if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
+            let json = serde_json::to_string_pretty(&existing_meta)?;
+            println!("{json}");
+            return Ok(None);
+        } else {
+            anyhow::bail!(
+                "session conflict: {name} is running with a different launch spec (use --replace to override)"
+            );
+        }
+    } else if existing_meta.status().is_terminal() {
+        anyhow::bail!(
+            "session already exists in terminal state: {name} (use --replace to restart)"
+        );
+    } else {
+        // Starting — sidecar is still initializing
+        anyhow::bail!("session {name} is still starting (sidecar has not reached Running yet)");
+    }
+}
+
+/// Write launch spec, spawn sidecar, wait for readiness, and print meta JSON.
+fn spawn_and_wait_ready(
+    session: &tender::session::SessionDir,
+    launch_spec: &tender::model::spec::LaunchSpec,
+) -> anyhow::Result<()> {
+    use tender::platform::unix as platform;
 
     // Write launch spec for sidecar to read
-    let spec_json = serde_json::to_string_pretty(&launch_spec)?;
+    let spec_json = serde_json::to_string_pretty(launch_spec)?;
     std::fs::write(session.path().join("launch_spec.json"), &spec_json)?;
 
     // Create readiness pipe
@@ -282,6 +281,49 @@ fn cmd_start(
     }
 
     Ok(())
+}
+
+fn cmd_start(
+    name: &str,
+    cmd: Vec<String>,
+    stdin: bool,
+    replace: bool,
+    timeout: Option<u64>,
+) -> anyhow::Result<()> {
+    use tender::model::ids::SessionName;
+    use tender::model::spec::{LaunchSpec, StdinMode};
+    use tender::session::{self, SessionRoot};
+
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    // Handle --replace before session creation
+    if replace {
+        handle_replace(&root, &session_name)?;
+    }
+
+    // Build launch spec
+    let mut launch_spec = LaunchSpec::new(cmd)?;
+    launch_spec.stdin_mode = if stdin {
+        StdinMode::Pipe
+    } else {
+        StdinMode::None
+    };
+    launch_spec.timeout_s = timeout;
+
+    // Create session directory (with idempotent handling)
+    let session = match session::create(&root, &session_name) {
+        Ok(s) => s,
+        Err(session::SessionError::AlreadyExists(_)) => {
+            match try_idempotent_start(&root, &session_name, &launch_spec)? {
+                None => return Ok(()),    // idempotent return printed
+                Some(s) => s,             // orphan cleaned, session re-created
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    spawn_and_wait_ready(&session, &launch_spec)
 }
 
 fn cmd_push(name: &str) -> anyhow::Result<()> {
