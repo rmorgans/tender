@@ -128,3 +128,24 @@ fn replace_nonexistent_is_noop() {
     let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("output not JSON");
     assert!(meta["run_id"].as_str().is_some(), "should have a run_id");
 }
+
+#[test]
+fn replace_increments_generation() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // First start — generation should be 1
+    let out1 = run_tender(&root, &["start", "gen-test", "sleep", "60"]);
+    assert!(out1.status.success());
+    let meta1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
+    assert_eq!(meta1["generation"], 1);
+
+    // Replace — generation should be 2
+    let out2 = run_tender(&root, &["start", "--replace", "gen-test", "sleep", "60"]);
+    assert!(out2.status.success());
+    let meta2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(meta2["generation"], 2);
+
+    // Clean up
+    run_tender(&root, &["kill", "--force", "gen-test"]);
+}

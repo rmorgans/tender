@@ -185,7 +185,20 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     let _ = std::fs::remove_file(&spec_path);
 
     let run_id = RunId::new();
-    let generation = Generation::first();
+    let generation = {
+        let gen_path = session_dir.join("generation");
+        if let Ok(content) = std::fs::read_to_string(&gen_path) {
+            let _ = std::fs::remove_file(&gen_path); // consumed
+            content
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(Generation::from_u64)
+                .unwrap_or_else(Generation::first)
+        } else {
+            Generation::first()
+        }
+    };
 
     let mut meta = Meta::new_starting(
         session_name,

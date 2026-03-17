@@ -119,20 +119,24 @@ fn main() {
 }
 
 /// Handle `--replace`: kill any existing session and remove its directory.
+/// Returns `Some(next_generation)` when an existing session was replaced,
+/// `None` when no session existed or only an orphan was cleaned.
 fn handle_replace(
     root: &tender::session::SessionRoot,
     session_name: &tender::model::ids::SessionName,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<tender::model::ids::Generation>> {
     use tender::platform::unix as platform;
     use tender::session;
 
     let session_path = root.path().join(session_name.as_str());
     if session_path.exists() {
         if !session_path.join("meta.json").exists() {
-            // Orphan dir — just clean up
+            // Orphan dir — just clean up, no generation to read
             cleanup_orphan_dir(&session_path);
         } else if let Some(existing) = session::open(root, session_name)? {
             let existing_meta = session::read_meta(&existing)?;
+            let prev_generation = existing_meta.generation();
+
             if !existing_meta.status().is_terminal() {
                 // Kill the child
                 if let Some(child) = existing_meta.status().child() {
@@ -159,9 +163,10 @@ fn handle_replace(
             }
             // Safe to remove — sidecar has exited or timed out
             std::fs::remove_dir_all(existing.path())?;
+            return Ok(Some(prev_generation.next()));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Handle `AlreadyExists` when creating a session.
@@ -299,9 +304,11 @@ fn cmd_start(
     let root = SessionRoot::default_path()?;
 
     // Handle --replace before session creation
-    if replace {
-        handle_replace(&root, &session_name)?;
-    }
+    let next_generation = if replace {
+        handle_replace(&root, &session_name)?
+    } else {
+        None
+    };
 
     // Build launch spec
     let mut launch_spec = LaunchSpec::new(cmd)?;
@@ -323,6 +330,11 @@ fn cmd_start(
         }
         Err(e) => return Err(e.into()),
     };
+
+    // Write generation hint for sidecar to pick up
+    if let Some(next_gen) = next_generation {
+        let _ = std::fs::write(session.path().join("generation"), next_gen.as_u64().to_string());
+    }
 
     spawn_and_wait_ready(&session, &launch_spec)
 }

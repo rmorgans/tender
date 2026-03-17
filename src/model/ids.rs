@@ -63,6 +63,12 @@ impl Generation {
         Self(1)
     }
 
+    /// Construct from a raw value. Returns first() if n is 0.
+    #[must_use]
+    pub fn from_u64(n: u64) -> Self {
+        if n == 0 { Self::first() } else { Self(n) }
+    }
+
     #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
