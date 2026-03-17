@@ -108,6 +108,18 @@ fn session_name_whitespace_rejected() {
 }
 
 #[test]
+fn session_name_too_long_rejected() {
+    let long_name = "a".repeat(256);
+    assert!(matches!(
+        SessionName::new(&long_name).unwrap_err(),
+        SessionNameError::TooLong
+    ));
+    // 255 bytes is the limit — should succeed
+    let max_name = "a".repeat(255);
+    assert!(SessionName::new(&max_name).is_ok());
+}
+
+#[test]
 fn session_name_underscore_prefix_rejected() {
     assert!(matches!(
         SessionName::new("_sidecar").unwrap_err(),

@@ -1,14 +1,17 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+use rustix::fs::{self as rfs, Mode, OFlags};
+
 use crate::model::ids::ProcessIdentity;
 
 /// Create a named pipe (FIFO) at `path` with mode 0600.
+/// Note: rustix doesn't provide mkfifo on macOS, so this stays as raw libc.
 pub fn mkfifo(path: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -25,53 +28,21 @@ pub fn mkfifo(path: &Path) -> io::Result<()> {
 }
 
 /// Create a pipe. Returns (read_fd, write_fd) as owned Files.
-/// Both fds have close-on-exec set atomically where possible.
+/// Both fds have close-on-exec set.
 pub fn pipe() -> io::Result<(File, File)> {
-    let mut fds = [0i32; 2];
-
     #[cfg(target_os = "linux")]
-    {
-        // Atomic CLOEXEC — no window for fd leak across fork
-        // SAFETY: fds is a 2-element array, which is what pipe2 requires.
-        // O_CLOEXEC is a valid flag. pipe2 may fail but won't cause UB.
-        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
+    let (read_fd, write_fd) = { rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)? };
 
     #[cfg(not(target_os = "linux"))]
-    {
-        // SAFETY: fds is a 2-element array, which is what pipe() requires.
-        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Set close-on-exec on both ends. Check return values.
-        for &fd in &fds {
-            // SAFETY: fd is a valid open file descriptor just returned by pipe().
-            // F_SETFD with FD_CLOEXEC is a valid fcntl operation.
-            let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-            if ret == -1 {
-                let err = io::Error::last_os_error();
-                // SAFETY: fds[0] and fds[1] are valid open file descriptors from pipe().
-                // Closing them on error prevents fd leak. Double-close is avoided
-                // because we return immediately after this block.
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(err);
-            }
-        }
-    }
+    let (read_fd, write_fd) = {
+        // macOS doesn't have pipe2 — use pipe() + set CLOEXEC
+        let (r, w) = rustix::pipe::pipe()?;
+        rustix::io::fcntl_setfd(&r, rustix::io::FdFlags::CLOEXEC)?;
+        rustix::io::fcntl_setfd(&w, rustix::io::FdFlags::CLOEXEC)?;
+        (r, w)
+    };
 
-    // SAFETY: fds[0] and fds[1] are valid open file descriptors just returned by
-    // pipe()/pipe2(). from_raw_fd takes ownership, so File will close them on drop.
-    // Each fd is consumed exactly once — no aliasing or double-close.
-    let read = unsafe { File::from_raw_fd(fds[0]) };
-    let write = unsafe { File::from_raw_fd(fds[1]) };
-    Ok((read, write))
+    Ok((File::from(read_fd), File::from(write_fd)))
 }
 
 /// Spawn the sidecar as a detached process.
@@ -139,24 +110,12 @@ pub fn read_ready_signal(mut read_end: File) -> io::Result<String> {
 /// Returns ENXIO immediately if no reader is connected.
 /// On success, clears O_NONBLOCK so subsequent writes block normally.
 pub fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    let fd: OwnedFd = rfs::open(path, OFlags::WRONLY | OFlags::NONBLOCK, Mode::empty())?;
 
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
-    // SAFETY: c_path is a valid null-terminated C string (CString guarantees this).
-    // O_WRONLY | O_NONBLOCK are valid flags. open may fail but won't cause UB.
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // Clear O_NONBLOCK after connect so writes block normally.
-    // SAFETY: fd is a valid open file descriptor (checked >= 0 above).
-    // F_SETFL with 0 clears all file status flags — valid operation.
-    unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
-    // SAFETY: fd is a valid open file descriptor. from_raw_fd takes ownership;
-    // no other code uses this fd after this point.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let flags = rfs::fcntl_getfl(&fd)?;
+    rfs::fcntl_setfl(&fd, flags & !OFlags::NONBLOCK)?;
+
+    Ok(File::from(fd))
 }
 
 /// Write a readiness signal to the pipe.
@@ -204,9 +163,7 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad starttime: {e}")))?;
     // Convert ticks to nanoseconds
-    // SAFETY: _SC_CLK_TCK is a valid sysconf name. sysconf never causes UB;
-    // it returns -1 on error (which won't happen for _SC_CLK_TCK on Linux).
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    let ticks_per_sec = rustix::param::clock_ticks_per_second() as u64;
     Ok(ticks * (1_000_000_000 / ticks_per_sec))
 }
 
@@ -317,10 +274,14 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
     }
 
     let pid = id.pid.get() as i32;
-    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    let signal = if force {
+        rustix::process::Signal::KILL
+    } else {
+        rustix::process::Signal::TERM
+    };
 
     // Try process group first (kills descendants), fall back to direct
-    send_signal(-pid, signal).or_else(|_| send_signal(pid, signal))?;
+    send_signal_group(pid, signal).or_else(|_| send_signal_direct(pid, signal))?;
 
     if force {
         return Ok(());
@@ -337,24 +298,34 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
     }
 
     // Still alive — escalate to SIGKILL
-    send_signal(-pid, libc::SIGKILL).or_else(|_| send_signal(pid, libc::SIGKILL))?;
+    send_signal_group(pid, rustix::process::Signal::KILL)
+        .or_else(|_| send_signal_direct(pid, rustix::process::Signal::KILL))?;
 
     Ok(())
 }
 
-fn send_signal(pid: i32, signal: i32) -> io::Result<()> {
-    // SAFETY: kill() with any pid/signal combination never causes UB.
-    // Negative pid targets the process group. The call may fail (ESRCH, EPERM)
-    // but failure is handled via the return value check below.
-    let ret = unsafe { libc::kill(pid, signal) };
-    if ret != 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(()); // already dead
-        }
-        return Err(err);
+/// Send a signal to a process group (kill(-pgid, sig)).
+fn send_signal_group(pid: i32, signal: rustix::process::Signal) -> io::Result<()> {
+    // rustix::process::Pid is a NonZero type representing a positive PID.
+    // For process group kill we need the group leader's PID.
+    let rpid = rustix::process::Pid::from_raw(pid)
+        .ok_or_else(|| io::Error::other("invalid pid for process group signal"))?;
+    match rustix::process::kill_process_group(rpid, signal) {
+        Ok(()) => Ok(()),
+        Err(e) if e == rustix::io::Errno::SRCH => Ok(()), // already dead
+        Err(e) => Err(e.into()),
     }
-    Ok(())
+}
+
+/// Send a signal directly to a process (kill(pid, sig)).
+fn send_signal_direct(pid: i32, signal: rustix::process::Signal) -> io::Result<()> {
+    let rpid = rustix::process::Pid::from_raw(pid)
+        .ok_or_else(|| io::Error::other("invalid pid for direct signal"))?;
+    match rustix::process::kill_process(rpid, signal) {
+        Ok(()) => Ok(()),
+        Err(e) if e == rustix::io::Errno::SRCH => Ok(()), // already dead
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

@@ -119,7 +119,14 @@ pub enum SessionNameError {
     ContainsWhitespace,
     #[error("session name cannot start with '_'")]
     StartsWithUnderscore,
+
+    #[error("session name too long (max {MAX_SESSION_NAME_LEN} bytes)")]
+    TooLong,
 }
+
+/// Maximum length for a session name. Matches the POSIX filename component limit
+/// and leaves room for filenames like `meta.json.tmp` under the session directory.
+const MAX_SESSION_NAME_LEN: usize = 255;
 
 impl SessionName {
     /// Create a new validated session name.
@@ -135,6 +142,9 @@ impl SessionName {
     fn validate(name: &str) -> Result<(), SessionNameError> {
         if name.is_empty() {
             return Err(SessionNameError::Empty);
+        }
+        if name.len() > MAX_SESSION_NAME_LEN {
+            return Err(SessionNameError::TooLong);
         }
         if name.contains('/') {
             return Err(SessionNameError::ContainsSlash);

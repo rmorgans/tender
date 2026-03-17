@@ -1,28 +1,11 @@
-use std::process::Command;
+mod harness;
+
+use harness::{tender, wait_terminal};
+use predicates::prelude::*;
 use std::sync::Mutex;
 use tempfile::TempDir;
 
 static SERIAL: Mutex<()> = Mutex::new(());
-
-fn tender_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_tender"))
-}
-
-fn run_tender(root: &TempDir, args: &[&str]) -> std::process::Output {
-    let bin = tender_bin();
-    Command::new(bin)
-        .args(args)
-        .env("HOME", root.path())
-        .output()
-        .expect("failed to run tender")
-}
-
-fn run_tender_status(output: &std::process::Output) -> (i32, String, String) {
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    (code, stdout, stderr)
-}
 
 #[test]
 fn start_returns_promptly_not_blocked_by_child() {
@@ -30,40 +13,38 @@ fn start_returns_promptly_not_blocked_by_child() {
     let root = TempDir::new().unwrap();
 
     let start = std::time::Instant::now();
-    let output = run_tender(&root, &["start", "prompt-test", "sleep", "60"]);
-    let elapsed = start.elapsed();
-
-    assert!(output.status.success(), "start failed");
-    // The readiness handshake must complete without waiting for the child.
-    // If the ready pipe fd leaks to the child, start blocks until child exits (60s).
+    tender(&root)
+        .args(["start", "prompt-test", "sleep", "60"])
+        .assert()
+        .success();
     assert!(
-        elapsed.as_secs() < 5,
-        "tender start blocked for {elapsed:?} — ready pipe fd likely leaked to child"
+        start.elapsed().as_secs() < 5,
+        "tender start blocked — ready pipe fd likely leaked to child"
     );
 
-    // Clean up: kill the child so it doesn't linger
-    let _ = run_tender(&root, &["kill", "--force", "prompt-test"]);
+    tender(&root)
+        .args(["kill", "--force", "prompt-test"])
+        .assert()
+        .success();
 }
 
 #[test]
 fn start_creates_session_and_returns_json() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
-    let output = run_tender(&root, &["start", "test-job", "echo", "hello"]);
-    let (code, stdout, stderr) = run_tender_status(&output);
 
-    assert_eq!(code, 0, "start failed: {stderr}");
+    let output = tender(&root)
+        .args(["start", "test-job", "echo", "hello"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 
-    // Parse output as JSON
-    let meta: serde_json::Value = serde_json::from_str(&stdout).expect("output is not valid JSON");
-
+    let meta: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(meta["session"], "test-job");
     assert_eq!(meta["schema_version"], 1);
-    // Sidecar spawns child and signals Running
     assert_eq!(meta["status"], "Running");
     assert!(meta["run_id"].is_string());
     assert!(meta["sidecar"]["pid"].is_number());
-    assert!(meta["sidecar"]["start_time_ns"].is_number());
     assert!(meta["child"]["pid"].is_number());
     assert_eq!(meta["launch_spec"]["argv"][0], "echo");
     assert_eq!(meta["launch_spec"]["argv"][1], "hello");
@@ -73,10 +54,12 @@ fn start_creates_session_and_returns_json() {
 fn start_writes_durable_meta_json() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
-    let output = run_tender(&root, &["start", "durable-test", "echo", "hi"]);
-    assert!(output.status.success());
 
-    // meta.json should exist on disk
+    tender(&root)
+        .args(["start", "durable-test", "echo", "hi"])
+        .assert()
+        .success();
+
     let meta_path = root.path().join(".tender/sessions/durable-test/meta.json");
     assert!(meta_path.exists(), "meta.json not written to disk");
 
@@ -90,18 +73,19 @@ fn start_same_name_after_completed_fails_already_exists() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
-    // First start succeeds
-    let output1 = run_tender(&root, &["start", "dup-test", "echo", "a"]);
-    assert!(output1.status.success());
+    tender(&root)
+        .args(["start", "dup-test", "echo", "a"])
+        .assert()
+        .success();
 
-    // Second start with same name fails (terminal state or conflict)
-    let output2 = run_tender(&root, &["start", "dup-test", "echo", "b"]);
-    let (code, _, stderr) = run_tender_status(&output2);
-    assert_ne!(code, 0);
-    assert!(
-        stderr.contains("terminal state") || stderr.contains("session conflict"),
-        "expected terminal/conflict error, got: {stderr}"
-    );
+    tender(&root)
+        .args(["start", "dup-test", "echo", "b"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("terminal state")
+                .or(predicate::str::contains("session conflict")),
+        );
 }
 
 #[test]
@@ -109,25 +93,24 @@ fn status_reads_session() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
-    // Create a session
-    let output = run_tender(&root, &["start", "status-test", "echo", "hi"]);
-    assert!(output.status.success());
+    tender(&root)
+        .args(["start", "status-test", "echo", "hi"])
+        .assert()
+        .success();
 
-    // Read it back with status
-    let output = run_tender(&root, &["status", "status-test"]);
-    let (code, stdout, stderr) = run_tender_status(&output);
-    assert_eq!(code, 0, "status failed: {stderr}");
-
-    let meta: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(meta["session"], "status-test");
+    tender(&root)
+        .args(["status", "status-test"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""session": "status-test"#));
 }
 
 #[test]
 fn status_nonexistent_fails() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
-    let output = run_tender(&root, &["status", "nope"]);
-    assert!(!output.status.success());
+
+    tender(&root).args(["status", "nope"]).assert().failure();
 }
 
 #[test]
@@ -136,21 +119,22 @@ fn list_shows_sessions() {
     let root = TempDir::new().unwrap();
 
     // Empty list
-    let output = run_tender(&root, &["list"]);
-    let (code, stdout, _) = run_tender_status(&output);
-    assert_eq!(code, 0);
-    let names: Vec<String> = serde_json::from_str(&stdout).unwrap();
+    let output = tender(&root).args(["list"]).output().unwrap();
+    let names: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
     assert!(names.is_empty());
 
     // Create sessions
-    run_tender(&root, &["start", "bravo", "echo", "b"]);
-    run_tender(&root, &["start", "alpha", "echo", "a"]);
+    tender(&root)
+        .args(["start", "bravo", "echo", "b"])
+        .assert()
+        .success();
+    tender(&root)
+        .args(["start", "alpha", "echo", "a"])
+        .assert()
+        .success();
 
-    // List should show both, sorted
-    let output = run_tender(&root, &["list"]);
-    let (code, stdout, _) = run_tender_status(&output);
-    assert_eq!(code, 0);
-    let names: Vec<String> = serde_json::from_str(&stdout).unwrap();
+    let output = tender(&root).args(["list"]).output().unwrap();
+    let names: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(names, vec!["alpha", "bravo"]);
 }
 
@@ -158,35 +142,35 @@ fn list_shows_sessions() {
 fn launch_spec_json_cleaned_up() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
-    let output = run_tender(&root, &["start", "cleanup-test", "echo", "hi"]);
-    assert!(output.status.success());
 
-    // launch_spec.json should have been deleted by sidecar
+    tender(&root)
+        .args(["start", "cleanup-test", "echo", "hi"])
+        .assert()
+        .success();
+
     let spec_path = root
         .path()
         .join(".tender/sessions/cleanup-test/launch_spec.json");
-    assert!(
-        !spec_path.exists(),
-        "launch_spec.json should be cleaned up after sidecar reads it"
-    );
+    // Wait for sidecar to clean up
+    wait_terminal(&root, "cleanup-test");
+    assert!(!spec_path.exists(), "launch_spec.json should be cleaned up");
 }
 
 #[test]
 fn lock_released_after_sidecar_exits() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
-    let output = run_tender(&root, &["start", "lock-test", "echo", "hi"]);
-    assert!(output.status.success());
 
-    // Wait for sidecar to finish supervising the child and exit
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    tender(&root)
+        .args(["start", "lock-test", "echo", "hi"])
+        .assert()
+        .success();
+    wait_terminal(&root, "lock-test");
 
     let lock_path = root.path().join(".tender/sessions/lock-test/lock");
-
     if lock_path.exists() {
         use std::fs::File;
         use std::os::unix::io::AsRawFd;
-
         let file = File::open(&lock_path).unwrap();
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         assert_eq!(ret, 0, "lock should be released after sidecar exits");

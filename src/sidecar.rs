@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
-use crate::model::ids::{EpochTimestamp, Generation, RunId, SessionName};
+use crate::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
@@ -101,8 +101,14 @@ fn setup_stdin_forwarding(
 
 /// Spawn a timeout thread that kills the child's process group after `timeout_s` seconds.
 /// Returns the `timed_out` flag. The caller passes a `cancel` flag to prevent the kill
-/// after the child exits naturally (PID reuse safety).
-fn setup_timeout(child_pid: i32, timeout_s: u64, cancel: Arc<AtomicBool>) -> Arc<AtomicBool> {
+/// after the child exits naturally.
+///
+/// Uses `ProcessIdentity`-verified kill to avoid signaling a recycled PID.
+fn setup_timeout(
+    child_identity: ProcessIdentity,
+    timeout_s: u64,
+    cancel: Arc<AtomicBool>,
+) -> Arc<AtomicBool> {
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_clone = Arc::clone(&timed_out);
     std::thread::spawn(move || {
@@ -121,15 +127,10 @@ fn setup_timeout(child_pid: i32, timeout_s: u64, cancel: Arc<AtomicBool>) -> Arc
             return; // Final check after deadline
         }
         timed_out_clone.store(true, Ordering::Relaxed);
-        // Kill the process GROUP (negative PID), matching normal kill semantics.
-        // SAFETY: kill() with any pid/signal combination never causes UB.
-        // child_pid came from child.id() on a process we just spawned, cast to
-        // i32 (safe because PIDs on macOS/Linux are always < i32::MAX).
-        // The cancel flag is checked immediately before to avoid killing a
-        // recycled PID after the child exits naturally.
-        unsafe {
-            libc::kill(-child_pid, libc::SIGKILL);
-        }
+        // Identity-verified kill: verifies PID birth time before signaling,
+        // preventing kill of a recycled PID if the child exited between the
+        // cancel check and the kill syscall.
+        let _ = platform::kill_process(&child_identity, true);
     });
     timed_out
 }
@@ -230,7 +231,8 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
     let mut child = match spawn_child(meta.launch_spec().argv(), stdin_piped) {
         Ok(c) => c,
-        Err(_) => {
+        Err(e) => {
+            meta.add_warning(format!("spawn failed: {e}"));
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
@@ -277,7 +279,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // --- Timeout setup ---
     let timeout_cancel = Arc::new(AtomicBool::new(false));
     let timed_out = if let Some(timeout_s) = meta.launch_spec().timeout_s {
-        setup_timeout(child.id() as i32, timeout_s, Arc::clone(&timeout_cancel))
+        setup_timeout(child_identity, timeout_s, Arc::clone(&timeout_cancel))
     } else {
         Arc::new(AtomicBool::new(false))
     };

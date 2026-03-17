@@ -1,0 +1,50 @@
+use tender::log::{LogQuery, follow_log, parse_since, query_log};
+use tender::model::ids::SessionName;
+use tender::session::{self, SessionRoot};
+
+pub fn cmd_log(
+    name: &str,
+    tail: Option<usize>,
+    follow: bool,
+    grep: Option<String>,
+    since: Option<String>,
+    raw: bool,
+) -> anyhow::Result<()> {
+    let session_name = SessionName::new(name)?;
+    let root = SessionRoot::default_path()?;
+
+    let session = session::open(&root, &session_name)?
+        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+
+    let since_us = match since {
+        Some(ref v) => Some(parse_since(v).map_err(|e| anyhow::anyhow!("invalid --since: {e}"))?),
+        None => None,
+    };
+
+    let query = LogQuery {
+        tail,
+        grep,
+        since_us,
+        raw,
+    };
+
+    let log_path = session.path().join("output.log");
+
+    if follow {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        follow_log(&log_path, &query, &mut out, || {
+            session::read_meta(&session)
+                .map(|m| m.status().is_terminal())
+                .unwrap_or(false)
+        })?;
+    } else if !log_path.exists() {
+        return Ok(());
+    } else {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        query_log(&log_path, &query, &mut out)?;
+    }
+
+    Ok(())
+}
