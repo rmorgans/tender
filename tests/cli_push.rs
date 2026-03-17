@@ -195,6 +195,28 @@ fn push_to_terminal_session_fails() {
 }
 
 #[test]
+fn push_fails_promptly_when_session_dies() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start a short-lived session with stdin
+    run_tender(&root, &["start", "--stdin", "push-die", "sleep", "1"]);
+    // Wait for it to exit naturally
+    wait_terminal(&root, "push-die");
+
+    // Push should fail promptly (not hang), because session is terminal
+    let start = std::time::Instant::now();
+    let output = run_tender_stdin(&root, &["push", "push-die"], b"hello\n");
+    let elapsed = start.elapsed();
+
+    assert!(!output.status.success(), "push to dead session should fail");
+    assert!(
+        elapsed.as_secs() < 5,
+        "push should fail promptly, not hang ({elapsed:?})"
+    );
+}
+
+#[test]
 fn push_immediately_after_start() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();

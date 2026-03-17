@@ -120,6 +120,24 @@ pub fn read_ready_signal(mut read_end: File) -> io::Result<String> {
     Ok(buf)
 }
 
+/// Open a FIFO for writing without blocking.
+/// Returns ENXIO immediately if no reader is connected.
+/// On success, clears O_NONBLOCK so subsequent writes block normally.
+pub fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Clear O_NONBLOCK after connect so writes block normally
+    unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 /// Write a readiness signal to the pipe.
 pub fn write_ready_signal(fd_num: RawFd, message: &str) -> io::Result<()> {
     let mut file = unsafe { File::from_raw_fd(fd_num) };
