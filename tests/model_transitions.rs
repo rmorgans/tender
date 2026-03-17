@@ -47,10 +47,7 @@ fn starting_to_running() {
 #[test]
 fn starting_to_spawn_failed() {
     let mut meta = starting_meta();
-    assert!(
-        meta.transition_spawn_failed(EpochTimestamp::now())
-            .is_ok()
-    );
+    assert!(meta.transition_spawn_failed(EpochTimestamp::now()).is_ok());
     assert!(matches!(meta.status(), RunStatus::SpawnFailed { .. }));
     assert!(meta.status().child().is_none());
     assert!(meta.status().ended_at().is_some());
@@ -81,11 +78,8 @@ fn running_to_exited_error() {
     meta.transition_running(test_child()).unwrap();
     let code = NonZeroI32::new(42).unwrap();
     assert!(
-        meta.transition_exited(
-            ExitReason::ExitedError { code },
-            EpochTimestamp::now()
-        )
-        .is_ok()
+        meta.transition_exited(ExitReason::ExitedError { code }, EpochTimestamp::now())
+            .is_ok()
     );
     match meta.status() {
         RunStatus::Exited {
@@ -154,10 +148,7 @@ fn running_to_timed_out() {
 #[test]
 fn starting_to_sidecar_lost() {
     let mut meta = starting_meta();
-    assert!(
-        meta.reconcile_sidecar_lost(EpochTimestamp::now())
-            .is_ok()
-    );
+    assert!(meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_ok());
     assert!(matches!(
         meta.status(),
         RunStatus::SidecarLost { child: None, .. }
@@ -168,10 +159,7 @@ fn starting_to_sidecar_lost() {
 fn running_to_sidecar_lost() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    assert!(
-        meta.reconcile_sidecar_lost(EpochTimestamp::now())
-            .is_ok()
-    );
+    assert!(meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_ok());
     assert!(matches!(
         meta.status(),
         RunStatus::SidecarLost { child: Some(_), .. }
@@ -221,10 +209,7 @@ fn cannot_exited_from_starting() {
 fn cannot_spawn_fail_from_running() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    assert!(
-        meta.transition_spawn_failed(EpochTimestamp::now())
-            .is_err()
-    );
+    assert!(meta.transition_spawn_failed(EpochTimestamp::now()).is_err());
 }
 
 #[test]
@@ -233,10 +218,7 @@ fn cannot_reconcile_terminal() {
     meta.transition_running(test_child()).unwrap();
     meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
         .unwrap();
-    assert!(
-        meta.reconcile_sidecar_lost(EpochTimestamp::now())
-            .is_err()
-    );
+    assert!(meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_err());
 }
 
 // === Type-level invariants ===
@@ -277,8 +259,7 @@ fn non_terminal_has_no_ended_at() {
 #[test]
 fn spawn_failed_has_no_child() {
     let mut meta = starting_meta();
-    meta.transition_spawn_failed(EpochTimestamp::now())
-        .unwrap();
+    meta.transition_spawn_failed(EpochTimestamp::now()).unwrap();
     assert!(meta.status().child().is_none());
 }
 
@@ -317,11 +298,8 @@ fn meta_serde_roundtrip_exited_error() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     let code = NonZeroI32::new(1).unwrap();
-    meta.transition_exited(
-        ExitReason::ExitedError { code },
-        EpochTimestamp::now(),
-    )
-    .unwrap();
+    meta.transition_exited(ExitReason::ExitedError { code }, EpochTimestamp::now())
+        .unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
     let back: Meta = serde_json::from_str(&json).unwrap();
     match back.status() {
@@ -339,8 +317,7 @@ fn meta_serde_roundtrip_exited_error() {
 #[test]
 fn meta_serde_roundtrip_spawn_failed() {
     let mut meta = starting_meta();
-    meta.transition_spawn_failed(EpochTimestamp::now())
-        .unwrap();
+    meta.transition_spawn_failed(EpochTimestamp::now()).unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
     let back: Meta = serde_json::from_str(&json).unwrap();
     assert!(matches!(back.status(), RunStatus::SpawnFailed { .. }));
@@ -351,8 +328,7 @@ fn meta_serde_roundtrip_spawn_failed() {
 fn meta_serde_roundtrip_sidecar_lost() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.reconcile_sidecar_lost(EpochTimestamp::now())
-        .unwrap();
+    meta.reconcile_sidecar_lost(EpochTimestamp::now()).unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
     let back: Meta = serde_json::from_str(&json).unwrap();
     assert!(matches!(
@@ -440,7 +416,10 @@ fn meta_warnings_roundtrip() {
     assert!(json.contains("warnings"));
     let back: Meta = serde_json::from_str(&json).unwrap();
     assert_eq!(back.warnings().len(), 2);
-    assert_eq!(back.warnings()[0], "log capture: stdout capture thread panicked");
+    assert_eq!(
+        back.warnings()[0],
+        "log capture: stdout capture thread panicked"
+    );
     assert_eq!(back.warnings()[1], "stdin forwarding: child stdin closed");
 }
 

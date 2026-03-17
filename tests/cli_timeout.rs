@@ -85,10 +85,7 @@ fn timeout_not_triggered() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
-    run_tender(
-        &root,
-        &["start", "--timeout", "60", "fast-job", "true"],
-    );
+    run_tender(&root, &["start", "--timeout", "60", "fast-job", "true"]);
 
     let meta = wait_terminal(&root, "fast-job");
 

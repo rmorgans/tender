@@ -182,7 +182,12 @@ fn epoch_timestamp_deserialize_from_integer() {
 fn epoch_timestamp_deserialize_rejects_garbage() {
     let result: Result<EpochTimestamp, _> = serde_json::from_str(r#""not-a-number""#);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("invalid epoch timestamp"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid epoch timestamp")
+    );
 }
 
 #[test]

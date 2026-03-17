@@ -51,7 +51,10 @@ impl Meta {
 
     /// Transition Starting → SpawnFailed. Child never started.
     /// Only valid from Starting — cannot reach SpawnFailed from Running.
-    pub fn transition_spawn_failed(&mut self, ended_at: EpochTimestamp) -> Result<(), TransitionError> {
+    pub fn transition_spawn_failed(
+        &mut self,
+        ended_at: EpochTimestamp,
+    ) -> Result<(), TransitionError> {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::SpawnFailed { ended_at };
@@ -98,7 +101,10 @@ impl Meta {
     /// Reconciliation: mark as SidecarLost. The ONLY case where
     /// something other than the sidecar writes lifecycle state.
     /// Valid from Starting (no child) or Running (with child).
-    pub fn reconcile_sidecar_lost(&mut self, ended_at: EpochTimestamp) -> Result<(), TransitionError> {
+    pub fn reconcile_sidecar_lost(
+        &mut self,
+        ended_at: EpochTimestamp,
+    ) -> Result<(), TransitionError> {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::SidecarLost {

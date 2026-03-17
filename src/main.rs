@@ -117,7 +117,13 @@ fn main() {
     }
 }
 
-fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool, timeout: Option<u64>) -> anyhow::Result<()> {
+fn cmd_start(
+    name: &str,
+    cmd: Vec<String>,
+    stdin: bool,
+    replace: bool,
+    timeout: Option<u64>,
+) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
     use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
@@ -268,7 +274,10 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool, timeout: 
     println!("{json}");
 
     // Exit non-zero if the child failed to spawn — agents branch on exit code
-    if matches!(meta.status(), tender::model::state::RunStatus::SpawnFailed { .. }) {
+    if matches!(
+        meta.status(),
+        tender::model::state::RunStatus::SpawnFailed { .. }
+    ) {
         std::process::exit(2); // exit code 2 = process error per contract
     }
 
