@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::ids::{Generation, RunId, SessionName};
@@ -147,6 +147,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     };
 
+    // Shared error collector for stdin forwarding — created unconditionally
+    // so it's accessible after supervise regardless of stdin mode.
+    let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     // Create stdin FIFO BEFORE transitioning to Running or signaling readiness.
     // Running must mean "fully externally usable" — concurrent status/push clients
     // can observe Running in meta.json, so stdin.pipe must exist before that write.
@@ -163,7 +167,8 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         // Spawn forwarding thread (detached — not joined).
         // Thread exits when child stdin breaks or fifo is removed.
         let fifo_clone = fifo_path.clone();
-        std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin));
+        let errors_clone = Arc::clone(&stdin_errors);
+        std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin, errors_clone));
     }
 
     // Transition to Running — stdin FIFO is ready, state is now externally consistent
@@ -182,6 +187,23 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Clean up breadcrumb — no longer needed, meta has the child identity
     let _ = std::fs::remove_file(session_dir.join("child_pid"));
 
+    // Collect capture errors into meta warnings
+    let capture_err_path = session_dir.join("capture_errors.log");
+    if let Ok(errors) = std::fs::read_to_string(&capture_err_path) {
+        for line in errors.lines() {
+            if !line.is_empty() {
+                meta.add_warning(format!("log capture: {line}"));
+            }
+        }
+    }
+
+    // Collect stdin forwarding errors into meta warnings
+    if let Ok(errs) = stdin_errors.lock() {
+        for e in errs.iter() {
+            meta.add_warning(e.clone());
+        }
+    }
+
     // Write terminal state
     meta.transition_exited(exit_reason, now_epoch_secs())?;
     session::write_meta_atomic(&session, &meta)?;
@@ -192,23 +214,40 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
 /// Forward data from the stdin FIFO to the child's stdin pipe.
 /// Re-opens the FIFO after each writer disconnects to support multiple pushes.
 /// Exits when: child stdin write fails (child exited) or FIFO open fails (removed).
-fn forward_stdin(fifo_path: PathBuf, mut child_stdin: std::process::ChildStdin) {
+fn forward_stdin(
+    fifo_path: PathBuf,
+    mut child_stdin: std::process::ChildStdin,
+    errors: Arc<Mutex<Vec<String>>>,
+) {
     use std::io::Read;
     let mut buf = [0u8; 8192];
     loop {
         // Open blocks until a writer connects
         let mut fifo = match File::open(&fifo_path) {
             Ok(f) => f,
-            Err(_) => return,
+            Err(e) => {
+                if let Ok(mut errs) = errors.lock() {
+                    errs.push(format!("stdin fifo open failed: {e}"));
+                }
+                return;
+            }
         };
         loop {
             let n = match fifo.read(&mut buf) {
                 Ok(0) => break, // writer disconnected
                 Ok(n) => n,
-                Err(_) => return,
+                Err(e) => {
+                    if let Ok(mut errs) = errors.lock() {
+                        errs.push(format!("stdin fifo read failed: {e}"));
+                    }
+                    return;
+                }
             };
             if child_stdin.write_all(&buf[..n]).is_err() {
-                return; // child stdin closed
+                if let Ok(mut errs) = errors.lock() {
+                    errs.push("stdin forwarding: child stdin closed".to_owned());
+                }
+                return;
             }
         }
     }
