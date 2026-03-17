@@ -21,6 +21,8 @@ pub struct Meta {
     status: RunStatus,
     started_at: String,
     restart_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 impl Meta {
@@ -45,6 +47,7 @@ impl Meta {
             status: RunStatus::Starting,
             started_at,
             restart_count: 0,
+            warnings: vec![],
         }
     }
 
@@ -91,6 +94,14 @@ impl Meta {
         self.restart_count
     }
 
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    pub fn add_warning(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
     // --- Mutable access for transition module only ---
 
     pub(super) fn status_mut(&mut self) -> &mut RunStatus {
@@ -112,6 +123,8 @@ impl<'de> Deserialize<'de> for Meta {
             status: RunStatus,
             started_at: String,
             restart_count: u32,
+            #[serde(default)]
+            warnings: Vec<String>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -132,6 +145,7 @@ impl<'de> Deserialize<'de> for Meta {
             status: raw.status,
             started_at: raw.started_at,
             restart_count: raw.restart_count,
+            warnings: raw.warnings,
         })
     }
 }

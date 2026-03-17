@@ -419,6 +419,42 @@ fn launch_spec_rejects_empty_argv_on_deserialize() {
     assert!(result.is_err());
 }
 
+// === Warnings ===
+
+#[test]
+fn meta_warnings_empty_not_serialized() {
+    let meta = starting_meta();
+    let json = serde_json::to_string(&meta).unwrap();
+    assert!(
+        !json.contains("warnings"),
+        "empty warnings should be omitted from JSON"
+    );
+}
+
+#[test]
+fn meta_warnings_roundtrip() {
+    let mut meta = starting_meta();
+    meta.add_warning("log capture: stdout capture thread panicked".into());
+    meta.add_warning("stdin forwarding: child stdin closed".into());
+    let json = serde_json::to_string_pretty(&meta).unwrap();
+    assert!(json.contains("warnings"));
+    let back: Meta = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.warnings().len(), 2);
+    assert_eq!(back.warnings()[0], "log capture: stdout capture thread panicked");
+    assert_eq!(back.warnings()[1], "stdin forwarding: child stdin closed");
+}
+
+#[test]
+fn meta_deserialize_without_warnings_field() {
+    // JSON without "warnings" key should deserialize fine (defaults to empty vec)
+    let meta = starting_meta();
+    let mut val: serde_json::Value = serde_json::to_value(&meta).unwrap();
+    // Ensure no warnings key exists
+    val.as_object_mut().unwrap().remove("warnings");
+    let back: Meta = serde_json::from_value(val).unwrap();
+    assert!(back.warnings().is_empty());
+}
+
 // === Hash is never stale ===
 
 #[test]
