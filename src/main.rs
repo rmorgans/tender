@@ -494,40 +494,28 @@ fn cmd_status(name: &str) -> anyhow::Result<()> {
 }
 
 /// Clean up an orphaned session dir that has child_pid but no meta.json.
-/// Attempts to kill the orphaned child if identity can be verified.
-/// If identity cannot be verified (PID may have been reused), skips the kill
-/// rather than risking killing an unrelated process.
+/// The child_pid breadcrumb contains a JSON-serialized ProcessIdentity,
+/// which lets us verify the process against PID reuse before killing.
+/// Falls back to skip-kill for old bare-PID format breadcrumbs.
 fn cleanup_orphan_dir(dir: &std::path::Path) {
+    use tender::model::ids::ProcessIdentity;
     use tender::platform::unix as platform;
 
     let child_pid_path = dir.join("child_pid");
-    if let Ok(pid_str) = std::fs::read_to_string(&child_pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            // Try to get current identity of this PID. If the process exists,
-            // we can only safely kill it if we had stored identity to compare.
-            // Since orphan dirs don't have meta.json (which has ProcessIdentity),
-            // we use a best-effort heuristic: check if the process is a child of
-            // init/launchd (PPID=1), which is likely for orphaned sidecar children.
-            // If we can't verify, skip the kill — PID reuse safety is more important.
-            let status = platform::process_status(&tender::model::ids::ProcessIdentity {
-                pid: std::num::NonZeroU32::new(pid).unwrap(),
-                start_time_ns: 0, // bogus — will always be IdentityMismatch
-            });
-            // If we get Inaccessible or Missing, the process is gone or unreachable.
-            // If IdentityMismatch, the PID exists but we can't verify it's ours — skip.
-            // Only Missing means we're safe (process doesn't exist, nothing to kill).
-            match status {
-                platform::ProcessStatus::Missing => {} // already gone
-                platform::ProcessStatus::Inaccessible => {
-                    // Can't verify, but process is in another session — likely our orphan.
-                    // Still safer to skip than to kill blindly.
+    if let Ok(content) = std::fs::read_to_string(&child_pid_path) {
+        // Try JSON ProcessIdentity (new format)
+        if let Ok(identity) = serde_json::from_str::<ProcessIdentity>(&content) {
+            match platform::process_status(&identity) {
+                platform::ProcessStatus::AliveVerified
+                | platform::ProcessStatus::Inaccessible => {
+                    // Identity verified (or can't verify but process exists) — kill it
+                    let _ = platform::kill_process(&identity, true);
                 }
-                _ => {
-                    // AliveVerified (impossible with start_time_ns=0),
-                    // IdentityMismatch (PID reused), OsError — don't kill.
-                }
+                // Missing, IdentityMismatch, OsError — don't kill
+                _ => {}
             }
         }
+        // Old bare-PID format: can't verify identity, skip kill (backwards compat)
     }
     let _ = std::fs::remove_dir_all(dir);
 }

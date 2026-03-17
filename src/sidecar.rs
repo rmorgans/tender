@@ -225,25 +225,30 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     };
 
-    // Write child PID breadcrumb immediately — before anything else.
-    // If sidecar crashes after spawn but before meta write, the reconciler
-    // can find and kill the orphaned child using this file.
+    // Get child identity — need this before writing the orphan breadcrumb
+    // so cleanup_orphan_dir can verify against PID reuse.
     let child_pid = child.id();
-    let _ = std::fs::write(session_dir.join("child_pid"), child_pid.to_string());
-
-    // Get child identity
     let child_identity = match platform::process_identity(child_pid) {
         Ok(id) => id,
         Err(_) => {
+            // Can't get identity — kill and wait inline. No orphan is possible
+            // since we kill synchronously, so don't write a breadcrumb.
             let _ = child.kill();
             let _ = child.wait();
-            let _ = std::fs::remove_file(session_dir.join("child_pid"));
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
             return Ok(());
         }
     };
+
+    // SAFETY: child_identity has been verified — write it as the orphan breadcrumb.
+    // If sidecar crashes after spawn but before meta write, the reconciler
+    // can find and safely kill the orphaned child using this identity.
+    let _ = std::fs::write(
+        session_dir.join("child_pid"),
+        serde_json::to_string(&child_identity).unwrap_or_default(),
+    );
 
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
