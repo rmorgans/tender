@@ -1,5 +1,5 @@
 use std::num::{NonZeroI32, NonZeroU32};
-use tender::model::ids::{Generation, ProcessIdentity, RunId, SessionName};
+use tender::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
 use tender::model::meta::Meta;
 use tender::model::spec::LaunchSpec;
 use tender::model::state::{ExitReason, RunStatus};
@@ -29,7 +29,7 @@ fn starting_meta() -> Meta {
         Generation::first(),
         test_spec(),
         test_sidecar(),
-        "2026-03-16T10:00:00Z".into(),
+        EpochTimestamp::now(),
     )
 }
 
@@ -48,7 +48,7 @@ fn starting_to_running() {
 fn starting_to_spawn_failed() {
     let mut meta = starting_meta();
     assert!(
-        meta.transition_spawn_failed("2026-03-16T10:00:01Z".into())
+        meta.transition_spawn_failed(EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(meta.status(), RunStatus::SpawnFailed { .. }));
@@ -61,7 +61,7 @@ fn running_to_exited_ok() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+        meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -83,7 +83,7 @@ fn running_to_exited_error() {
     assert!(
         meta.transition_exited(
             ExitReason::ExitedError { code },
-            "2026-03-16T10:00:05Z".into()
+            EpochTimestamp::now()
         )
         .is_ok()
     );
@@ -103,7 +103,7 @@ fn running_to_killed() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.transition_exited(ExitReason::Killed, "2026-03-16T10:00:05Z".into())
+        meta.transition_exited(ExitReason::Killed, EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -120,7 +120,7 @@ fn running_to_killed_forced() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.transition_exited(ExitReason::KilledForced, "2026-03-16T10:00:05Z".into())
+        meta.transition_exited(ExitReason::KilledForced, EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -137,7 +137,7 @@ fn running_to_timed_out() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.transition_exited(ExitReason::TimedOut, "2026-03-16T10:00:05Z".into())
+        meta.transition_exited(ExitReason::TimedOut, EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -155,7 +155,7 @@ fn running_to_timed_out() {
 fn starting_to_sidecar_lost() {
     let mut meta = starting_meta();
     assert!(
-        meta.reconcile_sidecar_lost("2026-03-16T10:00:05Z".into())
+        meta.reconcile_sidecar_lost(EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -169,7 +169,7 @@ fn running_to_sidecar_lost() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.reconcile_sidecar_lost("2026-03-16T10:00:05Z".into())
+        meta.reconcile_sidecar_lost(EpochTimestamp::now())
             .is_ok()
     );
     assert!(matches!(
@@ -184,7 +184,7 @@ fn running_to_sidecar_lost() {
 fn cannot_transition_terminal_to_running() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+    meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
         .unwrap();
     assert!(meta.transition_running(test_child()).is_err());
 }
@@ -193,10 +193,10 @@ fn cannot_transition_terminal_to_running() {
 fn cannot_transition_terminal_to_terminal() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+    meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
         .unwrap();
     assert!(
-        meta.transition_exited(ExitReason::Killed, "2026-03-16T10:00:06Z".into())
+        meta.transition_exited(ExitReason::Killed, EpochTimestamp::now())
             .is_err()
     );
 }
@@ -212,7 +212,7 @@ fn cannot_transition_running_to_running() {
 fn cannot_exited_from_starting() {
     let mut meta = starting_meta();
     assert!(
-        meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+        meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
             .is_err()
     );
 }
@@ -222,7 +222,7 @@ fn cannot_spawn_fail_from_running() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
     assert!(
-        meta.transition_spawn_failed("2026-03-16T10:00:05Z".into())
+        meta.transition_spawn_failed(EpochTimestamp::now())
             .is_err()
     );
 }
@@ -231,10 +231,10 @@ fn cannot_spawn_fail_from_running() {
 fn cannot_reconcile_terminal() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+    meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
         .unwrap();
     assert!(
-        meta.reconcile_sidecar_lost("2026-03-16T10:00:06Z".into())
+        meta.reconcile_sidecar_lost(EpochTimestamp::now())
             .is_err()
     );
 }
@@ -259,7 +259,7 @@ fn running_has_child() {
 fn terminal_has_ended_at() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.transition_exited(ExitReason::ExitedOk, "2026-03-16T10:00:05Z".into())
+    meta.transition_exited(ExitReason::ExitedOk, EpochTimestamp::now())
         .unwrap();
     assert!(meta.status().ended_at().is_some());
 }
@@ -277,7 +277,7 @@ fn non_terminal_has_no_ended_at() {
 #[test]
 fn spawn_failed_has_no_child() {
     let mut meta = starting_meta();
-    meta.transition_spawn_failed("2026-03-16T10:00:01Z".into())
+    meta.transition_spawn_failed(EpochTimestamp::now())
         .unwrap();
     assert!(meta.status().child().is_none());
 }
@@ -286,7 +286,7 @@ fn spawn_failed_has_no_child() {
 fn exited_preserves_child() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.transition_exited(ExitReason::Killed, "2026-03-16T10:00:05Z".into())
+    meta.transition_exited(ExitReason::Killed, EpochTimestamp::now())
         .unwrap();
     assert_eq!(meta.status().child(), Some(&test_child()));
 }
@@ -319,7 +319,7 @@ fn meta_serde_roundtrip_exited_error() {
     let code = NonZeroI32::new(1).unwrap();
     meta.transition_exited(
         ExitReason::ExitedError { code },
-        "2026-03-16T10:00:05Z".into(),
+        EpochTimestamp::now(),
     )
     .unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
@@ -339,7 +339,7 @@ fn meta_serde_roundtrip_exited_error() {
 #[test]
 fn meta_serde_roundtrip_spawn_failed() {
     let mut meta = starting_meta();
-    meta.transition_spawn_failed("2026-03-16T10:00:01Z".into())
+    meta.transition_spawn_failed(EpochTimestamp::now())
         .unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
     let back: Meta = serde_json::from_str(&json).unwrap();
@@ -351,7 +351,7 @@ fn meta_serde_roundtrip_spawn_failed() {
 fn meta_serde_roundtrip_sidecar_lost() {
     let mut meta = starting_meta();
     meta.transition_running(test_child()).unwrap();
-    meta.reconcile_sidecar_lost("2026-03-16T10:00:05Z".into())
+    meta.reconcile_sidecar_lost(EpochTimestamp::now())
         .unwrap();
     let json = serde_json::to_string_pretty(&meta).unwrap();
     let back: Meta = serde_json::from_str(&json).unwrap();

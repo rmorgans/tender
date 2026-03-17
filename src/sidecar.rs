@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::ids::{Generation, RunId, SessionName};
+use crate::model::ids::{EpochTimestamp, Generation, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
@@ -78,7 +78,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         generation,
         launch_spec,
         sidecar_identity,
-        now_epoch_secs(),
+        EpochTimestamp::now(),
     );
 
     // Re-set CLOEXEC on the ready fd before spawning the child.
@@ -121,7 +121,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => {
-            meta.transition_spawn_failed(now_epoch_secs())?;
+            meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
             return Ok(()); // Not an error — SpawnFailed is a valid terminal state
@@ -141,7 +141,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_file(session_dir.join("child_pid"));
-            meta.transition_spawn_failed(now_epoch_secs())?;
+            meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
             return Ok(());
@@ -240,7 +240,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     }
 
     // Write terminal state
-    meta.transition_exited(exit_reason, now_epoch_secs())?;
+    meta.transition_exited(exit_reason, EpochTimestamp::now())?;
     session::write_meta_atomic(&session, &meta)?;
 
     Ok(())
@@ -383,9 +383,3 @@ fn timestamp_micros() -> String {
     format!("{secs}.{micros:06}")
 }
 
-fn now_epoch_secs() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", duration.as_secs())
-}

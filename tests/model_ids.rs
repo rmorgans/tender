@@ -1,5 +1,7 @@
 use std::num::NonZeroU32;
-use tender::model::ids::{Generation, ProcessIdentity, RunId, SessionName, SessionNameError};
+use tender::model::ids::{
+    EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName, SessionNameError,
+};
 
 #[test]
 fn run_id_uniqueness() {
@@ -145,4 +147,54 @@ fn process_identity_serde_roundtrip() {
     let json = serde_json::to_string(&id).unwrap();
     let back: ProcessIdentity = serde_json::from_str(&json).unwrap();
     assert_eq!(id, back);
+}
+
+// === EpochTimestamp ===
+
+#[test]
+fn epoch_timestamp_now_is_reasonable() {
+    let ts = EpochTimestamp::now();
+    // Must be after year ~2023 (1_700_000_000 epoch seconds)
+    assert!(ts.as_secs() > 1_700_000_000);
+}
+
+#[test]
+fn epoch_timestamp_serde_roundtrip() {
+    let ts = EpochTimestamp::from_secs(1_773_653_954);
+    let json = serde_json::to_string(&ts).unwrap();
+    let back: EpochTimestamp = serde_json::from_str(&json).unwrap();
+    assert_eq!(ts, back);
+}
+
+#[test]
+fn epoch_timestamp_deserialize_from_string() {
+    let ts: EpochTimestamp = serde_json::from_str(r#""1773653954""#).unwrap();
+    assert_eq!(ts.as_secs(), 1_773_653_954);
+}
+
+#[test]
+fn epoch_timestamp_deserialize_from_integer() {
+    let ts: EpochTimestamp = serde_json::from_str("1773653954").unwrap();
+    assert_eq!(ts.as_secs(), 1_773_653_954);
+}
+
+#[test]
+fn epoch_timestamp_deserialize_rejects_garbage() {
+    let result: Result<EpochTimestamp, _> = serde_json::from_str(r#""not-a-number""#);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("invalid epoch timestamp"));
+}
+
+#[test]
+fn epoch_timestamp_display() {
+    let ts = EpochTimestamp::from_secs(1_773_653_954);
+    assert_eq!(format!("{ts}"), "1773653954");
+}
+
+#[test]
+fn epoch_timestamp_serializes_as_string() {
+    let ts = EpochTimestamp::from_secs(1_773_653_954);
+    let json = serde_json::to_string(&ts).unwrap();
+    // Must be a quoted string, not bare integer
+    assert_eq!(json, r#""1773653954""#);
 }

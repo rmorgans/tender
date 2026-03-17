@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroI32;
 
-use super::ids::ProcessIdentity;
+use super::ids::{EpochTimestamp, ProcessIdentity};
 
 /// Current status of a run. State-specific fields live inside the variants,
 /// making invalid combinations unrepresentable.
@@ -13,19 +13,19 @@ pub enum RunStatus {
     /// Child is alive and being supervised.
     Running { child: ProcessIdentity },
     /// Child failed to spawn. No child identity exists.
-    SpawnFailed { ended_at: String },
+    SpawnFailed { ended_at: EpochTimestamp },
     /// Run ended after child was running. Child identity preserved.
     Exited {
         child: ProcessIdentity,
         #[serde(flatten)]
         how: ExitReason,
-        ended_at: String,
+        ended_at: EpochTimestamp,
     },
     /// Sidecar disappeared without writing terminal state.
     /// May or may not have had a child.
     SidecarLost {
         child: Option<ProcessIdentity>,
-        ended_at: String,
+        ended_at: EpochTimestamp,
     },
 }
 
@@ -63,7 +63,7 @@ impl RunStatus {
     }
 
     /// Get ended_at if terminal.
-    pub fn ended_at(&self) -> Option<&str> {
+    pub fn ended_at(&self) -> Option<&EpochTimestamp> {
         match self {
             RunStatus::Starting | RunStatus::Running { .. } => None,
             RunStatus::SpawnFailed { ended_at }

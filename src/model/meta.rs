@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::ids::{Generation, ProcessIdentity, RunId, SessionName};
+use super::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
 use super::spec::LaunchSpec;
 use super::state::RunStatus;
 
@@ -19,7 +19,7 @@ pub struct Meta {
     sidecar: ProcessIdentity,
     #[serde(flatten)]
     status: RunStatus,
-    started_at: String,
+    started_at: EpochTimestamp,
     restart_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
@@ -35,7 +35,7 @@ impl Meta {
         generation: Generation,
         launch_spec: LaunchSpec,
         sidecar: ProcessIdentity,
-        started_at: String,
+        started_at: EpochTimestamp,
     ) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
@@ -86,7 +86,7 @@ impl Meta {
         &self.status
     }
 
-    pub fn started_at(&self) -> &str {
+    pub fn started_at(&self) -> &EpochTimestamp {
         &self.started_at
     }
 
@@ -121,7 +121,7 @@ impl<'de> Deserialize<'de> for Meta {
             sidecar: ProcessIdentity,
             #[serde(flatten)]
             status: RunStatus,
-            started_at: String,
+            started_at: EpochTimestamp,
             restart_count: u32,
             #[serde(default)]
             warnings: Vec<String>,

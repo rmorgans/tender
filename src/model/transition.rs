@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use super::ids::ProcessIdentity;
+use super::ids::{EpochTimestamp, ProcessIdentity};
 use super::meta::Meta;
 use super::state::{ExitReason, RunStatus};
 
@@ -51,7 +51,7 @@ impl Meta {
 
     /// Transition Starting → SpawnFailed. Child never started.
     /// Only valid from Starting — cannot reach SpawnFailed from Running.
-    pub fn transition_spawn_failed(&mut self, ended_at: String) -> Result<(), TransitionError> {
+    pub fn transition_spawn_failed(&mut self, ended_at: EpochTimestamp) -> Result<(), TransitionError> {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::SpawnFailed { ended_at };
@@ -73,7 +73,7 @@ impl Meta {
     pub fn transition_exited(
         &mut self,
         how: ExitReason,
-        ended_at: String,
+        ended_at: EpochTimestamp,
     ) -> Result<(), TransitionError> {
         match self.status() {
             RunStatus::Running { child } => {
@@ -98,7 +98,7 @@ impl Meta {
     /// Reconciliation: mark as SidecarLost. The ONLY case where
     /// something other than the sidecar writes lifecycle state.
     /// Valid from Starting (no child) or Running (with child).
-    pub fn reconcile_sidecar_lost(&mut self, ended_at: String) -> Result<(), TransitionError> {
+    pub fn reconcile_sidecar_lost(&mut self, ended_at: EpochTimestamp) -> Result<(), TransitionError> {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::SidecarLost {

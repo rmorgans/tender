@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 use tempfile::TempDir;
-use tender::model::ids::{Generation, ProcessIdentity, RunId, SessionName};
+use tender::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
 use tender::model::meta::Meta;
 use tender::model::spec::LaunchSpec;
 use tender::session::{self, LockGuard, SessionError, SessionRoot};
@@ -25,7 +25,7 @@ fn test_meta(name: &str) -> Meta {
         Generation::first(),
         LaunchSpec::new(vec!["echo".into(), "hello".into()]).unwrap(),
         test_sidecar(),
-        "2026-03-16T10:00:00Z".into(),
+        EpochTimestamp::now(),
     )
 }
 

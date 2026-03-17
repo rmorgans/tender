@@ -395,7 +395,7 @@ fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_status(name: &str) -> anyhow::Result<()> {
-    use tender::model::ids::SessionName;
+    use tender::model::ids::{EpochTimestamp, SessionName};
     use tender::session::{self, SessionError, SessionRoot};
 
     let session_name = SessionName::new(name)?;
@@ -421,7 +421,7 @@ fn cmd_status(name: &str) -> anyhow::Result<()> {
 
     // Reconciliation: non-terminal + lock not held -> sidecar crashed
     if !meta.status().is_terminal() && !session::is_locked(&session)? {
-        meta.reconcile_sidecar_lost(now_epoch_secs())?;
+        meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
         session::write_meta_atomic(&session, &meta)?;
     }
 
@@ -535,7 +535,7 @@ fn cmd_log(
 }
 
 fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
-    use tender::model::ids::SessionName;
+    use tender::model::ids::{EpochTimestamp, SessionName};
     use tender::model::state::{ExitReason, RunStatus};
     use tender::session::{self, SessionRoot};
 
@@ -552,7 +552,7 @@ fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
 
         // Reconciliation: non-terminal + lock not held -> sidecar crashed
         if !meta.status().is_terminal() && !session::is_locked(&session)? {
-            meta.reconcile_sidecar_lost(now_epoch_secs())?;
+            meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             // Fall through to terminal check below
         }
@@ -581,14 +581,6 @@ fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
 
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-}
-
-fn now_epoch_secs() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", duration.as_secs())
 }
 
 fn cmd_sidecar(session_dir: PathBuf) -> anyhow::Result<()> {

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::num::NonZeroU32;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// Globally unique execution identity. UUID v7 (time-sortable).
@@ -166,4 +167,67 @@ impl<'de> Deserialize<'de> for SessionName {
 pub struct ProcessIdentity {
     pub pid: NonZeroU32,
     pub start_time_ns: u64,
+}
+
+/// Validated epoch timestamp in seconds. Serializes as string for schema v1
+/// compatibility. Accepts both string ("1773653954") and integer (1773653954)
+/// on deserialization for backwards compatibility with existing meta.json files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochTimestamp(u64);
+
+impl EpochTimestamp {
+    pub fn now() -> Self {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self(secs)
+    }
+
+    pub fn from_secs(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    pub fn as_secs(&self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for EpochTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for EpochTimestamp {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Always serialize as string for JSON compatibility with schema v1
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for EpochTimestamp {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TimestampVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TimestampVisitor {
+            type Value = EpochTimestamp;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("epoch seconds as string or integer")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<EpochTimestamp, E> {
+                Ok(EpochTimestamp(v))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<EpochTimestamp, E> {
+                v.parse::<u64>()
+                    .map(EpochTimestamp)
+                    .map_err(|_| E::custom(format!("invalid epoch timestamp: {v}")))
+            }
+        }
+
+        deserializer.deserialize_any(TimestampVisitor)
+    }
 }
