@@ -1,22 +1,22 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroI32;
-use std::os::unix::io::RawFd;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
-use crate::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
+use crate::model::ids::{EpochTimestamp, Generation, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
-use crate::platform::unix as platform;
+use crate::platform::{Current, Platform};
 use crate::session::{self, LockGuard, SessionDir, SessionRoot};
+
+/// Type alias for the platform's ReadyWriter to avoid verbose turbofish.
+type ReadyWriter = <Current as Platform>::ReadyWriter;
 
 /// Run the sidecar process. Called from the `_sidecar` subcommand.
 ///
@@ -29,94 +29,64 @@ use crate::session::{self, LockGuard, SessionDir, SessionRoot};
 /// - Capture child stdout/stderr to output.log with timestamps
 /// - Write terminal state when child exits
 /// - Release lock and exit
-pub fn run(session_dir: PathBuf, ready_fd: RawFd) -> anyhow::Result<()> {
-    // Wrap the fd so we can track whether it's been consumed.
-    // write_ready_signal takes ownership — Option prevents double-close.
-    let mut ready = Some(ready_fd);
+pub fn run(session_dir: PathBuf, ready_writer: ReadyWriter) -> anyhow::Result<()> {
+    // Wrap so we can track whether it's been consumed.
+    // write_ready_signal takes ownership -- Option prevents double-use.
+    let mut ready = Some(ready_writer);
 
     let result = run_inner(&session_dir, &mut ready);
 
     if let Err(ref e) = result {
-        // Only signal error if the fd hasn't been consumed yet
-        if let Some(fd) = ready.take() {
-            let _ = platform::write_ready_signal(fd, &format!("ERROR:{e}\n"));
+        // Only signal error if the file hasn't been consumed yet
+        if let Some(file) = ready.take() {
+            let _ = Current::write_ready_signal(file, &format!("ERROR:{e}\n"));
         }
     }
 
     result
 }
 
-/// Build and spawn the child process with piped stdout/stderr and its own process group.
-fn spawn_child(argv: &[String], stdin_piped: bool) -> std::io::Result<std::process::Child> {
-    let mut cmd = Command::new(&argv[0]);
-    if argv.len() > 1 {
-        cmd.args(&argv[1..]);
-    }
-    if stdin_piped {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    // Make child its own process group leader so kill(-pgid) kills the whole tree.
-    // SAFETY: pre_exec runs after fork() in the child process, before exec().
-    // setpgid(0,0) is async-signal-safe and only affects the forked child.
-    // No shared mutable state is accessed in the closure.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    cmd.spawn()
-}
-
-/// Create the stdin FIFO and spawn a forwarding thread from FIFO to child stdin.
+/// Create the stdin transport and spawn a forwarding thread.
+/// The transport is moved into the forwarding thread (it needs the server-side
+/// handle on Windows). Cleanup is handled by `remove_stdin_transport`.
 fn setup_stdin_forwarding(
     session_dir: &Path,
-    child: &mut std::process::Child,
+    child_stdin: Box<dyn Write + Send>,
     stdin_errors: &Arc<Mutex<Vec<String>>>,
 ) -> anyhow::Result<()> {
-    let fifo_path = session_dir.join("stdin.pipe");
-    platform::mkfifo(&fifo_path)?;
+    let transport = Current::create_stdin_transport(session_dir)?;
 
-    // Take child stdin — forward fifo data into it
-    let child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
-
-    // Spawn forwarding thread (detached — not joined).
-    // Thread exits when child stdin breaks or fifo is removed.
-    let fifo_clone = fifo_path.clone();
+    // Spawn forwarding thread (detached -- not joined).
+    // Thread owns the transport and exits when child stdin breaks or transport is removed.
+    let session_dir_clone = session_dir.to_path_buf();
     let errors_clone = Arc::clone(stdin_errors);
-    std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin, errors_clone));
+    std::thread::spawn(move || {
+        forward_stdin(transport, session_dir_clone, child_stdin, errors_clone)
+    });
 
     Ok(())
 }
 
-/// Spawn a timeout thread that kills the child's process group after `timeout_s` seconds.
+/// Spawn a timeout thread that kills the child after `timeout_s` seconds.
 /// Returns the `timed_out` flag. The caller passes a `cancel` flag to prevent the kill
 /// after the child exits naturally.
 ///
-/// Uses `ProcessIdentity`-verified kill to avoid signaling a recycled PID.
+/// Takes a `ChildKillHandle` (lightweight, Send + Clone) extracted from the
+/// SupervisedChild, so the timeout thread uses the live backend context
+/// (Job Object on Windows, process group on Unix) rather than degrading
+/// to orphan-kill semantics.
 fn setup_timeout(
-    child_identity: ProcessIdentity,
+    kill_handle: <Current as Platform>::ChildKillHandle,
     timeout_s: u64,
     cancel: Arc<AtomicBool>,
 ) -> Arc<AtomicBool> {
     let timed_out = Arc::new(AtomicBool::new(false));
     let timed_out_clone = Arc::clone(&timed_out);
     std::thread::spawn(move || {
-        // Sleep in small increments so we can check the cancel flag
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
         loop {
             if cancel.load(Ordering::Relaxed) {
-                return; // Child exited before timeout — don't kill
+                return; // Child exited before timeout -- don't kill
             }
             if std::time::Instant::now() >= deadline {
                 break;
@@ -127,10 +97,10 @@ fn setup_timeout(
             return; // Final check after deadline
         }
         timed_out_clone.store(true, Ordering::Relaxed);
-        // Identity-verified kill: verifies PID birth time before signaling,
-        // preventing kill of a recycled PID if the child exited between the
-        // cancel check and the kill syscall.
-        let _ = platform::kill_process(&child_identity, true);
+        // Use kill_child with the live kill handle context.
+        // On Windows this uses the Job Object for full tree kill;
+        // on Unix this uses process group kill.
+        let _ = Current::kill_child(&kill_handle, true);
     });
     timed_out
 }
@@ -159,9 +129,9 @@ fn collect_warnings(session_dir: &Path, stdin_errors: &Arc<Mutex<Vec<String>>>) 
     warnings
 }
 
-fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()> {
+fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Result<()> {
     // --- Setup: lock, read spec, create meta ---
-    let sidecar_identity = platform::self_identity()?;
+    let sidecar_identity = Current::self_identity()?;
 
     let session_name_str = session_dir
         .file_name()
@@ -212,44 +182,36 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
 
     // Re-set CLOEXEC on the ready fd before spawning the child.
     // The sidecar inherited this fd with CLOEXEC cleared (so it survived the sidecar's exec),
-    // but the child must NOT hold the pipe open — otherwise the CLI's read_to_string blocks
+    // but the child must NOT hold the pipe open -- otherwise the CLI's read_to_string blocks
     // until the child exits, defeating the readiness handshake.
-    if let Some(fd) = ready.as_ref() {
-        // SAFETY: *fd is the TENDER_READY_FD passed from spawn_sidecar — a valid
-        // open file descriptor. F_SETFD with FD_CLOEXEC is a valid fcntl operation.
-        // This prevents the child from inheriting the ready pipe.
-        let ret = unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        if ret == -1 {
-            anyhow::bail!(
-                "failed to set CLOEXEC on ready fd: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+    if let Some(writer) = ready.as_ref() {
+        Current::seal_ready_fd(writer)
+            .map_err(|e| anyhow::anyhow!("failed to set CLOEXEC on ready fd: {e}"))?;
     }
 
     // --- Spawn child (with SpawnFailed handling inline) ---
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
-    let mut child = match spawn_child(meta.launch_spec().argv(), stdin_piped) {
+    let mut child = match Current::spawn_child(meta.launch_spec().argv(), stdin_piped) {
         Ok(c) => c,
         Err(e) => {
             meta.add_warning(format!("spawn failed: {e}"));
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
-            return Ok(()); // Not an error — SpawnFailed is a valid terminal state
+            return Ok(()); // Not an error -- SpawnFailed is a valid terminal state
         }
     };
 
-    // Get child identity — need this before writing the orphan breadcrumb
+    // Get child identity -- need this before writing the orphan breadcrumb
     // so cleanup_orphan_dir can verify against PID reuse.
-    let child_pid = child.id();
-    let child_identity = match platform::process_identity(child_pid) {
+    let child_identity = match Current::child_identity(&child) {
         Ok(id) => id,
         Err(_) => {
-            // Can't get identity — kill and wait inline. No orphan is possible
+            // Can't get identity -- kill and wait inline. No orphan is possible
             // since we kill synchronously, so don't write a breadcrumb.
-            let _ = child.kill();
-            let _ = child.wait();
+            let handle = Current::child_kill_handle(&child);
+            let _ = Current::kill_child(&handle, true);
+            let _ = Current::child_wait(&mut child);
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
             signal_meta_snapshot(ready, &meta)?;
@@ -257,7 +219,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     };
 
-    // SAFETY: child_identity has been verified — write it as the orphan breadcrumb.
+    // SAFETY: child_identity has been verified -- write it as the orphan breadcrumb.
     // If sidecar crashes after spawn but before meta write, the reconciler
     // can find and safely kill the orphaned child using this identity.
     let _ = std::fs::write(
@@ -268,7 +230,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        setup_stdin_forwarding(session_dir, &mut child, &stdin_errors)?;
+        let child_stdin = Current::child_stdin(&mut child)
+            .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
+        setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
     }
 
     // --- Transition to Running + readiness signal ---
@@ -277,9 +241,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     signal_meta_snapshot(ready, &meta)?;
 
     // --- Timeout setup ---
+    let kill_handle = Current::child_kill_handle(&child);
     let timeout_cancel = Arc::new(AtomicBool::new(false));
     let timed_out = if let Some(timeout_s) = meta.launch_spec().timeout_s {
-        setup_timeout(child_identity, timeout_s, Arc::clone(&timeout_cancel))
+        setup_timeout(kill_handle, timeout_s, Arc::clone(&timeout_cancel))
     } else {
         Arc::new(AtomicBool::new(false))
     };
@@ -307,10 +272,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         exit_reason
     };
 
-    // Clean up stdin FIFO — forwarding thread will exit when open fails
-    let _ = std::fs::remove_file(session_dir.join("stdin.pipe"));
+    // Clean up stdin transport
+    Current::remove_stdin_transport(session_dir);
 
-    // Clean up breadcrumb — no longer needed, meta has the child identity
+    // Clean up breadcrumb -- no longer needed, meta has the child identity
     let _ = std::fs::remove_file(session_dir.join("child_pid"));
 
     for warning in collect_warnings(session_dir, &stdin_errors) {
@@ -324,34 +289,30 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     Ok(())
 }
 
-/// Forward data from the stdin FIFO to the child's stdin pipe.
-/// Re-opens the FIFO after each writer disconnects to support multiple pushes.
-/// Exits when: child stdin write fails (child exited) or FIFO open fails (removed).
+/// Forward data from the stdin transport to the child's stdin pipe.
+/// Accepts connections in a loop to support multiple pushes.
+/// Exits when: child stdin write fails (child exited) or transport is removed.
 fn forward_stdin(
-    fifo_path: PathBuf,
-    mut child_stdin: std::process::ChildStdin,
+    transport: <Current as Platform>::StdinTransport,
+    session_dir: PathBuf,
+    mut child_stdin: Box<dyn Write + Send>,
     errors: Arc<Mutex<Vec<String>>>,
 ) {
     use std::io::Read;
     let mut buf = [0u8; 8192];
     loop {
-        // Open blocks until a writer connects
-        let mut fifo = match File::open(&fifo_path) {
-            Ok(f) => f,
-            Err(e) => {
-                if let Ok(mut errs) = errors.lock() {
-                    errs.push(format!("stdin fifo open failed: {e}"));
-                }
-                return;
-            }
+        // Block until a writer connects (returns None if transport removed)
+        let mut reader = match Current::accept_stdin_connection(&transport, &session_dir) {
+            Some(r) => r,
+            None => return, // transport closed/removed
         };
         loop {
-            let n = match fifo.read(&mut buf) {
+            let n = match reader.read(&mut buf) {
                 Ok(0) => break, // writer disconnected
                 Ok(n) => n,
                 Err(e) => {
                     if let Ok(mut errs) = errors.lock() {
-                        errs.push(format!("stdin fifo read failed: {e}"));
+                        errs.push(format!("stdin read failed: {e}"));
                     }
                     return;
                 }
@@ -366,20 +327,23 @@ fn forward_stdin(
     }
 }
 
-/// Send meta JSON over the readiness pipe. Consumes the fd.
-/// The CLI reads this snapshot directly — no race with subsequent disk writes.
-fn signal_meta_snapshot(ready: &mut Option<RawFd>, meta: &Meta) -> anyhow::Result<()> {
-    let fd = ready
+/// Send meta JSON over the readiness channel. Consumes the writer.
+/// The CLI reads this snapshot directly -- no race with subsequent disk writes.
+fn signal_meta_snapshot(ready: &mut Option<ReadyWriter>, meta: &Meta) -> anyhow::Result<()> {
+    let writer = ready
         .take()
-        .ok_or_else(|| anyhow::anyhow!("readiness pipe already consumed"))?;
+        .ok_or_else(|| anyhow::anyhow!("readiness channel already consumed"))?;
     let json = serde_json::to_string(meta)?;
-    platform::write_ready_signal(fd, &format!("OK:{json}\n"))?;
+    Current::write_ready_signal(writer, &format!("OK:{json}\n"))?;
     Ok(())
 }
 
 /// Supervise the child: capture stdout/stderr to output.log, wait for exit.
 /// Returns the ExitReason when the child terminates.
-fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::Result<ExitReason> {
+fn supervise(
+    session: &SessionDir,
+    child: &mut <Current as Platform>::SupervisedChild,
+) -> anyhow::Result<ExitReason> {
     let log_path = session.path().join("output.log");
     let log_file = OpenOptions::new()
         .create(true)
@@ -387,8 +351,8 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
         .open(&log_path)?;
     let log = Mutex::new(log_file);
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = Current::child_stdout(child).expect("stdout was piped");
+    let stderr = Current::child_stderr(child).expect("stderr was piped");
 
     // Spawn reader threads. Capture errors rather than silently discarding.
     let log_ref = &log;
@@ -407,7 +371,7 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
 
     // Log capture failures to a file in the session dir.
     // Sidecar stderr goes to /dev/null so eprintln is useless.
-    // Don't fail supervision — the child's exit status is still meaningful.
+    // Don't fail supervision -- the child's exit status is still meaningful.
     let mut capture_errors = Vec::new();
     if let Err(e) = stdout_result {
         capture_errors.push(format!("stdout capture: {e}"));
@@ -420,7 +384,7 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
         let _ = std::fs::write(&err_path, capture_errors.join("\n"));
     }
 
-    let status = child.wait()?;
+    let status = Current::child_wait(child)?;
 
     let reason = match status.code() {
         Some(0) => ExitReason::ExitedOk,
@@ -436,7 +400,11 @@ fn supervise(session: &SessionDir, child: &mut std::process::Child) -> anyhow::R
 
 /// Read lines from a stream and write to the shared log file.
 /// Returns an error if log writing fails persistently.
-fn capture_stream<R: std::io::Read>(stream: R, tag: char, log: &Mutex<File>) -> Result<(), String> {
+fn capture_stream(
+    stream: Box<dyn std::io::Read + Send>,
+    tag: char,
+    log: &Mutex<File>,
+) -> Result<(), String> {
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let line = match line {

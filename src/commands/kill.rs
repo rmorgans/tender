@@ -1,12 +1,12 @@
 use tender::model::ids::SessionName;
-use tender::platform::unix as platform;
+use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
 pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
-    // Session doesn't exist — idempotent success
+    // Session doesn't exist -- idempotent success
     let session = match session::open(&root, &session_name)? {
         Some(s) => s,
         None => {
@@ -20,7 +20,7 @@ pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
 
     let meta = session::read_meta(&session)?;
 
-    // Already terminal — idempotent success
+    // Already terminal -- idempotent success
     if meta.status().is_terminal() {
         let json = serde_json::to_string_pretty(&meta)?;
         println!("{json}");
@@ -31,7 +31,7 @@ pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     let child = match meta.status().child() {
         Some(c) => *c,
         None => {
-            // Starting state with no child — nothing to kill
+            // Starting state with no child -- nothing to kill
             println!(
                 "{}",
                 serde_json::json!({"session": name, "result": "no_child"})
@@ -50,8 +50,8 @@ pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
     };
 
     // Kill the child's process group. Verifies identity first.
-    if let Err(e) = platform::kill_process(&child, force) {
-        // Clean up marker on error — don't leave a stale marker that could
+    if let Err(e) = Current::kill_orphan(&child, force) {
+        // Clean up marker on error -- don't leave a stale marker that could
         // mislabel a later exit as KilledForced
         if let Some(ref p) = kill_forced_path {
             let _ = std::fs::remove_file(p);
@@ -71,7 +71,7 @@ pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Sidecar didn't write terminal state in time — report what we know
+    // Sidecar didn't write terminal state in time -- report what we know
     println!(
         "{}",
         serde_json::json!({"session": name, "result": "kill_sent", "force": force})

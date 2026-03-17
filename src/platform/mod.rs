@@ -1,2 +1,177 @@
+use std::fs::File;
+use std::io;
+use std::path::Path;
+use std::process::ExitStatus;
+
+use crate::model::ids::ProcessIdentity;
+
 #[cfg(unix)]
 pub mod unix;
+
+#[cfg(unix)]
+pub type Current = unix::UnixPlatform;
+
+/// Result of probing a process by identity.
+/// Lifecycle state comes from the sidecar; process observation comes from
+/// this typed OS result -- never a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum ProcessStatus {
+    /// PID exists and identity matches -- safe to signal.
+    AliveVerified,
+    /// PID does not exist (ESRCH).
+    Missing,
+    /// PID exists but identity differs -- PID was recycled.
+    IdentityMismatch,
+    /// PID exists but OS denied access (EPERM) -- different session on macOS.
+    /// Can still signal (kill(2) only needs appropriate permissions, not
+    /// proc_pidinfo access), but PID reuse safety is degraded.
+    Inaccessible,
+    /// Unexpected OS error.
+    OsError(std::io::ErrorKind),
+}
+
+/// Platform-specific process supervision operations.
+///
+/// The key abstraction is `SupervisedChild`: an opaque bundle of
+/// backend state for a child process under supervision. On Unix this
+/// wraps std::process::Child + ProcessIdentity. On Windows this wraps
+/// a process HANDLE, Job Object HANDLE, graceful-stop event HANDLE,
+/// and stdout/stderr pipe HANDLEs.
+///
+/// Callers never see raw HANDLEs, PIDs, or fds -- only this type.
+pub trait Platform {
+    /// Opaque supervised-child state. Dropped when supervision ends.
+    type SupervisedChild;
+    /// Lightweight, cloneable kill handle extracted from SupervisedChild.
+    /// Carries enough backend state to kill the child tree from another thread
+    /// (timeout thread) without needing the full SupervisedChild.
+    ///
+    /// On Unix: wraps ProcessIdentity (group kill via -pgid).
+    /// On Windows: wraps Job Object HANDLE + stop event HANDLE (tree kill).
+    type ChildKillHandle: Send + Clone;
+    type StdinTransport: Send;
+    type ReadyReader;
+    type ReadyWriter;
+
+    // --- Sidecar spawn (CLI side) ---
+
+    /// Spawn the sidecar as a detached process.
+    /// Returns the sidecar PID (for meta.json).
+    fn spawn_sidecar(
+        tender_bin: &Path,
+        session_dir: &Path,
+        ready_writer: &Self::ReadyWriter,
+    ) -> io::Result<u32>;
+
+    // --- Readiness channel ---
+
+    /// Create a readiness channel (anonymous pipe).
+    fn ready_channel() -> io::Result<(Self::ReadyReader, Self::ReadyWriter)>;
+
+    /// Block until the sidecar writes a readiness message.
+    fn read_ready_signal(reader: Self::ReadyReader) -> io::Result<String>;
+
+    /// Write a readiness message from the sidecar side.
+    fn write_ready_signal(writer: Self::ReadyWriter, message: &str) -> io::Result<()>;
+
+    // --- Child spawn (sidecar side) ---
+
+    /// Spawn a child process under supervision.
+    ///
+    /// Sets up platform-specific process grouping/containment:
+    /// - Unix: setpgid(0,0) to create new process group
+    /// - Windows: CREATE_SUSPENDED -> Job Object -> ResumeThread
+    ///
+    /// Returns an opaque SupervisedChild that owns all backend state.
+    fn spawn_child(argv: &[String], stdin_piped: bool) -> io::Result<Self::SupervisedChild>;
+
+    /// Get the ProcessIdentity of the supervised child.
+    /// Cheap, callable any time -- borrows only.
+    fn child_identity(child: &Self::SupervisedChild) -> io::Result<ProcessIdentity>;
+
+    /// Wait for the child to exit. Blocks until the process terminates.
+    /// Does NOT consume the child -- handles stay open for cleanup.
+    fn child_wait(child: &mut Self::SupervisedChild) -> io::Result<ExitStatus>;
+
+    /// Take the child's stdout stream for capture.
+    /// Returns None if already taken. Moves ownership to the caller
+    /// (typically a capture thread).
+    fn child_stdout(child: &mut Self::SupervisedChild) -> Option<Box<dyn io::Read + Send>>;
+
+    /// Take the child's stderr stream for capture.
+    /// Same take-once semantics as child_stdout.
+    fn child_stderr(child: &mut Self::SupervisedChild) -> Option<Box<dyn io::Read + Send>>;
+
+    /// Take the child's stdin for forwarding (if stdin_piped was true).
+    /// Same take-once semantics.
+    fn child_stdin(child: &mut Self::SupervisedChild) -> Option<Box<dyn io::Write + Send>>;
+
+    // --- Kill ---
+
+    /// Extract a lightweight kill handle from the supervised child.
+    /// The handle is Send + Clone and can be moved to a timeout thread.
+    /// Must be called before child_wait (which takes &mut self).
+    fn child_kill_handle(child: &Self::SupervisedChild) -> Self::ChildKillHandle;
+
+    /// Kill a supervised child via its kill handle.
+    /// Uses the live backend context (process group on Unix, Job Object on Windows).
+    ///
+    /// - Unix: kill(-pgid, signal) with identity verification
+    /// - Windows: TerminateJobObject (force) or SetEvent (graceful)
+    fn kill_child(handle: &Self::ChildKillHandle, force: bool) -> io::Result<()>;
+
+    /// Kill an orphaned process by persisted identity (no live handle).
+    ///
+    /// Used when the sidecar has crashed and we only have ProcessIdentity
+    /// from meta.json or the child_pid breadcrumb.
+    fn kill_orphan(id: &ProcessIdentity, force: bool) -> io::Result<()>;
+
+    // --- Process identity ---
+
+    /// Get the identity of the current process (for sidecar meta).
+    fn self_identity() -> io::Result<ProcessIdentity>;
+
+    /// Get the identity of any process by PID (for orphan recovery).
+    fn process_identity(pid: u32) -> io::Result<ProcessIdentity>;
+
+    /// Probe whether a process is alive and matches the given identity.
+    fn process_status(id: &ProcessIdentity) -> ProcessStatus;
+
+    // --- stdin transport ---
+
+    /// Create the stdin transport (sidecar side).
+    /// Unix: mkfifo. Windows: CreateNamedPipe.
+    fn create_stdin_transport(session_dir: &Path) -> io::Result<Self::StdinTransport>;
+
+    /// Wait for a writer to connect to the stdin transport and return a reader.
+    /// Blocks until a writer connects. Returns None if the transport is
+    /// closed/removed (e.g., session cleanup).
+    ///
+    /// Called in a loop by the forwarding thread:
+    /// - Unix: opens the FIFO for reading (blocks until a writer connects)
+    /// - Windows: calls ConnectNamedPipe on the server handle
+    fn accept_stdin_connection(
+        transport: &Self::StdinTransport,
+        session_dir: &Path,
+    ) -> Option<Box<dyn io::Read + Send>>;
+
+    /// Open the stdin transport for writing (push command side).
+    /// Returns immediately if no reader (ConnectionRefused).
+    fn open_stdin_writer(session_dir: &Path) -> io::Result<File>;
+
+    /// Remove the stdin transport on cleanup.
+    fn remove_stdin_transport(session_dir: &Path);
+
+    // --- Ready fd inheritance (sidecar side) ---
+
+    /// Construct a ReadyWriter from the OS-specific sidecar entry point.
+    /// Unix: converts TENDER_READY_FD (RawFd from env var) to File.
+    /// Windows: converts TENDER_READY_HANDLE to a HANDLE-based writer.
+    fn ready_writer_from_env() -> io::Result<Self::ReadyWriter>;
+
+    /// Prevent the ready channel from leaking to the child process.
+    /// Unix: set CLOEXEC on the ready fd.
+    /// Windows: no-op (HANDLE_LIST already controls inheritance).
+    fn seal_ready_fd(writer: &Self::ReadyWriter) -> io::Result<()>;
+}

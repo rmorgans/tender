@@ -4,15 +4,216 @@ use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use rustix::fs::{self as rfs, Mode, OFlags};
 
 use crate::model::ids::ProcessIdentity;
+use crate::platform::{Platform, ProcessStatus};
+
+/// Unix implementation of the Platform trait.
+pub struct UnixPlatform;
+
+/// Opaque supervised-child state for Unix.
+/// Wraps a `std::process::Child` with its verified `ProcessIdentity`.
+pub struct SupervisedChild {
+    child: std::process::Child,
+    identity: ProcessIdentity,
+}
+
+/// Lightweight kill handle for Unix. Carries the ProcessIdentity
+/// needed for identity-verified group kill. Send + Clone so it can
+/// be moved to a timeout thread.
+#[derive(Clone)]
+pub struct ChildKillHandle {
+    identity: ProcessIdentity,
+}
+
+impl Platform for UnixPlatform {
+    type SupervisedChild = SupervisedChild;
+    type ChildKillHandle = ChildKillHandle;
+    type StdinTransport = ();
+    type ReadyReader = File;
+    type ReadyWriter = File;
+
+    fn spawn_sidecar(
+        tender_bin: &Path,
+        session_dir: &Path,
+        ready_write_fd: &File,
+    ) -> io::Result<u32> {
+        spawn_sidecar(tender_bin, session_dir, ready_write_fd)
+    }
+
+    fn ready_channel() -> io::Result<(File, File)> {
+        pipe()
+    }
+
+    fn read_ready_signal(reader: File) -> io::Result<String> {
+        read_ready_signal(reader)
+    }
+
+    fn write_ready_signal(writer: File, message: &str) -> io::Result<()> {
+        write_ready_signal_file(writer, message)
+    }
+
+    fn spawn_child(argv: &[String], stdin_piped: bool) -> io::Result<SupervisedChild> {
+        let mut cmd = Command::new(&argv[0]);
+        if argv.len() > 1 {
+            cmd.args(&argv[1..]);
+        }
+        if stdin_piped {
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Make child its own process group leader so kill(-pgid) kills the whole tree.
+        // SAFETY: pre_exec runs after fork() in the child process, before exec().
+        // setpgid(0,0) is async-signal-safe and only affects the forked child.
+        // No shared mutable state is accessed in the closure.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let child = cmd.spawn()?;
+        let pid = child.id();
+        let identity = process_identity(pid)?;
+
+        Ok(SupervisedChild { child, identity })
+    }
+
+    fn child_identity(child: &SupervisedChild) -> io::Result<ProcessIdentity> {
+        Ok(child.identity)
+    }
+
+    fn child_wait(child: &mut SupervisedChild) -> io::Result<ExitStatus> {
+        child.child.wait()
+    }
+
+    fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+        child
+            .child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+    }
+
+    fn child_stderr(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+        child
+            .child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+    }
+
+    fn child_stdin(child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
+        child
+            .child
+            .stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
+    }
+
+    fn child_kill_handle(child: &SupervisedChild) -> ChildKillHandle {
+        ChildKillHandle {
+            identity: child.identity,
+        }
+    }
+
+    fn kill_child(handle: &ChildKillHandle, force: bool) -> io::Result<()> {
+        kill_process(&handle.identity, force)
+    }
+
+    fn kill_orphan(id: &ProcessIdentity, force: bool) -> io::Result<()> {
+        kill_process(id, force)
+    }
+
+    fn self_identity() -> io::Result<ProcessIdentity> {
+        process_identity(std::process::id())
+    }
+
+    fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+        process_identity(pid)
+    }
+
+    fn process_status(id: &ProcessIdentity) -> ProcessStatus {
+        process_status(id)
+    }
+
+    fn create_stdin_transport(session_dir: &Path) -> io::Result<()> {
+        let fifo_path = session_dir.join("stdin.pipe");
+        mkfifo(&fifo_path)
+    }
+
+    fn accept_stdin_connection(
+        _transport: &(),
+        session_dir: &Path,
+    ) -> Option<Box<dyn io::Read + Send>> {
+        // On Unix, opening a FIFO for reading blocks until a writer connects.
+        // Returns None if the FIFO has been removed (session cleanup).
+        let fifo_path = session_dir.join("stdin.pipe");
+        File::open(&fifo_path)
+            .ok()
+            .map(|f| Box::new(f) as Box<dyn io::Read + Send>)
+    }
+
+    fn open_stdin_writer(session_dir: &Path) -> io::Result<File> {
+        let fifo_path = session_dir.join("stdin.pipe");
+        open_fifo_write_nonblock(&fifo_path).map_err(|e| {
+            // Map ENXIO (no reader connected) to ConnectionRefused so callers
+            // don't need platform-specific imports to detect this condition.
+            if e.raw_os_error() == Some(libc::ENXIO) {
+                io::Error::new(io::ErrorKind::ConnectionRefused, e)
+            } else {
+                e
+            }
+        })
+    }
+
+    fn remove_stdin_transport(session_dir: &Path) {
+        let _ = std::fs::remove_file(session_dir.join("stdin.pipe"));
+    }
+
+    fn ready_writer_from_env() -> io::Result<File> {
+        let fd_str = std::env::var("TENDER_READY_FD")
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "TENDER_READY_FD not set"))?;
+        let fd: RawFd = fd_str.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TENDER_READY_FD is not a valid fd",
+            )
+        })?;
+        // SAFETY: fd is the TENDER_READY_FD passed by spawn_sidecar, which was a
+        // valid open fd at exec time (close-on-exec was cleared in pre_exec).
+        // from_raw_fd takes ownership — the fd is closed when the File is dropped.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn seal_ready_fd(writer: &File) -> io::Result<()> {
+        let fd = writer.as_raw_fd();
+        // SAFETY: fd is a valid open file descriptor from the ready pipe.
+        // F_SETFD with FD_CLOEXEC is a valid fcntl operation.
+        // This prevents the child from inheriting the ready pipe.
+        let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+// --- Standalone functions (not trait methods) ---
 
 /// Create a named pipe (FIFO) at `path` with mode 0600.
 /// Note: rustix doesn't provide mkfifo on macOS, so this stays as raw libc.
-pub fn mkfifo(path: &Path) -> io::Result<()> {
+fn mkfifo(path: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -29,13 +230,13 @@ pub fn mkfifo(path: &Path) -> io::Result<()> {
 
 /// Create a pipe. Returns (read_fd, write_fd) as owned Files.
 /// Both fds have close-on-exec set.
-pub fn pipe() -> io::Result<(File, File)> {
+fn pipe() -> io::Result<(File, File)> {
     #[cfg(target_os = "linux")]
     let (read_fd, write_fd) = { rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)? };
 
     #[cfg(not(target_os = "linux"))]
     let (read_fd, write_fd) = {
-        // macOS doesn't have pipe2 — use pipe() + set CLOEXEC
+        // macOS doesn't have pipe2 -- use pipe() + set CLOEXEC
         let (r, w) = rustix::pipe::pipe()?;
         rustix::io::fcntl_setfd(&r, rustix::io::FdFlags::CLOEXEC)?;
         rustix::io::fcntl_setfd(&w, rustix::io::FdFlags::CLOEXEC)?;
@@ -50,11 +251,7 @@ pub fn pipe() -> io::Result<(File, File)> {
 ///
 /// The sidecar inherits the write end of the readiness pipe and is
 /// responsible for writing a result and closing it.
-pub fn spawn_sidecar(
-    tender_bin: &Path,
-    session_dir: &Path,
-    ready_write_fd: &File,
-) -> io::Result<u32> {
+fn spawn_sidecar(tender_bin: &Path, session_dir: &Path, ready_write_fd: &File) -> io::Result<u32> {
     let write_fd_raw = ready_write_fd.as_raw_fd();
 
     let mut cmd = Command::new(tender_bin);
@@ -94,7 +291,7 @@ pub fn spawn_sidecar(
 /// Read the readiness result from the pipe.
 /// Returns Ok(message) on success, or Err if the pipe closed without a message
 /// (sidecar died before signaling).
-pub fn read_ready_signal(mut read_end: File) -> io::Result<String> {
+fn read_ready_signal(mut read_end: File) -> io::Result<String> {
     let mut buf = String::new();
     read_end.read_to_string(&mut buf)?;
     if buf.is_empty() {
@@ -109,7 +306,7 @@ pub fn read_ready_signal(mut read_end: File) -> io::Result<String> {
 /// Open a FIFO for writing without blocking.
 /// Returns ENXIO immediately if no reader is connected.
 /// On success, clears O_NONBLOCK so subsequent writes block normally.
-pub fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
+fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
     let fd: OwnedFd = rfs::open(path, OFlags::WRONLY | OFlags::NONBLOCK, Mode::empty())?;
 
     let flags = rfs::fcntl_getfl(&fd)?;
@@ -118,25 +315,27 @@ pub fn open_fifo_write_nonblock(path: &Path) -> io::Result<File> {
     Ok(File::from(fd))
 }
 
-/// Write a readiness signal to the pipe.
-pub fn write_ready_signal(fd_num: RawFd, message: &str) -> io::Result<()> {
-    // SAFETY: fd_num is the TENDER_READY_FD passed by spawn_sidecar, which was a
-    // valid open fd at exec time (close-on-exec was cleared in pre_exec).
-    // from_raw_fd takes ownership — the fd is closed when file is dropped at
-    // the end of this function, ensuring exactly one close.
-    let mut file = unsafe { File::from_raw_fd(fd_num) };
+/// Write a readiness signal to the pipe via a File.
+fn write_ready_signal_file(mut file: File, message: &str) -> io::Result<()> {
     file.write_all(message.as_bytes())?;
     // file is dropped here, closing the fd
     Ok(())
 }
 
-/// Get the ProcessIdentity of the current process.
-pub fn self_identity() -> io::Result<ProcessIdentity> {
-    process_identity(std::process::id())
+/// Write a readiness signal to the pipe via a raw fd number.
+/// Used by the sidecar entry point which receives the fd from the environment.
+pub fn write_ready_signal(fd_num: RawFd, message: &str) -> io::Result<()> {
+    // SAFETY: fd_num is the TENDER_READY_FD passed by spawn_sidecar, which was a
+    // valid open fd at exec time (close-on-exec was cleared in pre_exec).
+    // from_raw_fd takes ownership -- the fd is closed when file is dropped at
+    // the end of this function, ensuring exactly one close.
+    let file = unsafe { File::from_raw_fd(fd_num) };
+    write_ready_signal_file(file, message)
 }
 
+/// Get the ProcessIdentity of the current process.
 /// Get the ProcessIdentity of a process by PID.
-pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     let pid = NonZeroU32::new(pid).ok_or_else(|| io::Error::other("pid is zero"))?;
     let start_time_ns = process_start_time(pid.get())?;
     Ok(ProcessIdentity { pid, start_time_ns })
@@ -180,7 +379,7 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
     // SAFETY: info is a properly sized and aligned proc_bsdinfo buffer.
     // pid is cast to i32 which is safe because macOS PIDs fit in i32.
     // PROC_PIDTBSDINFO is the correct flavor for proc_bsdinfo.
-    // size matches the buffer — proc_pidinfo won't write out of bounds.
+    // size matches the buffer -- proc_pidinfo won't write out of bounds.
     let ret = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -201,29 +400,9 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
     Ok(secs * 1_000_000_000 + usecs * 1_000)
 }
 
-/// Result of probing a process by identity.
-/// Lifecycle state comes from the sidecar; process observation comes from
-/// this typed OS result — never a boolean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub enum ProcessStatus {
-    /// PID exists and identity matches — safe to signal.
-    AliveVerified,
-    /// PID does not exist (ESRCH).
-    Missing,
-    /// PID exists but identity differs — PID was recycled.
-    IdentityMismatch,
-    /// PID exists but OS denied access (EPERM) — different session on macOS.
-    /// Can still signal (kill(2) only needs appropriate permissions, not
-    /// proc_pidinfo access), but PID reuse safety is degraded.
-    Inaccessible,
-    /// Unexpected OS error.
-    OsError(std::io::ErrorKind),
-}
-
 /// Probe a process by identity. Returns a typed status instead of a boolean
 /// so callers can make informed decisions (especially around EPERM).
-pub fn process_status(id: &ProcessIdentity) -> ProcessStatus {
+fn process_status(id: &ProcessIdentity) -> ProcessStatus {
     match process_identity(id.pid.get()) {
         Ok(current) => {
             if current == *id {
@@ -253,13 +432,13 @@ pub fn process_status(id: &ProcessIdentity) -> ProcessStatus {
 /// Tries process group kill first (kill(-pgid)), falls back to direct kill.
 /// Verifies process identity before signaling to prevent killing recycled PIDs.
 /// Returns Ok(()) if the process is already dead (idempotent).
-pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
+fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
     match process_status(id) {
         ProcessStatus::Missing => return Ok(()),
         ProcessStatus::IdentityMismatch => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "PID was recycled — refusing to kill wrong process",
+                "PID was recycled -- refusing to kill wrong process",
             ));
         }
         ProcessStatus::OsError(kind) => {
@@ -268,7 +447,7 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
         // AliveVerified: identity confirmed, signal normally
         // Inaccessible: can't verify identity (EPERM from proc_pidinfo on macOS
         // when child is in a different session), but kill(2) will still work.
-        // Degraded PID reuse safety — acceptable because the sidecar wrote the
+        // Degraded PID reuse safety -- acceptable because the sidecar wrote the
         // identity moments ago and PID reuse within that window is negligible.
         ProcessStatus::AliveVerified | ProcessStatus::Inaccessible => {}
     }
@@ -297,7 +476,7 @@ pub fn kill_process(id: &ProcessIdentity, force: bool) -> io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Still alive — escalate to SIGKILL
+    // Still alive -- escalate to SIGKILL
     send_signal_group(pid, rustix::process::Signal::KILL)
         .or_else(|_| send_signal_direct(pid, rustix::process::Signal::KILL))?;
 
@@ -342,7 +521,7 @@ mod tests {
 
     #[test]
     fn process_status_self_is_alive_verified() {
-        let self_id = self_identity().unwrap();
+        let self_id = UnixPlatform::self_identity().unwrap();
         assert_eq!(process_status(&self_id), ProcessStatus::AliveVerified);
     }
 
@@ -356,7 +535,7 @@ mod tests {
     #[test]
     fn process_status_wrong_start_time_returns_identity_mismatch() {
         // Use our own PID but with a bogus start time
-        let self_id = self_identity().unwrap();
+        let self_id = UnixPlatform::self_identity().unwrap();
         let wrong = fake_identity(self_id.pid.get(), self_id.start_time_ns.wrapping_add(1));
         assert_eq!(process_status(&wrong), ProcessStatus::IdentityMismatch);
     }

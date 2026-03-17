@@ -1,5 +1,5 @@
 use tender::model::ids::{EpochTimestamp, ProcessIdentity, SessionName};
-use tender::platform::unix as platform;
+use tender::platform::{Current, Platform, ProcessStatus};
 use tender::session::{self, SessionError, SessionRoot};
 
 pub fn cmd_status(name: &str) -> anyhow::Result<()> {
@@ -44,12 +44,12 @@ pub(crate) fn cleanup_orphan_dir(dir: &std::path::Path) {
     if let Ok(content) = std::fs::read_to_string(&child_pid_path) {
         // Try JSON ProcessIdentity (new format)
         if let Ok(identity) = serde_json::from_str::<ProcessIdentity>(&content) {
-            match platform::process_status(&identity) {
-                platform::ProcessStatus::AliveVerified | platform::ProcessStatus::Inaccessible => {
-                    // Identity verified (or can't verify but process exists) — kill it
-                    let _ = platform::kill_process(&identity, true);
+            match Current::process_status(&identity) {
+                ProcessStatus::AliveVerified | ProcessStatus::Inaccessible => {
+                    // Identity verified (or can't verify but process exists) -- kill it
+                    let _ = Current::kill_orphan(&identity, true);
                 }
-                // Missing, IdentityMismatch, OsError — don't kill
+                // Missing, IdentityMismatch, OsError -- don't kill
                 _ => {}
             }
         }
