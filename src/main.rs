@@ -18,6 +18,9 @@ enum Commands {
         /// Enable stdin pipe for push command
         #[arg(long)]
         stdin: bool,
+        /// Replace existing session (kill + restart)
+        #[arg(long)]
+        replace: bool,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -82,7 +85,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Start { name, cmd, stdin } => cmd_start(&name, cmd, stdin),
+        Commands::Start { name, cmd, stdin, replace } => cmd_start(&name, cmd, stdin, replace),
         Commands::Push { name } => cmd_push(&name),
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
@@ -105,7 +108,7 @@ fn main() {
     }
 }
 
-fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool) -> anyhow::Result<()> {
+fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
     use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
@@ -113,6 +116,43 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool) -> anyhow::Result<()> {
 
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
+
+    // Handle --replace before session creation
+    if replace {
+        let session_path = root.path().join(session_name.as_str());
+        if session_path.exists() {
+            if !session_path.join("meta.json").exists() {
+                // Orphan dir — just clean up
+                cleanup_orphan_dir(&session_path);
+            } else if let Some(existing) = session::open(&root, &session_name)? {
+                let existing_meta = session::read_meta(&existing)?;
+                if !existing_meta.status().is_terminal() {
+                    // Kill the child
+                    if let Some(child) = existing_meta.status().child() {
+                        let _ = platform::kill_process(child, true);
+                    }
+                    // Wait for sidecar to write terminal state AND release lock
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        if let Ok(m) = session::read_meta(&existing) {
+                            if m.status().is_terminal()
+                                && !session::is_locked(&existing).unwrap_or(true)
+                            {
+                                break; // Terminal + unlocked = safe to remove
+                            }
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break; // Timeout — proceed anyway
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                // Safe to remove — sidecar has exited or timed out
+                std::fs::remove_dir_all(existing.path())?;
+            }
+        }
+    }
 
     // Build launch spec
     let mut launch_spec = LaunchSpec::new(cmd)?;
