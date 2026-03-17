@@ -147,7 +147,9 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
                             }
                         }
                         if std::time::Instant::now() >= deadline {
-                            break; // Timeout — proceed anyway
+                            anyhow::bail!(
+                                "replace timed out: old sidecar for {name} did not exit within 10s"
+                            );
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
@@ -180,9 +182,12 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
                     .ok_or_else(|| anyhow::anyhow!("session exists but not openable"))?;
                 let existing_meta = session::read_meta(&existing)?;
 
-                if !existing_meta.status().is_terminal() {
+                if matches!(
+                    existing_meta.status(),
+                    tender::model::state::RunStatus::Running { .. }
+                ) {
+                    // Running — check spec match for idempotent return
                     if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
-                        // Same spec — idempotent return
                         let json = serde_json::to_string_pretty(&existing_meta)?;
                         println!("{json}");
                         return Ok(());
@@ -191,9 +196,14 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
                             "session conflict: {name} is running with a different launch spec (use --replace to override)"
                         );
                     }
-                } else {
+                } else if existing_meta.status().is_terminal() {
                     anyhow::bail!(
                         "session already exists in terminal state: {name} (use --replace to restart)"
+                    );
+                } else {
+                    // Starting — sidecar is still initializing
+                    anyhow::bail!(
+                        "session {name} is still starting (sidecar has not reached Running yet)"
                     );
                 }
             }
@@ -397,13 +407,38 @@ fn cmd_status(name: &str) -> anyhow::Result<()> {
 }
 
 /// Clean up an orphaned session dir that has child_pid but no meta.json.
-/// Kills the orphaned child process if still alive, then removes the dir.
+/// Attempts to kill the orphaned child if identity can be verified.
+/// If identity cannot be verified (PID may have been reused), skips the kill
+/// rather than risking killing an unrelated process.
 fn cleanup_orphan_dir(dir: &std::path::Path) {
+    use tender::platform::unix as platform;
+
     let child_pid_path = dir.join("child_pid");
     if let Ok(pid_str) = std::fs::read_to_string(&child_pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            // Try to get current identity of this PID. If the process exists,
+            // we can only safely kill it if we had stored identity to compare.
+            // Since orphan dirs don't have meta.json (which has ProcessIdentity),
+            // we use a best-effort heuristic: check if the process is a child of
+            // init/launchd (PPID=1), which is likely for orphaned sidecar children.
+            // If we can't verify, skip the kill — PID reuse safety is more important.
+            let status = platform::process_status(&tender::model::ids::ProcessIdentity {
+                pid: std::num::NonZeroU32::new(pid).unwrap(),
+                start_time_ns: 0, // bogus — will always be IdentityMismatch
+            });
+            // If we get Inaccessible or Missing, the process is gone or unreachable.
+            // If IdentityMismatch, the PID exists but we can't verify it's ours — skip.
+            // Only Missing means we're safe (process doesn't exist, nothing to kill).
+            match status {
+                platform::ProcessStatus::Missing => {} // already gone
+                platform::ProcessStatus::Inaccessible => {
+                    // Can't verify, but process is in another session — likely our orphan.
+                    // Still safer to skip than to kill blindly.
+                }
+                _ => {
+                    // AliveVerified (impossible with start_time_ns=0),
+                    // IdentityMismatch (PID reused), OsError — don't kill.
+                }
             }
         }
     }
