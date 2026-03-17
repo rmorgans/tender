@@ -44,7 +44,119 @@ pub fn run(session_dir: PathBuf, ready_fd: RawFd) -> anyhow::Result<()> {
     result
 }
 
+/// Build and spawn the child process with piped stdout/stderr and its own process group.
+fn spawn_child(argv: &[String], stdin_piped: bool) -> std::io::Result<std::process::Child> {
+    let mut cmd = Command::new(&argv[0]);
+    if argv.len() > 1 {
+        cmd.args(&argv[1..]);
+    }
+    if stdin_piped {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // Make child its own process group leader so kill(-pgid) kills the whole tree
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    cmd.spawn()
+}
+
+/// Create the stdin FIFO and spawn a forwarding thread from FIFO to child stdin.
+fn setup_stdin_forwarding(
+    session_dir: &Path,
+    child: &mut std::process::Child,
+    stdin_errors: &Arc<Mutex<Vec<String>>>,
+) -> anyhow::Result<()> {
+    let fifo_path = session_dir.join("stdin.pipe");
+    platform::mkfifo(&fifo_path)?;
+
+    // Take child stdin — forward fifo data into it
+    let child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
+
+    // Spawn forwarding thread (detached — not joined).
+    // Thread exits when child stdin breaks or fifo is removed.
+    let fifo_clone = fifo_path.clone();
+    let errors_clone = Arc::clone(stdin_errors);
+    std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin, errors_clone));
+
+    Ok(())
+}
+
+/// Spawn a timeout thread that kills the child's process group after `timeout_s` seconds.
+/// Returns the `timed_out` flag. The caller passes a `cancel` flag to prevent the kill
+/// after the child exits naturally (PID reuse safety).
+fn setup_timeout(
+    child_pid: i32,
+    timeout_s: u64,
+    cancel: Arc<AtomicBool>,
+) -> Arc<AtomicBool> {
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_clone = Arc::clone(&timed_out);
+    std::thread::spawn(move || {
+        // Sleep in small increments so we can check the cancel flag
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return; // Child exited before timeout — don't kill
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return; // Final check after deadline
+        }
+        timed_out_clone.store(true, Ordering::Relaxed);
+        // Kill the process GROUP (negative PID), matching normal kill semantics
+        unsafe {
+            libc::kill(-child_pid, libc::SIGKILL);
+        }
+    });
+    timed_out
+}
+
+/// Collect capture errors and stdin forwarding errors into a warning list.
+fn collect_warnings(
+    session_dir: &Path,
+    stdin_errors: &Arc<Mutex<Vec<String>>>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Collect capture errors
+    let capture_err_path = session_dir.join("capture_errors.log");
+    if let Ok(errors) = std::fs::read_to_string(&capture_err_path) {
+        for line in errors.lines() {
+            if !line.is_empty() {
+                warnings.push(format!("log capture: {line}"));
+            }
+        }
+    }
+
+    // Collect stdin forwarding errors
+    if let Ok(errs) = stdin_errors.lock() {
+        for e in errs.iter() {
+            warnings.push(e.clone());
+        }
+    }
+
+    warnings
+}
+
 fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()> {
+    // --- Setup: lock, read spec, create meta ---
     let sidecar_identity = platform::self_identity()?;
 
     let session_name_str = session_dir
@@ -95,30 +207,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     }
 
-    // Spawn child
-    let argv = meta.launch_spec().argv();
-    let mut cmd = Command::new(&argv[0]);
-    if argv.len() > 1 {
-        cmd.args(&argv[1..]);
-    }
-    if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    // Make child its own process group leader so kill(-pgid) kills the whole tree
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = match cmd.spawn() {
+    // --- Spawn child (with SpawnFailed handling inline) ---
+    let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
+    let mut child = match spawn_child(meta.launch_spec().argv(), stdin_piped) {
         Ok(c) => c,
         Err(_) => {
             meta.transition_spawn_failed(EpochTimestamp::now())?;
@@ -148,72 +239,29 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
         }
     };
 
-    // Shared error collector for stdin forwarding — created unconditionally
-    // so it's accessible after supervise regardless of stdin mode.
+    // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // Create stdin FIFO BEFORE transitioning to Running or signaling readiness.
-    // Running must mean "fully externally usable" — concurrent status/push clients
-    // can observe Running in meta.json, so stdin.pipe must exist before that write.
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        let fifo_path = session_dir.join("stdin.pipe");
-        platform::mkfifo(&fifo_path)?;
-
-        // Take child stdin — forward fifo data into it
-        let child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
-
-        // Spawn forwarding thread (detached — not joined).
-        // Thread exits when child stdin breaks or fifo is removed.
-        let fifo_clone = fifo_path.clone();
-        let errors_clone = Arc::clone(&stdin_errors);
-        std::thread::spawn(move || forward_stdin(fifo_clone, child_stdin, errors_clone));
+        setup_stdin_forwarding(session_dir, &mut child, &stdin_errors)?;
     }
 
-    // Transition to Running — stdin FIFO is ready, state is now externally consistent
+    // --- Transition to Running + readiness signal ---
     meta.transition_running(child_identity)?;
     session::write_meta_atomic(&session, &meta)?;
-
-    // Send meta snapshot over pipe — CLI reads this directly, no disk race.
     signal_meta_snapshot(ready, &meta)?;
 
-    // Set up timeout if configured.
-    // The cancel flag prevents the thread from killing a reused PID after the child exits.
-    let timed_out = Arc::new(AtomicBool::new(false));
+    // --- Timeout setup ---
     let timeout_cancel = Arc::new(AtomicBool::new(false));
-    if let Some(timeout_s) = meta.launch_spec().timeout_s {
-        let timed_out_clone = Arc::clone(&timed_out);
-        let cancel_clone = Arc::clone(&timeout_cancel);
-        let child_pid = child.id() as i32;
-        std::thread::spawn(move || {
-            // Sleep in small increments so we can check the cancel flag
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
-            loop {
-                if cancel_clone.load(Ordering::Relaxed) {
-                    return; // Child exited before timeout — don't kill
-                }
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if cancel_clone.load(Ordering::Relaxed) {
-                return; // Final check after deadline
-            }
-            timed_out_clone.store(true, Ordering::Relaxed);
-            // Kill the process GROUP (negative PID), matching normal kill semantics
-            unsafe {
-                libc::kill(-child_pid, libc::SIGKILL);
-            }
-        });
-    }
+    let timed_out = if let Some(timeout_s) = meta.launch_spec().timeout_s {
+        setup_timeout(child.id() as i32, timeout_s, Arc::clone(&timeout_cancel))
+    } else {
+        Arc::new(AtomicBool::new(false))
+    };
 
-    // Capture output and supervise
+    // --- Supervise ---
     let exit_reason = supervise(&session, &mut child)?;
 
-    // Cancel timeout thread — child has exited, PID may be reused
+    // --- Cancel timeout + collect warnings + determine exit reason ---
     timeout_cancel.store(true, Ordering::Relaxed);
 
     // Override reason if timeout fired (highest priority)
@@ -239,24 +287,11 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Clean up breadcrumb — no longer needed, meta has the child identity
     let _ = std::fs::remove_file(session_dir.join("child_pid"));
 
-    // Collect capture errors into meta warnings
-    let capture_err_path = session_dir.join("capture_errors.log");
-    if let Ok(errors) = std::fs::read_to_string(&capture_err_path) {
-        for line in errors.lines() {
-            if !line.is_empty() {
-                meta.add_warning(format!("log capture: {line}"));
-            }
-        }
+    for warning in collect_warnings(session_dir, &stdin_errors) {
+        meta.add_warning(warning);
     }
 
-    // Collect stdin forwarding errors into meta warnings
-    if let Ok(errs) = stdin_errors.lock() {
-        for e in errs.iter() {
-            meta.add_warning(e.clone());
-        }
-    }
-
-    // Write terminal state
+    // --- Write terminal state ---
     meta.transition_exited(exit_reason, EpochTimestamp::now())?;
     session::write_meta_atomic(&session, &meta)?;
 
