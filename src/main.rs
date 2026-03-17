@@ -258,11 +258,12 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
         .ok_or_else(|| anyhow::anyhow!("unexpected readiness signal: {signal}"))?
         .trim();
 
-    let meta: serde_json::Value = serde_json::from_str(meta_json)?;
-    println!("{}", serde_json::to_string_pretty(&meta)?);
+    let meta: tender::model::meta::Meta = serde_json::from_str(meta_json)?;
+    let json = serde_json::to_string_pretty(&meta)?;
+    println!("{json}");
 
     // Exit non-zero if the child failed to spawn — agents branch on exit code
-    if meta.get("status").and_then(|s| s.as_str()) == Some("SpawnFailed") {
+    if matches!(meta.status(), tender::model::state::RunStatus::SpawnFailed { .. }) {
         std::process::exit(2); // exit code 2 = process error per contract
     }
 
