@@ -122,8 +122,40 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool) -> anyhow::Result<()> {
         StdinMode::None
     };
 
-    // Create session directory
-    let session = session::create(&root, &session_name)?;
+    // Create session directory (with idempotent handling)
+    let session = match session::create(&root, &session_name) {
+        Ok(s) => s,
+        Err(session::SessionError::AlreadyExists(_)) => {
+            let session_path = root.path().join(session_name.as_str());
+            // Orphan dir check: no meta.json means sidecar crashed before writing state
+            if !session_path.join("meta.json").exists() {
+                cleanup_orphan_dir(&session_path);
+                session::create(&root, &session_name)?
+            } else {
+                let existing = session::open(&root, &session_name)?
+                    .ok_or_else(|| anyhow::anyhow!("session exists but not openable"))?;
+                let existing_meta = session::read_meta(&existing)?;
+
+                if !existing_meta.status().is_terminal() {
+                    if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
+                        // Same spec — idempotent return
+                        let json = serde_json::to_string_pretty(&existing_meta)?;
+                        println!("{json}");
+                        return Ok(());
+                    } else {
+                        anyhow::bail!(
+                            "session conflict: {name} is running with a different launch spec (use --replace to override)"
+                        );
+                    }
+                } else {
+                    anyhow::bail!(
+                        "session already exists in terminal state: {name} (use --replace to restart)"
+                    );
+                }
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Write launch spec for sidecar to read
     let spec_json = serde_json::to_string_pretty(&launch_spec)?;

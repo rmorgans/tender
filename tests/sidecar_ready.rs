@@ -94,13 +94,13 @@ fn start_same_name_after_completed_fails_already_exists() {
     let output1 = run_tender(&root, &["start", "dup-test", "echo", "a"]);
     assert!(output1.status.success());
 
-    // Second start with same name fails (AlreadyExists)
+    // Second start with same name fails (terminal state or conflict)
     let output2 = run_tender(&root, &["start", "dup-test", "echo", "b"]);
     let (code, _, stderr) = run_tender_status(&output2);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("already exists"),
-        "expected 'already exists' error, got: {stderr}"
+        stderr.contains("terminal state") || stderr.contains("session conflict"),
+        "expected terminal/conflict error, got: {stderr}"
     );
 }
 
