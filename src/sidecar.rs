@@ -5,6 +5,7 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -178,8 +179,30 @@ fn run_inner(session_dir: &Path, ready: &mut Option<RawFd>) -> anyhow::Result<()
     // Send meta snapshot over pipe — CLI reads this directly, no disk race.
     signal_meta_snapshot(ready, &meta)?;
 
+    // Set up timeout if configured
+    let timed_out = Arc::new(AtomicBool::new(false));
+    if let Some(timeout_s) = meta.launch_spec().timeout_s {
+        let timed_out_clone = Arc::clone(&timed_out);
+        let child_pid = child.id();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(timeout_s));
+            timed_out_clone.store(true, Ordering::Relaxed);
+            // Kill the child — this triggers child.wait() to return
+            unsafe {
+                libc::kill(child_pid as i32, libc::SIGKILL);
+            }
+        });
+    }
+
     // Capture output and supervise
     let exit_reason = supervise(&session, &mut child)?;
+
+    // Override reason if timeout fired
+    let exit_reason = if timed_out.load(Ordering::Relaxed) {
+        ExitReason::TimedOut
+    } else {
+        exit_reason
+    };
 
     // Clean up stdin FIFO — forwarding thread will exit when open fails
     let _ = std::fs::remove_file(session_dir.join("stdin.pipe"));

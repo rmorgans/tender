@@ -21,6 +21,9 @@ enum Commands {
         /// Replace existing session (kill + restart)
         #[arg(long)]
         replace: bool,
+        /// Kill child after N seconds
+        #[arg(long)]
+        timeout: Option<u64>,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -90,7 +93,8 @@ fn main() {
             cmd,
             stdin,
             replace,
-        } => cmd_start(&name, cmd, stdin, replace),
+            timeout,
+        } => cmd_start(&name, cmd, stdin, replace, timeout),
         Commands::Push { name } => cmd_push(&name),
         Commands::Status { name } => cmd_status(&name),
         Commands::Kill { name, force } => cmd_kill(&name, force),
@@ -113,7 +117,7 @@ fn main() {
     }
 }
 
-fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow::Result<()> {
+fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool, timeout: Option<u64>) -> anyhow::Result<()> {
     use tender::model::ids::SessionName;
     use tender::model::spec::{LaunchSpec, StdinMode};
     use tender::platform::unix as platform;
@@ -167,6 +171,7 @@ fn cmd_start(name: &str, cmd: Vec<String>, stdin: bool, replace: bool) -> anyhow
     } else {
         StdinMode::None
     };
+    launch_spec.timeout_s = timeout;
 
     // Create session directory (with idempotent handling)
     let session = match session::create(&root, &session_name) {
