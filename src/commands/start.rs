@@ -1,3 +1,4 @@
+use anyhow::Context;
 use tender::model::ids::SessionName;
 use tender::model::spec::{LaunchSpec, StdinMode};
 use tender::platform::{Current, Platform};
@@ -9,6 +10,8 @@ pub fn cmd_start(
     stdin: bool,
     replace: bool,
     timeout: Option<u64>,
+    cwd: Option<&std::path::Path>,
+    env_vars: &[String],
 ) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
@@ -28,6 +31,13 @@ pub fn cmd_start(
         StdinMode::None
     };
     launch_spec.timeout_s = timeout;
+    launch_spec.cwd = cwd.map(|p| p.to_path_buf());
+    for entry in env_vars {
+        let (key, value) = entry
+            .split_once('=')
+            .with_context(|| format!("invalid --env format: expected KEY=VALUE, got: {entry}"))?;
+        launch_spec.env.insert(key.to_string(), value.to_string());
+    }
 
     // Create session directory (with idempotent handling)
     let session = match session::create(&root, &session_name) {

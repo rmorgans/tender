@@ -26,6 +26,12 @@ enum Commands {
         /// Kill child after N seconds
         #[arg(long)]
         timeout: Option<u64>,
+        /// Working directory for the child process
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Environment variable override (KEY=VALUE)
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env_vars: Vec<String>,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -96,7 +102,17 @@ fn main() {
             stdin,
             replace,
             timeout,
-        } => commands::cmd_start(&name, cmd, stdin, replace, timeout),
+            cwd,
+            env_vars,
+        } => commands::cmd_start(
+            &name,
+            cmd,
+            stdin,
+            replace,
+            timeout,
+            cwd.as_deref(),
+            &env_vars,
+        ),
         Commands::Push { name } => commands::cmd_push(&name),
         Commands::Status { name } => commands::cmd_status(&name),
         Commands::Kill { name, force } => commands::cmd_kill(&name, force),
