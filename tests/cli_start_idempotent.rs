@@ -89,3 +89,179 @@ fn start_after_terminal_is_error() {
         .failure()
         .stderr(predicate::str::contains("terminal state"));
 }
+
+#[test]
+fn start_with_cwd_child_runs_in_requested_directory() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    let work_dir = root.path().join("myworkdir");
+    std::fs::create_dir_all(&work_dir).unwrap();
+
+    let out = tender(&root)
+        .args([
+            "start",
+            "cwd-test",
+            "--cwd",
+            work_dir.to_str().unwrap(),
+            "--",
+            "pwd",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    wait_terminal(&root, "cwd-test");
+
+    let log_out = tender(&root)
+        .args(["log", "cwd-test", "--raw"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        log.contains(work_dir.to_str().unwrap()),
+        "child should run in {work_dir:?}, got log: {log}"
+    );
+}
+
+#[test]
+fn start_with_env_child_sees_overridden_vars() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args([
+            "start",
+            "env-test",
+            "--env",
+            "TENDER_TEST_VAR=hello_from_tender",
+            "--",
+            "sh",
+            "-c",
+            "echo $TENDER_TEST_VAR",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    wait_terminal(&root, "env-test");
+
+    let log_out = tender(&root)
+        .args(["log", "env-test", "--raw"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        log.contains("hello_from_tender"),
+        "child should see TENDER_TEST_VAR, got log: {log}"
+    );
+}
+
+#[test]
+fn start_with_different_cwd_is_spec_conflict() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    let dir_a = root.path().join("dir_a");
+    let dir_b = root.path().join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let out1 = tender(&root)
+        .args([
+            "start",
+            "cwd-conflict",
+            "--cwd",
+            dir_a.to_str().unwrap(),
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(out1.status.success());
+
+    let out2 = tender(&root)
+        .args([
+            "start",
+            "cwd-conflict",
+            "--cwd",
+            dir_b.to_str().unwrap(),
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out2.status.success(),
+        "different cwd should be a spec conflict"
+    );
+    let stderr = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr.contains("session conflict"),
+        "expected conflict error, got: {stderr}"
+    );
+
+    // Cleanup: kill the running session
+    tender(&root)
+        .args(["kill", "cwd-conflict", "--force"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "cwd-conflict");
+}
+
+#[test]
+fn start_with_different_env_is_spec_conflict() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out1 = tender(&root)
+        .args([
+            "start",
+            "env-conflict",
+            "--env",
+            "FOO=bar",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(out1.status.success());
+
+    let out2 = tender(&root)
+        .args([
+            "start",
+            "env-conflict",
+            "--env",
+            "FOO=baz",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out2.status.success(),
+        "different env should be a spec conflict"
+    );
+    let stderr = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr.contains("session conflict"),
+        "expected conflict error, got: {stderr}"
+    );
+
+    // Cleanup: kill the running session
+    tender(&root)
+        .args(["kill", "env-conflict", "--force"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "env-conflict");
+}
