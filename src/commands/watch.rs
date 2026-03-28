@@ -270,6 +270,13 @@ pub fn cmd_watch(
             }
         }
 
+        // Prune watchers for sessions that no longer exist on disk
+        let current_keys: HashSet<(String, String)> = sessions
+            .iter()
+            .map(|(ns, name)| (ns.as_str().to_owned(), name.as_str().to_owned()))
+            .collect();
+        watchers.retain(|key, _| current_keys.contains(key));
+
         std::thread::sleep(Duration::from_millis(100));
     }
 }
