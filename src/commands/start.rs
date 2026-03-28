@@ -14,6 +14,7 @@ pub fn cmd_start(
     timeout: Option<u64>,
     cwd: Option<&std::path::Path>,
     env_vars: &[String],
+    on_exit: &[String],
     namespace: &Namespace,
 ) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
@@ -46,6 +47,7 @@ pub fn cmd_start(
         );
         launch_spec.env.insert(key.to_string(), value.to_string());
     }
+    launch_spec.on_exit = on_exit.to_vec();
 
     // Create session directory (with idempotent handling)
     let session = match session::create(&root, namespace, &session_name) {

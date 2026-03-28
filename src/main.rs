@@ -36,6 +36,9 @@ enum Commands {
         /// Environment variable override (KEY=VALUE)
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env_vars: Vec<String>,
+        /// Command to run after the child exits (repeatable)
+        #[arg(long = "on-exit", value_name = "COMMAND")]
+        on_exit: Vec<String>,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -137,6 +140,7 @@ fn main() {
             timeout,
             cwd,
             env_vars,
+            on_exit,
         } => resolve_namespace(namespace).and_then(|ns| {
             commands::cmd_start(
                 &name,
@@ -146,6 +150,7 @@ fn main() {
                 timeout,
                 cwd.as_deref(),
                 &env_vars,
+                &on_exit,
                 &ns,
             )
         }),

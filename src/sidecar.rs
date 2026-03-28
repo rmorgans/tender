@@ -298,8 +298,51 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     }
 
     // --- Write terminal state ---
+    let exit_reason_debug = format!("{exit_reason:?}");
     meta.transition_exited(exit_reason, EpochTimestamp::now())?;
     session::write_meta_atomic(&session, &meta)?;
+
+    // --- Execute on_exit callbacks (terminal state is already durable) ---
+    let on_exit_callbacks = meta.launch_spec().on_exit.clone();
+    for (i, callback_cmd) in on_exit_callbacks.iter().enumerate() {
+        let argv = shell_words::split(callback_cmd).unwrap_or_else(|_| vec![callback_cmd.clone()]);
+        if argv.is_empty() {
+            continue;
+        }
+        let result = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("TENDER_SESSION", meta.session().as_str())
+            .env(
+                "TENDER_NAMESPACE",
+                meta.launch_spec().namespace.as_deref().unwrap_or("default"),
+            )
+            .env("TENDER_RUN_ID", meta.run_id().to_string())
+            .env("TENDER_GENERATION", meta.generation().to_string())
+            .env("TENDER_EXIT_REASON", &exit_reason_debug)
+            .env("TENDER_SESSION_DIR", session_dir.to_str().unwrap_or(""))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        match result {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                meta.add_warning(format!(
+                    "on_exit[{i}] failed (exit {}): {}",
+                    output.status,
+                    stderr.trim()
+                ));
+            }
+            Err(e) => {
+                meta.add_warning(format!("on_exit[{i}] spawn failed: {e}"));
+            }
+            Ok(_) => {}
+        }
+    }
+    // Re-write meta with any callback warnings
+    if !on_exit_callbacks.is_empty() {
+        let _ = session::write_meta_atomic(&session, &meta);
+    }
 
     Ok(())
 }
