@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_running, wait_terminal};
+use harness::{tender, wait_terminal};
 use std::sync::Mutex;
 use tempfile::TempDir;
 
