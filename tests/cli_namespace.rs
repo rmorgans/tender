@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_terminal};
+use harness::{tender, wait_running, wait_terminal};
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -336,5 +336,126 @@ fn default_namespace_used_when_omitted() {
     assert!(
         meta_path.exists(),
         "session without --namespace should be under 'default': {meta_path:?}"
+    );
+}
+
+#[test]
+fn push_resolves_session_in_namespace() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start a session with stdin in a non-default namespace
+    tender(&root)
+        .args([
+            "start",
+            "push-ns",
+            "--namespace",
+            "ns-push",
+            "--stdin",
+            "--",
+            "cat",
+        ])
+        .assert()
+        .success();
+    wait_running_ns(&root, "ns-push", "push-ns");
+
+    // Push data via the correct namespace
+    let push_out = tender(&root)
+        .args(["push", "push-ns", "--namespace", "ns-push"])
+        .write_stdin("hello from push\n")
+        .output()
+        .unwrap();
+    assert!(
+        push_out.status.success(),
+        "push should succeed in non-default namespace: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    // Kill and verify log contains pushed data
+    tender(&root)
+        .args(["kill", "--force", "push-ns", "--namespace", "ns-push"])
+        .output()
+        .unwrap();
+    wait_terminal_ns(&root, "ns-push", "push-ns");
+
+    let log_out = tender(&root)
+        .args(["log", "push-ns", "--namespace", "ns-push", "--raw"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        log.contains("hello from push"),
+        "pushed data should appear in log, got: {log}"
+    );
+}
+
+#[test]
+fn log_resolves_session_in_namespace() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args([
+            "start",
+            "log-ns",
+            "--namespace",
+            "ns-log",
+            "--",
+            "echo",
+            "namespace-log-output",
+        ])
+        .assert()
+        .success();
+    wait_terminal_ns(&root, "ns-log", "log-ns");
+
+    let log_out = tender(&root)
+        .args(["log", "log-ns", "--namespace", "ns-log", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        log_out.status.success(),
+        "log should succeed in non-default namespace: {}",
+        String::from_utf8_lossy(&log_out.stderr)
+    );
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        log.contains("namespace-log-output"),
+        "log should contain child output, got: {log}"
+    );
+}
+
+#[test]
+fn wait_resolves_session_in_namespace() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args([
+            "start",
+            "wait-ns",
+            "--namespace",
+            "ns-wait",
+            "--",
+            "echo",
+            "done",
+        ])
+        .assert()
+        .success();
+
+    let wait_out = tender(&root)
+        .args([
+            "wait",
+            "wait-ns",
+            "--namespace",
+            "ns-wait",
+            "--timeout",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        wait_out.status.success(),
+        "wait should succeed in non-default namespace: {}",
+        String::from_utf8_lossy(&wait_out.stderr)
     );
 }

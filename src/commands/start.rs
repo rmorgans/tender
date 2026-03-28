@@ -34,6 +34,7 @@ pub fn cmd_start(
         StdinMode::None
     };
     launch_spec.timeout_s = timeout;
+    launch_spec.namespace = Some(namespace.as_str().to_string());
     launch_spec.cwd = cwd.map(Path::to_path_buf);
     for entry in env_vars {
         let (key, value) = entry
