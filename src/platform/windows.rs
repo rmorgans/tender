@@ -3,6 +3,7 @@
 //! 2A.2: Module skeleton with process identity/status implemented,
 //! all other methods return Unsupported errors.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroU32;
@@ -72,7 +73,12 @@ impl Platform for WindowsPlatform {
         Err(unsupported("write_ready_signal"))
     }
 
-    fn spawn_child(_argv: &[String], _stdin_piped: bool) -> io::Result<SupervisedChild> {
+    fn spawn_child(
+        _argv: &[String],
+        _stdin_piped: bool,
+        _cwd: Option<&Path>,
+        _env: &BTreeMap<String, String>,
+    ) -> io::Result<SupervisedChild> {
         Err(unsupported("spawn_child"))
     }
 

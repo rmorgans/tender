@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -88,7 +89,12 @@ pub trait Platform {
     /// - Windows: CREATE_SUSPENDED -> Job Object -> ResumeThread
     ///
     /// Returns an opaque SupervisedChild that owns all backend state.
-    fn spawn_child(argv: &[String], stdin_piped: bool) -> io::Result<Self::SupervisedChild>;
+    fn spawn_child(
+        argv: &[String],
+        stdin_piped: bool,
+        cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<Self::SupervisedChild>;
 
     /// Get the ProcessIdentity of the supervised child.
     /// Cheap, callable any time -- borrows only.

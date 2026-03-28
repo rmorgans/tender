@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
@@ -56,7 +57,12 @@ impl Platform for UnixPlatform {
         write_ready_signal_file(writer, message)
     }
 
-    fn spawn_child(argv: &[String], stdin_piped: bool) -> io::Result<SupervisedChild> {
+    fn spawn_child(
+        argv: &[String],
+        stdin_piped: bool,
+        cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<SupervisedChild> {
         let mut cmd = Command::new(&argv[0]);
         if argv.len() > 1 {
             cmd.args(&argv[1..]);
@@ -68,6 +74,13 @@ impl Platform for UnixPlatform {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        if !env.is_empty() {
+            cmd.envs(env);
+        }
 
         // Make child its own process group leader so kill(-pgid) kills the whole tree.
         // SAFETY: pre_exec runs after fork() in the child process, before exec().

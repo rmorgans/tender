@@ -191,7 +191,12 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
 
     // --- Spawn child (with SpawnFailed handling inline) ---
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
-    let mut child = match Current::spawn_child(meta.launch_spec().argv(), stdin_piped) {
+    let mut child = match Current::spawn_child(
+        meta.launch_spec().argv(),
+        stdin_piped,
+        meta.launch_spec().cwd.as_deref(),
+        &meta.launch_spec().env,
+    ) {
         Ok(c) => c,
         Err(e) => {
             meta.add_warning(format!("spawn failed: {e}"));
