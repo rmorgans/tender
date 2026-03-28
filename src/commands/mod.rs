@@ -1,6 +1,7 @@
 mod kill;
 mod list;
 mod log;
+mod prune;
 mod push;
 mod sidecar;
 mod start;
@@ -11,6 +12,7 @@ mod watch;
 pub use kill::cmd_kill;
 pub use list::cmd_list;
 pub use log::cmd_log;
+pub use prune::cmd_prune;
 pub use push::cmd_push;
 pub use sidecar::cmd_sidecar;
 pub use start::cmd_start;

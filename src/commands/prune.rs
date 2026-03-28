@@ -1,0 +1,267 @@
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+use serde::Serialize;
+
+use tender::model::ids::Namespace;
+use tender::model::state::{ExitReason, RunStatus};
+use tender::session::{self, SessionRoot};
+
+pub fn cmd_prune(
+    older_than: Option<Duration>,
+    all: bool,
+    namespace: Option<&Namespace>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    if older_than.is_none() && !all {
+        anyhow::bail!("either --older-than or --all is required");
+    }
+
+    let root = SessionRoot::default_path()?;
+    let sessions = session::list(&root, namespace)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let threshold_secs = older_than.map(|d| d.as_secs());
+
+    let mut deleted: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut bytes_reclaimed: u64 = 0;
+
+    for (ns, name) in &sessions {
+        let session_dir = match session::open_raw(&root, ns, name) {
+            Ok(dir) => dir,
+            Err(_) => {
+                emit_skip(ns, name, "not_found", None);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Check lock FIRST, before reading meta
+        match session::is_locked(&session_dir) {
+            Ok(true) => {
+                emit_skip(ns, name, "locked", None);
+                skipped += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                emit_skip(ns, name, "locked", None);
+                skipped += 1;
+                continue;
+            }
+        }
+
+        // Structural meta classification — no string matching
+        if !session_dir.meta_path().exists() {
+            emit_skip(ns, name, "missing_meta", None);
+            skipped += 1;
+            continue;
+        }
+
+        let meta = match session::read_meta(&session_dir) {
+            Ok(m) => m,
+            Err(_) => {
+                emit_skip(ns, name, "corrupt_meta", None);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        if !meta.status().is_terminal() {
+            let skip_reason = match meta.status() {
+                RunStatus::Running { .. } => "running",
+                RunStatus::Starting => "starting",
+                _ => "running", // unreachable given is_terminal check
+            };
+            emit_skip(ns, name, skip_reason, None);
+            skipped += 1;
+            continue;
+        }
+
+        let ended_at = match meta.status().ended_at() {
+            Some(ts) => ts.as_secs(),
+            None => {
+                emit_skip(ns, name, "missing_ended_at", None);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        if let Some(threshold) = threshold_secs {
+            let age = now_secs.saturating_sub(ended_at);
+            if age < threshold {
+                emit_skip(ns, name, "too_recent", Some(ended_at));
+                skipped += 1;
+                continue;
+            }
+        }
+
+        // Session is eligible for deletion
+        let exit_reason = exit_reason_label(meta.status());
+        let bytes = dir_size_bytes(session_dir.path());
+
+        if dry_run {
+            emit_delete(ns, name, ended_at, &exit_reason, bytes);
+            deleted += 1;
+            if let Some(b) = bytes {
+                bytes_reclaimed += b;
+            }
+        } else {
+            match fs::remove_dir_all(session_dir.path()) {
+                Ok(()) => {
+                    emit_delete(ns, name, ended_at, &exit_reason, bytes);
+                    deleted += 1;
+                    if let Some(b) = bytes {
+                        bytes_reclaimed += b;
+                    }
+                }
+                Err(e) => {
+                    emit_error(ns, name, &e.to_string());
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    let summary = PruneOutput::Summary {
+        deleted,
+        skipped,
+        failed,
+        bytes_reclaimed,
+        dry_run,
+        namespace: namespace.map(|ns| ns.as_str().to_owned()),
+    };
+    println!("{}", serde_json::to_string(&summary).unwrap());
+
+    Ok(())
+}
+
+fn emit_skip(
+    ns: &Namespace,
+    name: &tender::model::ids::SessionName,
+    reason: &str,
+    ended_at: Option<u64>,
+) {
+    let line = PruneOutput::Session {
+        action: "skip",
+        namespace: ns.as_str().to_owned(),
+        session: name.as_str().to_owned(),
+        ended_at,
+        reason: None,
+        skip_reason: Some(reason.to_owned()),
+        error: None,
+        bytes: None,
+    };
+    println!("{}", serde_json::to_string(&line).unwrap());
+}
+
+fn emit_delete(
+    ns: &Namespace,
+    name: &tender::model::ids::SessionName,
+    ended_at: u64,
+    reason: &str,
+    bytes: Option<u64>,
+) {
+    let line = PruneOutput::Session {
+        action: "delete",
+        namespace: ns.as_str().to_owned(),
+        session: name.as_str().to_owned(),
+        ended_at: Some(ended_at),
+        reason: Some(reason.to_owned()),
+        skip_reason: None,
+        error: None,
+        bytes,
+    };
+    println!("{}", serde_json::to_string(&line).unwrap());
+}
+
+fn emit_error(ns: &Namespace, name: &tender::model::ids::SessionName, error: &str) {
+    let line = PruneOutput::Session {
+        action: "error",
+        namespace: ns.as_str().to_owned(),
+        session: name.as_str().to_owned(),
+        ended_at: None,
+        reason: None,
+        skip_reason: None,
+        error: Some(error.to_owned()),
+        bytes: None,
+    };
+    println!("{}", serde_json::to_string(&line).unwrap());
+}
+
+fn exit_reason_label(status: &RunStatus) -> String {
+    match status {
+        RunStatus::Exited { how, .. } => match how {
+            ExitReason::ExitedOk => "ExitedOk".to_owned(),
+            ExitReason::ExitedError { code } => format!("ExitedError({})", code.get()),
+            ExitReason::Killed => "Killed".to_owned(),
+            ExitReason::KilledForced => "KilledForced".to_owned(),
+            ExitReason::TimedOut => "TimedOut".to_owned(),
+        },
+        RunStatus::SpawnFailed { .. } => "SpawnFailed".to_owned(),
+        RunStatus::SidecarLost { .. } => "SidecarLost".to_owned(),
+        _ => "Unknown".to_owned(),
+    }
+}
+
+/// Best-effort recursive directory size in bytes.
+/// Returns None only if the top-level read_dir fails.
+/// Individual file stat failures are silently skipped.
+fn dir_size_bytes(path: &Path) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut dirs = vec![path.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) if dir == path => return None,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                dirs.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    Some(total)
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PruneOutput {
+    Session {
+        action: &'static str,
+        namespace: String,
+        session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ended_at: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skip_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bytes: Option<u64>,
+    },
+    Summary {
+        deleted: u64,
+        skipped: u64,
+        failed: u64,
+        bytes_reclaimed: u64,
+        dry_run: bool,
+        namespace: Option<String>,
+    },
+}

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use tender::model::ids::Namespace;
@@ -125,12 +126,32 @@ enum Commands {
         #[arg(long = "from-now")]
         from_now: bool,
     },
+    /// Delete terminal sessions older than a threshold
+    Prune {
+        /// Delete sessions ended more than DURATION ago (e.g. 7d, 24h, 30m)
+        #[arg(long, value_parser = parse_duration, conflicts_with = "all")]
+        older_than: Option<Duration>,
+        /// Delete all terminal sessions regardless of age
+        #[arg(long, conflicts_with = "older_than")]
+        all: bool,
+        /// Namespace to prune (prunes all namespaces if omitted)
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Show what would be deleted without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
         #[arg(long)]
         session_dir: PathBuf,
     },
+}
+
+/// Parse a human-readable duration string (e.g. "7d", "24h", "30m").
+fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
+    humantime::parse_duration(s)
 }
 
 /// Resolve an optional namespace string into a `Namespace`, defaulting to "default".
@@ -212,6 +233,18 @@ fn main() {
             .transpose()
         {
             Ok(ns) => commands::cmd_watch(ns.as_ref(), events, logs, from_now),
+            Err(e) => Err(e),
+        },
+        Commands::Prune {
+            older_than,
+            all,
+            namespace,
+            dry_run,
+        } => match namespace
+            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
+            .transpose()
+        {
+            Ok(ns) => commands::cmd_prune(older_than, all, ns.as_ref(), dry_run),
             Err(e) => Err(e),
         },
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
