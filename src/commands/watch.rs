@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -123,6 +123,18 @@ pub fn cmd_watch(
     let mut watchers: HashMap<(String, String), SessionWatcher> = HashMap::new();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
+    // Record which sessions exist at watch invocation time.
+    // --from-now skips initial state only for these, not for sessions discovered later.
+    let initial_sessions: HashSet<(String, String)> = if from_now {
+        session::list(&root, namespace)
+            .unwrap_or_default()
+            .iter()
+            .map(|(ns, name)| (ns.as_str().to_owned(), name.as_str().to_owned()))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     loop {
         // Discover sessions.
         let sessions = session::list(&root, namespace).unwrap_or_default();
@@ -144,10 +156,15 @@ pub fn cmd_watch(
             let current_status_key = status_key(meta.status());
 
             if let Some(watcher) = watchers.get_mut(&key) {
-                // Existing session — check for status change.
-                if emit_events && watcher.last_status != current_status_key {
-                    // Also handle run_id change (session restarted).
+                // Detect run_id change (session replaced) — reset log offset
+                if watcher.run_id != run_id_str {
                     watcher.run_id = run_id_str.clone();
+                    watcher.last_log_offset = 0;
+                    watcher.last_status = String::new(); // force status re-emit
+                }
+
+                // Check for status change.
+                if emit_events && watcher.last_status != current_status_key {
                     watcher.last_status = current_status_key;
                     let ts = now_epoch_secs();
                     if !emit_event(
@@ -165,6 +182,8 @@ pub fn cmd_watch(
                 }
             } else {
                 // New session discovered.
+                let skip_initial = initial_sessions.contains(&key);
+
                 let watcher = SessionWatcher {
                     namespace: ns.as_str().to_owned(),
                     session: name.as_str().to_owned(),
@@ -173,7 +192,7 @@ pub fn cmd_watch(
                     last_log_offset: 0,
                 };
 
-                if !from_now && emit_events {
+                if !skip_initial && emit_events {
                     // Emit initial snapshot of current state.
                     let ts = now_epoch_secs();
                     if !emit_event(
@@ -192,7 +211,7 @@ pub fn cmd_watch(
 
                 watchers.insert(key.clone(), watcher);
 
-                if from_now {
+                if skip_initial {
                     // Skip existing log content — seek to end.
                     let log_path = session_dir.path().join("output.log");
                     if let Ok(file_meta) = std::fs::metadata(&log_path) {

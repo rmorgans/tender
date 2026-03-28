@@ -246,3 +246,108 @@ fn watch_both_events_and_logs_by_default() {
         "default watch should emit log events, got:\n{output}"
     );
 }
+
+#[test]
+fn watch_from_now_includes_sessions_started_after_watch() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start watch --from-now FIRST (before any sessions exist)
+    let bin = assert_cmd::cargo::cargo_bin("tender");
+    let mut watch_child = Command::new(bin)
+        .args(["watch", "--from-now"])
+        .env("HOME", root.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn watch");
+
+    // Give watch time to start polling
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Now start a session AFTER watch is running
+    tender(&root)
+        .args(["start", "after-watch", "--", "echo", "post-watch-output"])
+        .output()
+        .unwrap();
+    wait_terminal_default(&root, "after-watch");
+
+    // Give watch time to discover and emit
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let _ = watch_child.kill();
+    let output = watch_child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Sessions started AFTER watch should be visible (not skipped by --from-now)
+    let has_run_event = stdout.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .map(|e| e["kind"] == "run" && e["session"] == "after-watch")
+            .unwrap_or(false)
+    });
+    assert!(
+        has_run_event,
+        "watch --from-now should include sessions started after watch began, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn watch_detects_replace_and_resets_log_offset() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start a session that produces output
+    tender(&root)
+        .args(["start", "replace-watch", "--", "echo", "first-run-output"])
+        .output()
+        .unwrap();
+    wait_terminal_default(&root, "replace-watch");
+
+    // Start watch (includes initial snapshot)
+    let bin = assert_cmd::cargo::cargo_bin("tender");
+    let mut watch_child = Command::new(&bin)
+        .args(["watch"])
+        .env("HOME", root.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn watch");
+
+    // Give watch time to read initial state + logs
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Replace with a new run that produces different output
+    tender(&root)
+        .args([
+            "start",
+            "replace-watch",
+            "--replace",
+            "--",
+            "echo",
+            "second-run-output",
+        ])
+        .output()
+        .unwrap();
+    wait_terminal_default(&root, "replace-watch");
+
+    // Give watch time to detect replacement
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let _ = watch_child.kill();
+    let output = watch_child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should see second-run-output in log events (offset was reset on run_id change)
+    let has_second_run_log = stdout.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .map(|e| {
+                e["kind"] == "log"
+                    && e["data"]["content"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("second-run-output"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(
+        has_second_run_log,
+        "watch should see logs from replaced run (offset reset), got:\n{stdout}"
+    );
+}
