@@ -200,7 +200,7 @@ This is the safety boundary: apps cannot forge lifecycle truth.
 
 #### Annotation Ingestion: `tender wrap`
 
-Agents emit hook events via stdin/stdout JSON (Claude Code, Cursor, Cline, GitHub Copilot all use this pattern; Codex likely does but official hook docs are unverified). Tender does not modify agents or their hook configurations. Instead, Tender provides a transparent wrapper that taps the wire:
+Agents emit hook events via stdin/stdout JSON (Claude Code, Codex, Cursor, Cline, GitHub Copilot all use this pattern). Tender does not modify agents or their hook configurations. Instead, Tender provides a transparent wrapper that taps the wire:
 
 ```bash
 tender wrap --session claude-1 --namespace ws-1 --source claude_hook -- <hook-command> [args...]
@@ -291,7 +291,7 @@ Tender sits at the **process supervision** layer — below agent internal hooks 
 
 ### Why this layer is empty
 
-Every AI coding agent has converged on the same internal hook pattern: stdin JSON → command → stdout JSON + exit code. Claude Code (12+ events), Cursor (7), Cline (4), GitHub Copilot (2+). All proprietary schemas, different field names — but identical transport.
+Every AI coding agent has converged on the same internal hook pattern: stdin JSON → command → stdout JSON + exit code. Claude Code (12+ events), Codex (5, feature-flagged), Cursor (7), Cline (4), GitHub Copilot (2+). All proprietary schemas, different field names — but identical transport: stdin JSON, stdout JSON, exit code 2 to block.
 
 Every external tool that wraps agents (AMUX, Batty, AgentDeck) resorts to terminal output scraping because there is no standard way to observe agent process lifecycle externally. This is fragile and breaks when output formats change.
 

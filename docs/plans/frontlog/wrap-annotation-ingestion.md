@@ -90,6 +90,6 @@ Watch stream gets both layers:
 
 ## Notes
 
-Works with any agent that uses the stdin/stdout JSON hook pattern: Claude Code (12+ events), Cursor (7), Cline (4), GitHub Copilot (2+). Codex likely compatible but official hook docs are unverified.
+Works with any agent that uses the stdin/stdout JSON hook pattern: Claude Code (12+ events), Codex (5, feature-flagged), Cursor (7), Cline (4), GitHub Copilot (2+).
 
 The persistent shell + exec pattern maps directly to what Claude Code does internally (persistent bash via pipes with sentinel delimiting). Tender adds supervision, crash recovery, and the event stream that no agent currently has.
