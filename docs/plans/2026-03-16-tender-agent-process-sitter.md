@@ -198,10 +198,132 @@ Dotted prefix, not an enum:
 
 This is the safety boundary: apps cannot forge lifecycle truth.
 
+#### Annotation Ingestion: `tender wrap`
+
+Agents emit hook events via stdin/stdout JSON (Claude Code, Codex, Cursor, Cline all use this pattern). Tender does not modify agents or their hook configurations. Instead, Tender provides a transparent wrapper that taps the wire:
+
+```bash
+tender wrap --session claude-1 --namespace ws-1 --source claude_hook -- <hook-command> [args...]
+```
+
+**`wrap` is the public annotation primitive. There is no public `emit` command.**
+
+Why `wrap` over `emit`:
+
+- **Provenance.** `wrap` observed the actual execution — stdin payload, stdout response, stderr, exit code. `emit` would only carry "some process asserted this happened."
+- **Discipline.** A public `emit` makes it trivial to forge arbitrary annotations. `wrap` constrains annotation production to actual observed command executions.
+- **Integration path.** The real problem is: a hook command already exists, you want to tap it. `wrap` is exactly that.
+
+If internal annotation ingestion is ever needed (SDK integrations, trusted local adapters), it should be a library-internal function or hidden `_emit_annotation` subcommand, constrained to `annotation` kind and `external.*` sources only. Never public until justified by a real need.
+
+**Behavior:**
+
+1. Tees stdin to the wrapped command (live stream, not buffer-then-forward — the wrapped hook may expect incremental reads)
+2. Captures a copy of stdin for the annotation payload
+3. Lets the wrapped command run to completion
+4. Captures stdout, stderr, and exit code from the wrapped command
+5. Emits an `annotation` event to the session's event log
+6. Returns the wrapped command's stdout to the agent's stdout, stderr to stderr, and exits with the wrapped command's exit code
+
+The agent does not know Tender exists. The hook script does not know Tender exists.
+
+**Annotation payload shape:**
+
+```json
+{
+  "hook_stdin": { ... },
+  "hook_stdout": { ... },
+  "hook_stderr": "...",
+  "hook_exit_code": 0,
+  "command": ["cmux", "claude-hook", "pre-tool-use"],
+  "truncated": false
+}
+```
+
+- `hook_stdin`: the JSON payload from the agent (parsed if valid JSON, raw string otherwise)
+- `hook_stdout`: the JSON response from the hook script (parsed if valid JSON, raw string otherwise)
+- `hook_stderr`: captured stderr as string (may be truncated)
+- `hook_exit_code`: integer exit code
+- `command`: argv of the wrapped command
+- `truncated`: true if any field was truncated due to size limits
+
+**Truncation policy:** TBD. Large payloads (e.g. transcript dumps) should not bloat the event log. A reasonable default is 64KB per field, with `truncated: true` set when hit.
+
+**Example — cmux integration:**
+
+cmux's Claude wrapper currently injects:
+
+```json
+{"hooks":{"PreToolUse":[{"type":"command","command":"cmux claude-hook pre-tool-use"}]}}
+```
+
+With Tender wrapping:
+
+```json
+{"hooks":{"PreToolUse":[{"type":"command","command":"tender wrap --session claude-1 --namespace ws-1 --source claude_hook -- cmux claude-hook pre-tool-use"}]}}
+```
+
+cmux still gets its hook call. Tender also gets the event in the watch stream. No changes to Claude Code. No changes to cmux's hook handler.
+
 #### Phasing
 
-- **Phase 2B:** `run` and `log` kinds only. Source is `tender.sidecar`. No annotations, no `emit` command, no global sequencing.
-- **Later:** `emit` command for annotations, `--annotations` flag on watch, `external.*` sources.
+- **Phase 2B:** `run` and `log` kinds only. Source is `tender.sidecar`. No annotations, no `wrap`, no global sequencing.
+- **Later:** `tender wrap` for annotation ingestion, `--annotations` flag on watch, `external.*` sources. No public `emit`.
+
+---
+
+## Positioning
+
+Tender sits at the **process supervision** layer — below agent internal hooks and above OS process primitives.
+
+```
+┌─────────────────────────────┐
+│  UI / Frontend              │  AG-UI, cmux, AgentDeck
+├─────────────────────────────┤
+│  Agent Internal Hooks       │  Claude Code, Codex, Cursor, Cline
+├─────────────────────────────┤
+│  Process Supervision        │  ← Tender
+│  Event Protocol             │
+├─────────────────────────────┤
+│  OS Process Primitives      │  pid, signals, waitpid, Job Objects
+└─────────────────────────────┘
+```
+
+### Why this layer is empty
+
+Every AI coding agent has converged on the same internal hook pattern: stdin JSON → command → stdout JSON + exit code. Claude Code (12 events), Codex (5), Cursor (7), Cline (4). All proprietary schemas, different field names — but identical transport.
+
+Every external tool that wraps agents (AMUX, Batty, AgentDeck) resorts to terminal output scraping because there is no standard way to observe agent process lifecycle externally. This is fragile and breaks when output formats change.
+
+Nobody owns the layer between "what the agent thinks internally" and "is the process alive."
+
+### What Tender provides
+
+| Problem | Current state of the art | Tender |
+|---------|--------------------------|--------|
+| Is the agent alive? | Scrape tmux / poll pane_dead | ProcessIdentity + lock-based liveness |
+| Is the agent ready? | Wait and hope | Readiness handshake over pipe |
+| What happened? | Parse ANSI escape codes | `watch` NDJSON event stream |
+| PID reuse after restart? | Hope it doesn't collide | (pid, start_time_ns) verified before kill |
+| Group related agents? | Ad-hoc session names | `--namespace` |
+| Send input to running agent? | tmux send-keys (unstructured) | FIFO stdin push |
+| Agent exited — now what? | 5-second poll loop discovers it | `on_exit` callback fires immediately |
+| Capture agent hook semantics? | Build a custom bridge per agent | `tender wrap` taps the wire |
+
+### What Tender does not do
+
+- Replace agent internal hooks (Claude Code hooks, Codex hooks, etc.)
+- Replace frontend rendering protocols (AG-UI)
+- Provide an agent orchestration framework (that's above Tender)
+- Require any agent modification (wrap is transparent)
+
+### Precedents
+
+- **Quine** (arXiv:2603.18030, March 2026) — academic paper proposing LLM agents as native POSIX processes. Identity = PID, interface = stdin/stdout/stderr + exit status. Tender is the practical implementation.
+- **Claude Code hooks** — the current hook-command pattern. Tender carries these as annotations, does not replace them.
+- **Aider notifications** — "keep notifications as a separate command hook" pattern. Tender's `on_exit` is the supervision-native version.
+- **Ghostty terminal escapes** — terminal-native notification delivery. Tender is transport-agnostic; terminals consume the watch stream however they want.
+- **AMUX/Batty/AgentDeck** — demonstrate the demand for external agent supervision. All resort to scraping because no supervision event protocol exists.
 
 ---
 

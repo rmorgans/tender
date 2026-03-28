@@ -22,6 +22,7 @@ Reference: [tender-agent-process-sitter.md](2026-03-16-tender-agent-process-sitt
 **Independent — can start anytime:**
 - [windows-full-backend.md](backlog/windows-full-backend.md) — complete Windows platform (CreateProcess, Job Objects, named pipes)
 - [gc-prune.md](backlog/gc-prune.md) — session cleanup with retention policy
+- [wrap-annotation-ingestion.md](backlog/wrap-annotation-ingestion.md) — transparent hook tapping for agent annotation events (needs Phase 2B)
 
 **Depends on frontlog completing:**
 - [remote-ssh-transport.md](backlog/remote-ssh-transport.md) — semantic remote backend, SSH transport, broker/relay deferred (needs Windows for rick-windows)
