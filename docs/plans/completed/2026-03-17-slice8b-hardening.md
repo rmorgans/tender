@@ -323,7 +323,7 @@ impl<'de> Deserialize<'de> for EpochTimestamp {
 }
 ```
 
-**Important:** This is a schema change. Existing meta.json files have string timestamps like `"1773653954"`. The deserializer must accept both string and integer formats for backwards compatibility. Serialize as integer going forward.
+**Important:** This is a schema change. Existing meta.json files have string timestamps like `"1773653954"`. The deserializer must accept both string and integer formats for backwards compatibility. ~~Serialize as integer going forward.~~ Updated 2026-03-28: string serialization kept for schema v1 stability. Deserializer accepts both string and integer.
 
 Replace all `started_at: String` and `ended_at: String` with `EpochTimestamp`. Replace `now_epoch_secs() -> String` with `EpochTimestamp::now()`.
 

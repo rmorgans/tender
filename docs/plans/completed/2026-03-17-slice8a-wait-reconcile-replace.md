@@ -315,7 +315,7 @@ if replace {
                         }
                     }
                     if std::time::Instant::now() >= deadline {
-                        break; // Sidecar stuck — proceed anyway
+                        anyhow::bail!("timed out waiting for old sidecar to exit"); // Updated 2026-03-28: code bails on timeout rather than proceeding — safer to avoid deleting a session dir while a sidecar may still be writing.
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }

@@ -352,7 +352,7 @@ Key rules:
    - `Platform::seal_ready_fd` instead of inline `fcntl`
 4. Refactor `src/commands/` to call `Platform::kill_orphan` instead of
    `platform::kill_process` for the CLI kill/replace paths
-5. All 177 tests pass with zero behavior change
+5. All 177 tests (at time of writing) pass with zero behavior change
 
 **Compile-time dispatch** (not dynamic dispatch):
 ```rust
@@ -412,7 +412,7 @@ pub type Current = windows::WindowsPlatform;
       kill (both live and orphan), identity, stdin, and readiness
 - [ ] `SupervisedChild` carries all backend state needed for kill/wait
 - [ ] Every Phase 1 feature has an explicit Windows mapping
-- [ ] Unix passes all 177 tests with trait in place (no behavior change)
+- [ ] Unix passes all 177 tests (at time of writing) with trait in place (no behavior change)
 - [ ] Windows compiles with `Err(Unsupported)` stubs (no panics)
 - [ ] Semantic mismatches documented with resolution
 - [ ] No Unix concepts in the trait (mkfifo, setsid, -pid, CLOEXEC)

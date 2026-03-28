@@ -26,7 +26,7 @@ src/
   session.rs               # session dir create/open, atomic meta.json, lock guard
   sidecar.rs               # _sidecar command, readiness handshake, child supervision
   log.rs                   # parse/query output.log: tail/follow/grep/since/raw
-  output.rs                # JSON default, --human renderer
+  output.rs                # JSON default, --human renderer  (Note: deferred — JSON-only output shipped in Phase 1)
   platform/
     mod.rs                 # narrow OS boundary: Platform trait
     unix.rs                # fork/setsid, process-group kill, pid birth time, mkfifo
@@ -335,6 +335,7 @@ git commit -m "feat: child supervision with timestamped log capture and exit cla
 ```
 tests/cli_start_status.rs
 ```
+(Note: actual test files evolved into `cli_kill.rs`, `cli_kill_forced.rs`, `cli_timeout.rs`, etc.)
 
 - JSON output shape matches schema
 - Exit codes match contract (0, 1, 2, 42)
