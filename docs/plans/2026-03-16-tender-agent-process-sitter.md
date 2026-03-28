@@ -310,12 +310,48 @@ Nobody owns the layer between "what the agent thinks internally" and "is the pro
 | Agent exited — now what? | 5-second poll loop discovers it | `on_exit` callback fires immediately |
 | Capture agent hook semantics? | Build a custom bridge per agent | `tender wrap` taps the wire |
 
+### Agent execution backend
+
+Every AI coding agent independently rebuilds the same process management primitives — persistent shell, output capture, timeout/kill, background work, CWD persistence — all incomplete, all tightly coupled to the agent's session lifecycle, all with no orphan recovery.
+
+| What agents reinvent | Claude Code | Codex | Cline | Goose | SWE-agent |
+|---------------------|------------|-------|-------|-------|-----------|
+| Persistent shell | Pipes + sentinel | PTY + LRU cache | VS Code terminal | subprocess/cmd | Docker exec session |
+| Output capture | Reader threads + queues | yield_time_ms polling | OSC 633 markers | Blocking read | communicate() |
+| Timeout/kill | 2min/10min auto-bg | per-cmd timeout_ms | None | None | 25s + interrupt |
+| Background work | Temp file + notify | PTY session cache | "Proceed While Running" | None | None |
+| Orphan recovery | None (leaks 400MB/agent) | None (PTY sessions leak) | None | None | Docker kills all |
+
+Tender replaces the bottom half of every agent's execution stack:
+
+**What agents keep:** tool routing, LLM context management, sandboxing policy, permission UI.
+
+**What Tender provides:**
+- Persistent supervised shell (`start --stdin`)
+- Framed command execution (`exec` = `push` + `wrap`)
+- Output capture with timestamps (`log`)
+- Timeout + graceful kill (`--timeout`, `kill`)
+- Background work that survives agent crashes (sidecar)
+- Orphan recovery (`ProcessIdentity` + reconciliation)
+- CWD/env persistence (the shell lives in Tender, not the agent)
+- Event stream for any consumer (`watch`)
+
+Tender does not handle sandboxing. That stays with the agent or its host (seatbelt, bubblewrap, Docker, restricted tokens). Tender runs inside or alongside the sandbox — it is the process lifecycle layer, not the security policy layer.
+
+The integration path for any agent:
+1. Agent calls `tender start` instead of spawning its own persistent shell
+2. Agent sends commands via `tender exec` instead of writing to a private stdin pipe
+3. Agent reads output via `tender log` instead of its own capture threads
+4. If agent crashes, `tender` keeps the shell alive — agent reconnects via `tender list` + `tender exec`
+5. Terminal/orchestrator consumes `tender watch` instead of scraping
+
 ### What Tender does not do
 
 - Replace agent internal hooks (Claude Code hooks, Codex hooks, etc.)
 - Replace frontend rendering protocols (AG-UI)
 - Provide an agent orchestration framework (that's above Tender)
 - Require any agent modification (wrap is transparent)
+- Handle sandboxing (that's the agent's or host's job)
 
 ### Precedents
 
