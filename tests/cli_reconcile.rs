@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 mod harness;
 
 use harness::{tender, wait_running};

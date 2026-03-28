@@ -168,13 +168,16 @@ fn lock_released_after_child_exits() {
         .success();
     wait_terminal(&root, "lock-job");
 
-    let lock_path = root.path().join(".tender/sessions/lock-job/lock");
-    if lock_path.exists() {
-        use std::fs::File;
-        use std::os::unix::io::AsRawFd;
-        let file = File::open(&lock_path).unwrap();
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(ret, 0, "lock should be released after sidecar exits");
+    #[cfg(unix)]
+    {
+        let lock_path = root.path().join(".tender/sessions/lock-job/lock");
+        if lock_path.exists() {
+            use std::fs::File;
+            use std::os::unix::io::AsRawFd;
+            let file = File::open(&lock_path).unwrap();
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(ret, 0, "lock should be released after sidecar exits");
+        }
     }
 }
 

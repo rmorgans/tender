@@ -3,7 +3,9 @@ use tempfile::TempDir;
 use tender::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
 use tender::model::meta::Meta;
 use tender::model::spec::LaunchSpec;
-use tender::session::{self, LockGuard, SessionError, SessionRoot};
+#[cfg(unix)]
+use tender::session::LockGuard;
+use tender::session::{self, SessionError, SessionRoot};
 
 fn tmp_root() -> (TempDir, SessionRoot) {
     let dir = TempDir::new().unwrap();
