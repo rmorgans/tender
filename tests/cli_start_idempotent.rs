@@ -265,3 +265,117 @@ fn start_with_different_env_is_spec_conflict() {
         .unwrap();
     wait_terminal(&root, "env-conflict");
 }
+
+#[test]
+fn start_with_invalid_env_format_fails() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args(["start", "bad-env", "--env", "NO_EQUALS_SIGN", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "malformed --env should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("KEY=VALUE"),
+        "error should mention expected format, got: {stderr}"
+    );
+}
+
+#[test]
+fn start_with_env_preserves_inherited_environment() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args([
+            "start",
+            "env-inherit",
+            "--env",
+            "TENDER_EXTRA=added",
+            "--",
+            "sh",
+            "-c",
+            "echo PATH=$PATH TENDER_EXTRA=$TENDER_EXTRA",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    wait_terminal(&root, "env-inherit");
+
+    let log_out = tender(&root)
+        .args(["log", "env-inherit", "--raw"])
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        log.contains("PATH="),
+        "child should inherit PATH from parent"
+    );
+    assert!(
+        log.contains("TENDER_EXTRA=added"),
+        "child should see override"
+    );
+}
+
+#[test]
+fn start_with_same_cwd_and_env_is_idempotent() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    let work_dir = root.path().join("samedir");
+    std::fs::create_dir_all(&work_dir).unwrap();
+
+    let out1 = tender(&root)
+        .args([
+            "start",
+            "idem-cwd-env",
+            "--cwd",
+            work_dir.to_str().unwrap(),
+            "--env",
+            "FOO=bar",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(out1.status.success());
+    let meta1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
+    let run_id1 = meta1["run_id"].as_str().unwrap().to_string();
+
+    let out2 = tender(&root)
+        .args([
+            "start",
+            "idem-cwd-env",
+            "--cwd",
+            work_dir.to_str().unwrap(),
+            "--env",
+            "FOO=bar",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let meta2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
+    let run_id2 = meta2["run_id"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        run_id1, run_id2,
+        "same spec with cwd+env should be idempotent"
+    );
+
+    // Cleanup: kill the running session
+    tender(&root)
+        .args(["kill", "idem-cwd-env", "--force"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "idem-cwd-env");
+}
