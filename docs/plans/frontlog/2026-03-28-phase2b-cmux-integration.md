@@ -561,6 +561,8 @@ A polling implementation is acceptable for v0 if:
 
 Do not overfit to inotify/kqueue in the first cut if that slows delivery.
 
+**Native watch backends are a later optimization seam, not a Phase 2B requirement.** The design spec defines a `WatchBackend` trait (kqueue on macOS, inotify on Linux, ReadDirectoryChangesW on Windows) that can replace polling without changing the watch command's public behavior. Ship polling first; optimize later if latency or CPU cost justifies it.
+
 **Internal design**
 
 1. Discover sessions in scope.

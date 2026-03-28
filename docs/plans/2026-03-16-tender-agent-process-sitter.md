@@ -115,6 +115,56 @@ The portable thing is "one supervisor owns one run." The OS backend is just plum
 | Tree kill | kill(-pgid) | TerminateJobObject |
 | Tree containment | process group (setpgid) | Job Object |
 
+### Platform Abstraction Layers
+
+Three layers, clean separation. Only the first is the `Platform` trait.
+
+**1. Platform — runtime primitives (the trait)**
+
+Process identity, child containment, stdin transport, readiness channel. Used by sidecar/runtime code.
+
+Containment is already behind `SupervisedChild` + `ChildKillHandle`. The implementation evolves per-OS (process groups → cgroups → Job Objects) without changing the trait:
+
+```
+type SupervisedChild;
+type ChildKillHandle;       // Send + Clone, carries whatever context the OS needs
+fn spawn_child(...);        // Sets up containment (setpgid, Job Object, etc.)
+fn child_kill_handle(...);  // Extracts kill context from child
+fn kill_child(...);         // Tree kill via whatever containment the OS provides
+```
+
+No `ProcessContainer` type needed. The abstraction is already right.
+
+**2. WatchBackend — filesystem change observation (future trait)**
+
+Not part of Platform. Used by CLI/query-plane code (`watch`, `wait`), not by sidecar.
+
+```
+trait WatchBackend {
+    type Watcher;
+    fn watch_session_tree(path: &Path) -> io::Result<Self::Watcher>;
+    fn wait_for_change(w: &mut Self::Watcher, timeout: Duration) -> io::Result<Vec<ChangeEvent>>;
+}
+```
+
+| Platform | Mechanism |
+|----------|-----------|
+| Linux | inotify |
+| macOS | kqueue |
+| Windows | ReadDirectoryChangesW |
+
+Phase 2B uses polling. WatchBackend is an optimization seam for later — the polling implementation is correct, bounded, and sufficient for v0.
+
+**3. Integrations — OS service and notification features (out of scope)**
+
+Not in Platform. Not in WatchBackend. These are optional adapters that live in a separate `integrations/` layer if ever needed:
+
+- **sd_notify** — systemd readiness. Linux-only, service-manager integration, not needed for Tender's core model.
+- **Desktop notifications** — macOS (`osascript`), Linux (`notify-send`), Windows (toast). These are `on_exit` callback concerns or frontend concerns, not supervision primitives.
+- **Terminal escapes** — OSC 9 etc. Consumer-side, not Tender's job.
+
+Tender emits durable state and watch events. Consumers decide how to surface them.
+
 ### Retention and GC
 
 Durable sessions accumulate forever unless pruned. Policy:
