@@ -13,6 +13,6 @@ Clean up old session directories.
 
 - Namespace (frontlog, Phase 2B Slice 1)
 
-## Notes
+## Why Frontlog
 
-Small feature but important for long-running hosts. Not in original phased plan but implied.
+Without prune, sessions accumulate forever. Any real cmux trial running multiple workspaces will hit this quickly. Small scope — 1 day of work — but blocks sustained use.

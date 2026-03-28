@@ -132,12 +132,8 @@ This can be added to the SSH backend later without changing Tender core semantic
 
 ## Depends On
 
-- Phase 2B frontlog complete:
-  - launch fidelity
-  - namespace
-  - on-exit
-  - watch
-- Windows full backend for mixed-host use cases such as `rick-windows`
+- Phase 2B frontlog complete (launch fidelity, namespace, on-exit, watch)
+- Windows full backend is NOT a hard dependency — SSH client runs from macOS, target hosts need `tender` installed. Windows matters for rick-windows as a *target*, not as a client requirement.
 
 ## Notes
 

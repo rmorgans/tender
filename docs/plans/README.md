@@ -15,16 +15,16 @@ Reference: [tender-agent-process-sitter.md](2026-03-16-tender-agent-process-sitt
 
 ## frontlog/ — Ordered Queue
 
-- [phase2b-cmux-integration.md](frontlog/2026-03-28-phase2b-cmux-integration.md) — cmux integration minimum release (v0.2.0): launch fidelity, namespace, on-exit, watch
+1. [phase2b-cmux-integration.md](frontlog/2026-03-28-phase2b-cmux-integration.md) — v0.2.0: launch fidelity, namespace, on-exit, watch
+2. [gc-prune.md](frontlog/gc-prune.md) — session cleanup (needed before any real multi-workspace trial)
+3. [wrap-annotation-ingestion.md](frontlog/wrap-annotation-ingestion.md) — transparent hook tapping (completes the cmux event story)
 
 ## backlog/
 
 **Independent — can start anytime:**
 - [windows-full-backend.md](backlog/windows-full-backend.md) — complete Windows platform (CreateProcess, Job Objects, named pipes)
-- [gc-prune.md](backlog/gc-prune.md) — session cleanup with retention policy
-- [wrap-annotation-ingestion.md](backlog/wrap-annotation-ingestion.md) — transparent hook tapping for agent annotation events (needs Phase 2B)
+- [skill-and-migration.md](backlog/skill-and-migration.md) — Claude Code skill (local), atch migration guide (fleet needs remote)
 
 **Depends on frontlog completing:**
-- [remote-ssh-transport.md](backlog/remote-ssh-transport.md) — semantic remote backend, SSH transport, broker/relay deferred (needs Windows for rick-windows)
+- [remote-ssh-transport.md](backlog/remote-ssh-transport.md) — semantic remote backend, SSH transport, broker/relay deferred
 - [pty-attach.md](backlog/pty-attach.md) — human escape hatch (forkpty/ConPTY, attach/detach)
-- [skill-and-migration.md](backlog/skill-and-migration.md) — Claude Code skill, atch migration guide, fleet cutover

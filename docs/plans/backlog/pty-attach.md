@@ -11,7 +11,8 @@ Let humans take over when agents can't handle it.
 
 ## Depends On
 
-- Remote SSH transport (most useful when combined)
+- Phase 2B frontlog complete (session model must be stable)
+- Remote SSH transport is NOT a hard dependency — PTY attach is useful locally ("my agent is stuck, let me take over"). Remote combination is nice but not required.
 
 ## Notes
 

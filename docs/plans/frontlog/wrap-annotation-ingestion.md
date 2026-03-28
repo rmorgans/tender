@@ -56,6 +56,40 @@ If internal `_emit_annotation` is ever needed (SDK, trusted adapters), it stays 
 - Phase 2B complete (namespace, watch, event envelope)
 - Annotation event kind support in watch (`--annotations` flag)
 
+## exec: wrap applied to supervised shells
+
+`tender exec` is a convenience over `wrap` for the persistent shell pattern:
+
+```bash
+# Start a supervised shell
+tender start myshell --stdin --namespace ws-1 -- /bin/bash
+
+# Run framed commands inside it
+tender exec myshell --namespace ws-1 -- ls -la /tmp
+tender exec myshell --namespace ws-1 -- make -j8
+tender exec myshell --namespace ws-1 -- cd /foo && cargo test
+```
+
+Under the hood, `exec` = `push` (framed with sentinel) + `wrap` (observed with provenance).
+
+1. Frame the command with a sentinel: `<cmd>; echo "TENDER_SENTINEL_<id>_$?"`
+2. Push framed command to the shell's stdin FIFO
+3. Read output.log until sentinel appears
+4. Emit annotation event with command, output, exit code
+5. Return framed output + exit code as JSON
+
+The shell stays alive between `exec` calls. CWD and env persist. If the agent dies, the shell survives — another agent can reconnect via `tender exec` and keep working.
+
+Watch stream gets both layers:
+- Raw output lines as `log` events (from sidecar)
+- Framed command results as `annotation` events (from exec/wrap)
+
+**Design work needed:** sentinel framing protocol. Must be collision-resistant (UUID-based), must handle commands that produce binary output, must handle commands that never return (timeout).
+
+`exec` ships as part of wrap, not a separate feature. If sentinel framing proves complex, it can split into its own plan.
+
 ## Notes
 
 Works with any agent that uses the stdin/stdout JSON hook pattern: Claude Code (12 events), Codex (5), Cursor (7), Cline (4).
+
+The persistent shell + exec pattern maps directly to what Claude Code does internally (persistent bash via pipes with sentinel delimiting) and what Codex does (PTY sessions with yield_time_ms). Tender adds supervision, crash recovery, and the event stream that neither has.
