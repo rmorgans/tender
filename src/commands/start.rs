@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use tender::model::ids::SessionName;
+use tender::model::ids::{Namespace, SessionName};
 use tender::model::spec::{LaunchSpec, StdinMode};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
@@ -14,13 +14,14 @@ pub fn cmd_start(
     timeout: Option<u64>,
     cwd: Option<&std::path::Path>,
     env_vars: &[String],
+    namespace: &Namespace,
 ) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
     // Handle --replace before session creation
     let next_generation = if replace {
-        handle_replace(&root, &session_name)?
+        handle_replace(&root, namespace, &session_name)?
     } else {
         None
     };
@@ -46,10 +47,10 @@ pub fn cmd_start(
     }
 
     // Create session directory (with idempotent handling)
-    let session = match session::create(&root, &session_name) {
+    let session = match session::create(&root, namespace, &session_name) {
         Ok(s) => s,
         Err(session::SessionError::AlreadyExists(_)) => {
-            match try_idempotent_start(&root, &session_name, &launch_spec)? {
+            match try_idempotent_start(&root, namespace, &session_name, &launch_spec)? {
                 None => return Ok(()), // idempotent return printed
                 Some(s) => s,          // orphan cleaned, session re-created
             }
@@ -73,14 +74,18 @@ pub fn cmd_start(
 /// `None` when no session existed or only an orphan was cleaned.
 fn handle_replace(
     root: &SessionRoot,
+    namespace: &Namespace,
     session_name: &SessionName,
 ) -> anyhow::Result<Option<tender::model::ids::Generation>> {
-    let session_path = root.path().join(session_name.as_str());
+    let session_path = root
+        .path()
+        .join(namespace.as_str())
+        .join(session_name.as_str());
     if session_path.exists() {
         if !session_path.join("meta.json").exists() {
             // Orphan dir -- just clean up, no generation to read
             super::status::cleanup_orphan_dir(&session_path);
-        } else if let Some(existing) = session::open(root, session_name)? {
+        } else if let Some(existing) = session::open(root, namespace, session_name)? {
             let existing_meta = session::read_meta(&existing)?;
             let prev_generation = existing_meta.generation();
 
@@ -124,20 +129,24 @@ fn handle_replace(
 /// - `Err` for conflicts, terminal state, or Starting state
 fn try_idempotent_start(
     root: &SessionRoot,
+    namespace: &Namespace,
     session_name: &SessionName,
     launch_spec: &LaunchSpec,
 ) -> anyhow::Result<Option<session::SessionDir>> {
-    let session_path = root.path().join(session_name.as_str());
+    let session_path = root
+        .path()
+        .join(namespace.as_str())
+        .join(session_name.as_str());
     let name = session_name.as_str();
 
     // Orphan dir check: no meta.json means sidecar crashed before writing state
     if !session_path.join("meta.json").exists() {
         super::status::cleanup_orphan_dir(&session_path);
-        let session = session::create(root, session_name)?;
+        let session = session::create(root, namespace, session_name)?;
         return Ok(Some(session));
     }
 
-    let existing = session::open(root, session_name)?
+    let existing = session::open(root, namespace, session_name)?
         .ok_or_else(|| anyhow::anyhow!("session exists but not openable"))?;
     let existing_meta = session::read_meta(&existing)?;
 

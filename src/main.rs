@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use tender::model::ids::Namespace;
 
 mod commands;
 
@@ -17,6 +18,9 @@ enum Commands {
     Start {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
         /// Enable stdin pipe for push command
         #[arg(long)]
         stdin: bool,
@@ -40,26 +44,42 @@ enum Commands {
     Push {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
     },
     /// Show session status
     Status {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
     },
     /// Kill a supervised run
     Kill {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
         /// Force kill (SIGKILL immediately, no grace period)
         #[arg(short, long)]
         force: bool,
     },
     /// List all sessions
-    List,
+    List {
+        /// Namespace to filter (lists all namespaces if omitted)
+        #[arg(long)]
+        namespace: Option<String>,
+    },
     /// Query session output log
     Log {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
         /// Show last N lines
         #[arg(short = 'n', long)]
         tail: Option<usize>,
@@ -80,6 +100,9 @@ enum Commands {
     Wait {
         /// Session name
         name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
         /// Timeout in seconds
         #[arg(short, long)]
         timeout: Option<u64>,
@@ -92,40 +115,73 @@ enum Commands {
     },
 }
 
+/// Resolve an optional namespace string into a `Namespace`, defaulting to "default".
+fn resolve_namespace(namespace: Option<String>) -> anyhow::Result<Namespace> {
+    namespace
+        .map(|s| Namespace::new(&s))
+        .transpose()
+        .map(|opt| opt.unwrap_or_else(Namespace::default_namespace))
+        .map_err(Into::into)
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
         Commands::Start {
             name,
+            namespace,
             cmd,
             stdin,
             replace,
             timeout,
             cwd,
             env_vars,
-        } => commands::cmd_start(
-            &name,
-            cmd,
-            stdin,
-            replace,
-            timeout,
-            cwd.as_deref(),
-            &env_vars,
-        ),
-        Commands::Push { name } => commands::cmd_push(&name),
-        Commands::Status { name } => commands::cmd_status(&name),
-        Commands::Kill { name, force } => commands::cmd_kill(&name, force),
-        Commands::List => commands::cmd_list(),
+        } => resolve_namespace(namespace).and_then(|ns| {
+            commands::cmd_start(
+                &name,
+                cmd,
+                stdin,
+                replace,
+                timeout,
+                cwd.as_deref(),
+                &env_vars,
+                &ns,
+            )
+        }),
+        Commands::Push { name, namespace } => {
+            resolve_namespace(namespace).and_then(|ns| commands::cmd_push(&name, &ns))
+        }
+        Commands::Status { name, namespace } => {
+            resolve_namespace(namespace).and_then(|ns| commands::cmd_status(&name, &ns))
+        }
+        Commands::Kill {
+            name,
+            namespace,
+            force,
+        } => resolve_namespace(namespace).and_then(|ns| commands::cmd_kill(&name, force, &ns)),
+        Commands::List { namespace } => match namespace
+            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
+            .transpose()
+        {
+            Ok(ns) => commands::cmd_list(ns.as_ref()),
+            Err(e) => Err(e),
+        },
         Commands::Log {
             name,
+            namespace,
             tail,
             follow,
             grep,
             since,
             raw,
-        } => commands::cmd_log(&name, tail, follow, grep, since, raw),
-        Commands::Wait { name, timeout } => commands::cmd_wait(&name, timeout),
+        } => resolve_namespace(namespace)
+            .and_then(|ns| commands::cmd_log(&name, tail, follow, grep, since, raw, &ns)),
+        Commands::Wait {
+            name,
+            namespace,
+            timeout,
+        } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&name, timeout, &ns)),
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
     };
 

@@ -1,13 +1,13 @@
-use tender::model::ids::SessionName;
+use tender::model::ids::{Namespace, SessionName};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
-pub fn cmd_kill(name: &str, force: bool) -> anyhow::Result<()> {
+pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
     // Session doesn't exist -- idempotent success
-    let session = match session::open(&root, &session_name)? {
+    let session = match session::open(&root, namespace, &session_name)? {
         Some(s) => s,
         None => {
             println!(

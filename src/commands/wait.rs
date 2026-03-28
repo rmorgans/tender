@@ -1,12 +1,12 @@
-use tender::model::ids::{EpochTimestamp, SessionName};
+use tender::model::ids::{EpochTimestamp, Namespace, SessionName};
 use tender::model::state::{ExitReason, RunStatus};
 use tender::session::{self, SessionRoot};
 
-pub fn cmd_wait(name: &str, timeout: Option<u64>) -> anyhow::Result<()> {
+pub fn cmd_wait(name: &str, timeout: Option<u64>, namespace: &Namespace) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
-    let session = session::open(&root, &session_name)?
+    let session = session::open(&root, namespace, &session_name)?
         .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
 
     let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));

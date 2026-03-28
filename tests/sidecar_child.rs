@@ -12,7 +12,7 @@ fn read_log(root: &TempDir, session: &str) -> String {
     wait_terminal(root, session);
     let path = root
         .path()
-        .join(format!(".tender/sessions/{session}/output.log"));
+        .join(format!(".tender/sessions/default/{session}/output.log"));
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
@@ -170,7 +170,7 @@ fn lock_released_after_child_exits() {
 
     #[cfg(unix)]
     {
-        let lock_path = root.path().join(".tender/sessions/lock-job/lock");
+        let lock_path = root.path().join(".tender/sessions/default/lock-job/lock");
         if lock_path.exists() {
             use std::fs::File;
             use std::os::unix::io::AsRawFd;

@@ -1,5 +1,5 @@
 use tender::log::{LogQuery, follow_log, parse_since, query_log};
-use tender::model::ids::SessionName;
+use tender::model::ids::{Namespace, SessionName};
 use tender::session::{self, SessionRoot};
 
 pub fn cmd_log(
@@ -9,11 +9,12 @@ pub fn cmd_log(
     grep: Option<String>,
     since: Option<String>,
     raw: bool,
+    namespace: &Namespace,
 ) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
-    let session = session::open(&root, &session_name)?
+    let session = session::open(&root, namespace, &session_name)?
         .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
 
     let since_us = match since {

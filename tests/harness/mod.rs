@@ -16,7 +16,7 @@ pub fn tender(root: &TempDir) -> Command {
 pub fn wait_running(root: &TempDir, session: &str) {
     let path = root
         .path()
-        .join(format!(".tender/sessions/{session}/meta.json"));
+        .join(format!(".tender/sessions/default/{session}/meta.json"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -38,7 +38,7 @@ pub fn wait_running(root: &TempDir, session: &str) {
 pub fn wait_terminal(root: &TempDir, session: &str) -> serde_json::Value {
     let path = root
         .path()
-        .join(format!(".tender/sessions/{session}/meta.json"));
+        .join(format!(".tender/sessions/default/{session}/meta.json"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if let Ok(content) = std::fs::read_to_string(&path) {

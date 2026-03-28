@@ -60,7 +60,9 @@ fn start_writes_durable_meta_json() {
         .assert()
         .success();
 
-    let meta_path = root.path().join(".tender/sessions/durable-test/meta.json");
+    let meta_path = root
+        .path()
+        .join(".tender/sessions/default/durable-test/meta.json");
     assert!(meta_path.exists(), "meta.json not written to disk");
 
     let content = std::fs::read_to_string(&meta_path).unwrap();
@@ -120,8 +122,8 @@ fn list_shows_sessions() {
 
     // Empty list
     let output = tender(&root).args(["list"]).output().unwrap();
-    let names: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(names.is_empty());
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(entries.is_empty());
 
     // Create sessions
     tender(&root)
@@ -134,7 +136,11 @@ fn list_shows_sessions() {
         .success();
 
     let output = tender(&root).args(["list"]).output().unwrap();
-    let names: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, vec!["alpha", "bravo"]);
 }
 
@@ -150,7 +156,7 @@ fn launch_spec_json_cleaned_up() {
 
     let spec_path = root
         .path()
-        .join(".tender/sessions/cleanup-test/launch_spec.json");
+        .join(".tender/sessions/default/cleanup-test/launch_spec.json");
     // Wait for sidecar to clean up
     wait_terminal(&root, "cleanup-test");
     assert!(!spec_path.exists(), "launch_spec.json should be cleaned up");
@@ -169,7 +175,7 @@ fn lock_released_after_sidecar_exits() {
 
     #[cfg(unix)]
     {
-        let lock_path = root.path().join(".tender/sessions/lock-test/lock");
+        let lock_path = root.path().join(".tender/sessions/default/lock-test/lock");
         if lock_path.exists() {
             use std::fs::File;
             use std::os::unix::io::AsRawFd;

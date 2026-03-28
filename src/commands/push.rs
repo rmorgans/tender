@@ -1,14 +1,14 @@
-use tender::model::ids::SessionName;
+use tender::model::ids::{Namespace, SessionName};
 use tender::model::spec::StdinMode;
 use tender::model::state::RunStatus;
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
-pub fn cmd_push(name: &str) -> anyhow::Result<()> {
+pub fn cmd_push(name: &str, namespace: &Namespace) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
-    let session = session::open(&root, &session_name)?
+    let session = session::open(&root, namespace, &session_name)?
         .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
 
     let meta = session::read_meta(&session)?;

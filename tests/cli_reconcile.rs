@@ -13,7 +13,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 fn read_meta_json(root: &TempDir, session: &str) -> serde_json::Value {
     let path = root
         .path()
-        .join(format!(".tender/sessions/{session}/meta.json"));
+        .join(format!(".tender/sessions/default/{session}/meta.json"));
     let content = std::fs::read_to_string(&path).expect("failed to read meta.json");
     serde_json::from_str(&content).expect("failed to parse meta.json")
 }

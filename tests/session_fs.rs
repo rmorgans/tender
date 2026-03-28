@@ -1,6 +1,8 @@
 use std::num::NonZeroU32;
 use tempfile::TempDir;
-use tender::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
+use tender::model::ids::{
+    EpochTimestamp, Generation, Namespace, ProcessIdentity, RunId, SessionName,
+};
 use tender::model::meta::Meta;
 use tender::model::spec::LaunchSpec;
 #[cfg(unix)]
@@ -11,6 +13,10 @@ fn tmp_root() -> (TempDir, SessionRoot) {
     let dir = TempDir::new().unwrap();
     let root = SessionRoot::new(dir.path().to_path_buf());
     (dir, root)
+}
+
+fn default_ns() -> Namespace {
+    Namespace::default_namespace()
 }
 
 fn test_sidecar() -> ProcessIdentity {
@@ -37,7 +43,7 @@ fn test_meta(name: &str) -> Meta {
 fn create_session_dir() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
     assert!(session.path().exists());
     assert!(session.path().is_dir());
 }
@@ -46,8 +52,8 @@ fn create_session_dir() {
 fn create_already_exists() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    session::create(&root, &name).unwrap();
-    let err = session::create(&root, &name).unwrap_err();
+    session::create(&root, &default_ns(), &name).unwrap();
+    let err = session::create(&root, &default_ns(), &name).unwrap_err();
     assert!(matches!(err, SessionError::AlreadyExists(_)));
 }
 
@@ -56,7 +62,7 @@ fn create_nested_root() {
     let dir = TempDir::new().unwrap();
     let root = SessionRoot::new(dir.path().join("deep").join("nested").join("sessions"));
     let name = SessionName::new("job").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
     assert!(session.path().exists());
 }
 
@@ -66,11 +72,11 @@ fn create_nested_root() {
 fn open_existing_with_meta() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
     // Must write meta before open will accept it
     session::write_meta_atomic(&session, &test_meta("upload")).unwrap();
 
-    let opened = session::open(&root, &name).unwrap();
+    let opened = session::open(&root, &default_ns(), &name).unwrap();
     assert!(opened.is_some());
 }
 
@@ -78,9 +84,9 @@ fn open_existing_with_meta() {
 fn open_dir_without_meta_returns_corrupt() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("empty").unwrap();
-    session::create(&root, &name).unwrap();
+    session::create(&root, &default_ns(), &name).unwrap();
     // Don't write meta
-    let err = session::open(&root, &name).unwrap_err();
+    let err = session::open(&root, &default_ns(), &name).unwrap_err();
     assert!(matches!(err, SessionError::Corrupt { .. }));
 }
 
@@ -88,7 +94,7 @@ fn open_dir_without_meta_returns_corrupt() {
 fn open_nonexistent_returns_none() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("nope").unwrap();
-    let session = session::open(&root, &name).unwrap();
+    let session = session::open(&root, &default_ns(), &name).unwrap();
     assert!(session.is_none());
 }
 
@@ -97,14 +103,14 @@ fn open_nonexistent_returns_none() {
 #[test]
 fn list_empty_root() {
     let (_dir, root) = tmp_root();
-    let sessions = session::list(&root).unwrap();
+    let sessions = session::list(&root, None).unwrap();
     assert!(sessions.is_empty());
 }
 
 #[test]
 fn list_nonexistent_root() {
     let root = SessionRoot::new("/tmp/tender-nonexistent-test-root".into());
-    let sessions = session::list(&root).unwrap();
+    let sessions = session::list(&root, None).unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -114,10 +120,10 @@ fn list_returns_created_sessions_sorted() {
     let names = ["charlie", "alpha", "bravo"];
     for n in &names {
         let name = SessionName::new(n).unwrap();
-        session::create(&root, &name).unwrap();
+        session::create(&root, &default_ns(), &name).unwrap();
     }
-    let sessions = session::list(&root).unwrap();
-    let result: Vec<&str> = sessions.iter().map(|s| s.as_str()).collect();
+    let sessions = session::list(&root, None).unwrap();
+    let result: Vec<&str> = sessions.iter().map(|(_, s)| s.as_str()).collect();
     assert_eq!(result, vec!["alpha", "bravo", "charlie"]);
 }
 
@@ -126,15 +132,15 @@ fn list_skips_invalid_entries() {
     let (_dir, root) = tmp_root();
     // Create a valid session
     let name = SessionName::new("valid").unwrap();
-    session::create(&root, &name).unwrap();
+    session::create(&root, &default_ns(), &name).unwrap();
     // Create an invalid entry (starts with dot)
     std::fs::create_dir(root.path().join(".hidden")).unwrap();
     // Create a file (not a directory)
     std::fs::write(root.path().join("not-a-dir"), "").unwrap();
 
-    let sessions = session::list(&root).unwrap();
+    let sessions = session::list(&root, None).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].as_str(), "valid");
+    assert_eq!(sessions[0].1.as_str(), "valid");
 }
 
 // === Meta read/write ===
@@ -143,7 +149,7 @@ fn list_skips_invalid_entries() {
 fn write_then_read_meta() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     let meta = test_meta("upload");
     session::write_meta_atomic(&session, &meta).unwrap();
@@ -157,7 +163,7 @@ fn write_then_read_meta() {
 fn read_meta_missing_returns_corrupt() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("empty").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
     let err = session::read_meta(&session).unwrap_err();
     assert!(matches!(err, SessionError::Corrupt { .. }));
 }
@@ -166,7 +172,7 @@ fn read_meta_missing_returns_corrupt() {
 fn read_meta_invalid_json_returns_corrupt() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("bad").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
     std::fs::write(session.meta_path(), "not json").unwrap();
     let err = session::read_meta(&session).unwrap_err();
     assert!(matches!(err, SessionError::Corrupt { .. }));
@@ -176,7 +182,7 @@ fn read_meta_invalid_json_returns_corrupt() {
 fn atomic_write_no_tmp_left_behind() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     let meta = test_meta("upload");
     session::write_meta_atomic(&session, &meta).unwrap();
@@ -191,7 +197,7 @@ fn atomic_write_no_tmp_left_behind() {
 fn atomic_write_overwrites_existing() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     // Write first version
     let meta1 = test_meta("upload");
@@ -213,7 +219,7 @@ fn atomic_write_overwrites_existing() {
 fn lock_acquire_and_drop() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     let guard = LockGuard::try_acquire(&session).unwrap();
     assert!(session.lock_path().exists());
@@ -225,7 +231,7 @@ fn lock_acquire_and_drop() {
 fn lock_exclusivity_across_try_acquire() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     let _guard = LockGuard::try_acquire(&session).unwrap();
     // Second try_acquire should fail with Locked
@@ -238,7 +244,7 @@ fn lock_exclusivity_across_try_acquire() {
 fn lock_released_on_drop() {
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     {
         let _guard = LockGuard::try_acquire(&session).unwrap();
@@ -254,7 +260,7 @@ fn lock_exclusivity_across_processes() {
 
     let (_dir, root) = tmp_root();
     let name = SessionName::new("upload").unwrap();
-    let session = session::create(&root, &name).unwrap();
+    let session = session::create(&root, &default_ns(), &name).unwrap();
 
     let lock_path = session.lock_path();
 
