@@ -16,8 +16,9 @@ Reference: [tender-agent-process-sitter.md](2026-03-16-tender-agent-process-sitt
 ## frontlog/ — Ordered Queue
 
 1. [phase2b-cmux-integration.md](frontlog/2026-03-28-phase2b-cmux-integration.md) — v0.2.0: launch fidelity, namespace, on-exit, watch
-2. [gc-prune.md](frontlog/gc-prune.md) — session cleanup (needed before any real multi-workspace trial)
-3. [wrap-annotation-ingestion.md](frontlog/wrap-annotation-ingestion.md) — transparent hook tapping (completes the cmux event story)
+2. [tender-run-shebang.md](frontlog/tender-run-shebang.md) — `#!/usr/bin/env -S tender run` supervised scripts (sugar over start, needs slices 0-2)
+3. [gc-prune.md](frontlog/gc-prune.md) — session cleanup (needed before any real multi-workspace trial)
+4. [wrap-annotation-ingestion.md](frontlog/wrap-annotation-ingestion.md) — transparent hook tapping + exec (completes the cmux event story)
 
 ## backlog/
 
