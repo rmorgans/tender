@@ -522,25 +522,29 @@ Default:
 
 **Wire format**
 
-NDJSON, one object per line.
+NDJSON using the canonical event envelope from the design spec. One object per line.
+
+Phase 2B emits `run` and `log` kinds only, from `tender.sidecar` source. No annotations, no `emit`, no global sequencing.
 
 Examples:
 
 ```json
-{"ts":"2026-03-28T02:01:02Z","namespace":"ws-a","session":"claude-1","event":"state","status":"Running","run_id":"019..."}
-{"ts":"2026-03-28T02:01:03Z","namespace":"ws-a","session":"claude-1","event":"log","stream":"stdout","content":"Thinking..."}
-{"ts":"2026-03-28T02:01:05Z","namespace":"ws-a","session":"claude-2","event":"state","status":"Exited","reason":"ExitedOk","exit_code":0}
+{"ts":1774651234.123456,"namespace":"ws-a","session":"claude-1","run_id":"019...","source":"tender.sidecar","kind":"run","name":"run.started","data":{"status":"Running"}}
+{"ts":1774651234.223456,"namespace":"ws-a","session":"claude-1","run_id":"019...","source":"tender.sidecar","kind":"log","name":"log.stdout","data":{"content":"Thinking..."}}
+{"ts":1774651235.123456,"namespace":"ws-a","session":"claude-2","run_id":"019...","source":"tender.sidecar","kind":"run","name":"run.exited","data":{"reason":"ExitedOk","exit_code":0}}
 ```
 
 **Format decisions:**
-- Timestamps: `output.log` uses epoch micros (`1773653954.012345`). Watch NDJSON output converts to ISO 8601 for readability.
-- Stream tags: `output.log` uses `O`/`E`. Watch NDJSON output translates to `"stdout"`/`"stderr"`.
+- Timestamps: epoch seconds with microsecond precision (float). Matches `output.log` native format. No ISO 8601 conversion — consumers can format as they wish.
+- Stream tags: `output.log` uses `O`/`E`. Watch translates to `log.stdout`/`log.stderr` in the `name` field.
 - Namespace: derived from directory structure (after Slice 1), not from parsing `meta.json`. This avoids `Option<String>` handling for legacy sessions without a namespace field.
+- No `seq` field. Ordering is by stream position plus `ts`. Source-local sequencing may be added later if needed.
 
 **Source model**
 
-- state events come from `meta.json` changes
-- log events come from `output.log` appends
+- `run` events come from `meta.json` state transitions
+- `log` events come from `output.log` appends
+- `annotation` events are not supported in Phase 2B
 
 **Implementation approach**
 

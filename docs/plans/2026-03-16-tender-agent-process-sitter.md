@@ -33,6 +33,25 @@ Tender is **not**: a daemon, a portable systemd, a shell wrapper, a PTY/session 
 | **output.log** | Durable observability stream (line-oriented) | Survives reboot |
 | **CLI** | Pure stateless client — transactional operations, then exits | Ephemeral |
 
+### Architectural Layers
+
+Tender has one lifecycle model and multiple access paths.
+
+| Layer | Responsibility |
+|------|----------------|
+| **Tender core** | Run model, state machine, sidecar, session store, log store, canonical event schema |
+| **Semantic backend API** | `start`, `status`, `list`, `log`, `push`, `kill`, `wait`, `watch` |
+| **Backend implementations** | Local first; SSH-backed remote later |
+| **Helper infrastructure** | Bootstrap, auth, connection reuse, optional broker/relay |
+| **Orchestration** | Fanout over one or more backends |
+| **Human mode** | PTY attach/detach, explicitly secondary |
+
+The important boundary is the **semantic backend API**, not raw packet transport.
+
+- Local execution should call Tender core directly.
+- Remote execution may invoke remote `tender` over SSH.
+- Any future broker/relay is helper infrastructure below the backend boundary, not a second lifecycle system.
+
 ### Invariants
 
 1. **Sidecar is sole writer of lifecycle state.** CLI never "helpfully" writes lifecycle conclusions. If the sidecar didn't write it, it didn't happen.
@@ -40,7 +59,8 @@ Tender is **not**: a daemon, a portable systemd, a shell wrapper, a PTY/session 
 3. **run_id binds dependencies.** `--after job1` captures job1's current run_id at bind time. If job1 is replaced (new run_id), the dependency fails rather than observing a different execution.
 4. **Crash recovery is explicit.** If sidecar disappears without writing terminal state (reboot, OOM-kill, kernel panic), `tender status` detects the released lock + missing terminal state and writes `sidecar_lost`. This is the only case where CLI writes state — and it's a reconciliation, not a lifecycle transition.
 5. **`--replace` is atomic.** Uses lock acquisition to serialize. Two agents racing `--replace` on the same session: one wins the lock, kills the old run, starts the new one. The other blocks on the lock, then sees the new run and gets a conflict error (different launch spec) or returns it (same spec). No dual-winner.
-6. **Remote is transport only.** `--host` wraps SSH around the same CLI commands. No separate remote lifecycle model, no remote state, no remote protocol.
+6. **Remote is backend access, not a second lifecycle model.** The local and remote paths expose the same semantic operations and the same event model. `--host` is a CLI affordance over a remote backend, not the architecture itself.
+7. **Broker/relay is helper infrastructure only.** If introduced later, it may help with bootstrap, connection reuse, auth, or persistent streams, but it must not invent a separate run model, state machine, or event schema.
 
 ### Launch Spec
 
@@ -102,6 +122,86 @@ Durable sessions accumulate forever unless pruned. Policy:
 - `tender prune --older-than 30d` — delete session dirs with terminal state older than threshold
 - `tender prune --namespace ci-42` — delete all sessions in a namespace
 - No automatic GC. Agents or cron call `prune` explicitly. Silent data deletion is not agent-friendly.
+
+### Event Model
+
+Tender has one event envelope shared across all event kinds. The envelope is frozen — new event kinds may be added, but the envelope shape does not change.
+
+#### Envelope
+
+```json
+{
+  "ts": 1774651234.123456,
+  "namespace": "ws-1",
+  "session": "claude-1",
+  "run_id": "019...",
+  "source": "tender.sidecar",
+  "kind": "run",
+  "name": "run.exited",
+  "data": {
+    "reason": "ExitedOk",
+    "exit_code": 0
+  }
+}
+```
+
+Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | float | Epoch seconds with microsecond precision |
+| `namespace` | string | Session namespace |
+| `session` | string | Session name |
+| `run_id` | string | UUID v7 of the current execution |
+| `source` | string | Dotted identifier of the event producer |
+| `kind` | string | Event category: `run`, `log`, or `annotation` |
+| `name` | string | Specific event name within the kind |
+| `data` | object | Kind-specific payload |
+
+No global sequence number. Ordering is by stream order plus timestamp. Source-local sequencing (`source_seq`) may be added later if needed.
+
+#### Event Kinds
+
+**`run` — canonical lifecycle truth.** Produced only by Tender sidecar. These are supervision facts.
+
+| Name | Data | When |
+|------|------|------|
+| `run.started` | `{"status": "Running"}` | Child spawned, sidecar confirmed identity |
+| `run.exited` | `{"reason": "ExitedOk", "exit_code": 0}` | Child exited normally |
+| `run.killed` | `{"reason": "Killed"}` | Graceful kill completed |
+| `run.killed_forced` | `{"reason": "KilledForced"}` | Force kill completed |
+| `run.timed_out` | `{"reason": "TimedOut"}` | Timeout enforcement killed child |
+| `run.spawn_failed` | `{"error": "..."}` | Child failed to exec |
+| `run.sidecar_lost` | `{}` | Reconciliation detected crashed sidecar |
+
+**`log` — observability.** Produced by Tender sidecar. First-class but not lifecycle truth.
+
+| Name | Data | When |
+|------|------|------|
+| `log.stdout` | `{"content": "..."}` | Line captured from child stdout |
+| `log.stderr` | `{"content": "..."}` | Line captured from child stderr |
+
+**`annotation` — external meaning.** Produced by external actors (Claude hooks, cmux, adapters). Explicitly not supervision truth.
+
+| Name (examples) | Source (examples) | When |
+|-----------------|-------------------|------|
+| `hook.claude.pre_tool_use` | `external.claude_hook` | Claude Code hook fires |
+| `hook.claude.notification` | `external.claude_hook` | Claude Code notification |
+| `agent.waiting_for_input` | `external.cmux` | App-derived state |
+
+#### Source Convention
+
+Dotted prefix, not an enum:
+
+- `tender.*` — reserved for Tender core. Only `tender.*` may emit `run` events.
+- `external.*` — external producers. May only emit `annotation` events.
+
+This is the safety boundary: apps cannot forge lifecycle truth.
+
+#### Phasing
+
+- **Phase 2B:** `run` and `log` kinds only. Source is `tender.sidecar`. No annotations, no `emit` command, no global sequencing.
+- **Later:** `emit` command for annotations, `--annotations` flag on watch, `external.*` sources.
 
 ---
 
@@ -181,7 +281,14 @@ tender --host nas-01 log upload
 tender status nas-01:upload
 ```
 
-Host registry from SSH config. The agent doesn't construct `ssh host tender ...` strings.
+Host registry comes from SSH config or later backend-specific discovery.
+
+The CLI should hide transport details from the caller. The agent should not construct `ssh host tender ...` strings manually.
+
+The architectural point is:
+
+- `--host` is a frontend affordance
+- the real abstraction is a remote backend exposing the same semantic Tender API
 
 ### 7. Log is Queryable
 
@@ -201,6 +308,8 @@ tender log job --follow           # stream
 tender fanout "roost-*" -- df -h /data
 → [{"host":"roost-01","session":"fanout-abc-01","state":"exited","exit_code":0}, ...]
 ```
+
+Fanout is orchestration over many backends. It is not part of transport internals.
 
 ### 9. No Interactive Anything in the Core Path
 
@@ -362,14 +471,26 @@ The stdin pipe lives in `\\.\pipe\tender-<session>`, not as a file in the sessio
 
 ## Crate Structure
 
+This is the **target shape**, not the current repository layout.
+
+Current reality:
+
+- Tender is still implemented as a single crate
+- the module boundaries in `src/` are the immediate design boundary
+- Phase 2B does not require a workspace split
+
+The workspace/crate split should happen when backend and remote pressure make the boundaries concrete enough to justify the churn.
+
 ```
 tender-cli/
   Cargo.toml          # workspace root
   crates/
-    tender-core/      # state machine, session dir, log reader, JSON output
+    tender-core/      # run model, state machine, session dir, log reader, event schema
     tender-platform/  # ProcessSpawner, StdinPipe, PtySession per OS
-    tender-remote/    # SSH transport (optional)
-    tender-fanout/    # parallel host ops, result collection
+    tender-backend/   # semantic backend API + local/remote backend glue
+    tender-remote/    # SSH backend, bootstrap hooks, remote execution helpers
+    tender-fanout/    # parallel ops over one or more backends
+    tender-broker/    # optional helper for connection reuse / bootstrap / persistent streams
   src/
     main.rs           # CLI entry point (clap)
   tests/
@@ -436,28 +557,31 @@ All composition features are implemented in the sidecar — no new processes or 
 
 **Deliverable:** agents can chain work without wrapper scripts.
 
-### Phase 4: Remote
+### Phase 4: Remote Backend
 
-25. `tender-remote`: `--host` flag, SSH transport
-26. Host resolution from SSH config
-27. `host:session` addressing
-28. `tender fanout` with parallel execution and result collection
+25. Define semantic backend boundary for local and remote execution
+26. `tender-remote`: SSH-backed remote backend exposed via `--host`
+27. Host resolution from SSH config
+28. `host:session` addressing
 29. Error classification (SSH fail vs tender fail vs process fail)
+30. `tender fanout` with parallel execution and result collection over backends
+31. Optional bootstrap hooks for ensuring remote `tender` exists
+32. Broker/relay explicitly deferred unless SSH proves insufficient
 
 **Deliverable:** fleet operations from a single command.
 
 ### Phase 5: Human Escape Hatch
 
-30. `tender-platform` PTY support (Unix: forkpty, Windows: ConPTY)
-31. `attach` command
-32. Detach key handling
+33. `tender-platform` PTY support (Unix: forkpty, Windows: ConPTY)
+34. `attach` command
+35. Detach key handling
 
 **Deliverable:** humans can take over when agents can't handle it.
 
 ### Phase 6: Skill + Migration
 
-33. Write tender skill for Claude Code / Codex / other agents
-34. Migration guide from atch → tender
+36. Write tender skill for Claude Code / Codex / other agents
+37. Migration guide from atch → tender
 35. Update fleet: install tender alongside atch, validate, cut over
 
 ---
