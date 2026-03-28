@@ -110,6 +110,21 @@ enum Commands {
         #[arg(short, long)]
         timeout: Option<u64>,
     },
+    /// Watch session events as an NDJSON stream
+    Watch {
+        /// Namespace to filter (watches all namespaces if omitted)
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Emit run lifecycle events only
+        #[arg(long)]
+        events: bool,
+        /// Emit log output events only
+        #[arg(long)]
+        logs: bool,
+        /// Skip initial state snapshot, only emit new events
+        #[arg(long = "from-now")]
+        from_now: bool,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
@@ -187,6 +202,18 @@ fn main() {
             namespace,
             timeout,
         } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&name, timeout, &ns)),
+        Commands::Watch {
+            namespace,
+            events,
+            logs,
+            from_now,
+        } => match namespace
+            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
+            .transpose()
+        {
+            Ok(ns) => commands::cmd_watch(ns.as_ref(), events, logs, from_now),
+            Err(e) => Err(e),
+        },
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
     };
 

@@ -6,6 +6,7 @@ mod sidecar;
 mod start;
 mod status;
 mod wait;
+mod watch;
 
 pub use kill::cmd_kill;
 pub use list::cmd_list;
@@ -15,3 +16,4 @@ pub use sidecar::cmd_sidecar;
 pub use start::cmd_start;
 pub use status::cmd_status;
 pub use wait::cmd_wait;
+pub use watch::cmd_watch;
