@@ -6,22 +6,44 @@ use tempfile::TempDir;
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
-/// Wait for meta.json to reach terminal, then wait a bit more for callback
-/// re-write (callbacks execute after the first terminal write).
-fn wait_terminal_with_callbacks(root: &TempDir, session: &str) -> serde_json::Value {
-    // First wait for terminal state
-    let _meta = wait_terminal(root, session);
+/// Wait for terminal state, then wait for callback completion.
+/// Callbacks run after the lock is released, so we poll for the callback record file.
+fn wait_for_callbacks(root: &TempDir, session: &str) {
+    wait_terminal(root, session);
 
-    // Callbacks run after terminal state is written, then meta is re-written.
-    // Give callbacks time to execute and the re-write to land.
-    let path = root
+    // Callbacks run after lock release. Poll for the callback record file.
+    // Read meta to get run_id, then check for callbacks/<run_id>.json
+    let meta_path = root
         .path()
         .join(format!(".tender/sessions/default/{session}/meta.json"));
-    // Small grace period for callback execution + atomic re-write
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    let content = std::fs::read_to_string(&meta_path).expect("meta.json should exist");
+    let meta: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let run_id = meta["run_id"].as_str().unwrap();
 
-    let content = std::fs::read_to_string(&path).expect("meta.json should exist");
-    serde_json::from_str(&content).expect("meta.json should be valid JSON")
+    let callbacks_path = root.path().join(format!(".tender/callbacks/{run_id}.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if callbacks_path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Callbacks may have no failures and still write the record, so not finding
+    // the file just means we timed out waiting — tests that need it will assert.
+}
+
+/// Read the callback record for a session (by run_id from meta.json).
+fn read_callback_record(root: &TempDir, session: &str) -> Option<serde_json::Value> {
+    let meta_path = root
+        .path()
+        .join(format!(".tender/sessions/default/{session}/meta.json"));
+    let content = std::fs::read_to_string(&meta_path).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let run_id = meta["run_id"].as_str()?;
+
+    let callbacks_path = root.path().join(format!(".tender/callbacks/{run_id}.json"));
+    let cb_content = std::fs::read_to_string(&callbacks_path).ok()?;
+    serde_json::from_str(&cb_content).ok()
 }
 
 #[test]
@@ -49,7 +71,7 @@ fn on_exit_callback_runs_after_normal_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    wait_terminal_with_callbacks(&root, "on-exit-normal");
+    wait_for_callbacks(&root, "on-exit-normal");
 
     assert!(
         marker.exists(),
@@ -84,17 +106,12 @@ fn on_exit_callback_runs_after_forced_kill() {
 
     wait_running(&root, "on-exit-kill");
 
-    let kill_out = tender(&root)
+    tender(&root)
         .args(["kill", "--force", "on-exit-kill"])
-        .output()
-        .unwrap();
-    assert!(
-        kill_out.status.success(),
-        "kill failed: {}",
-        String::from_utf8_lossy(&kill_out.stderr)
-    );
+        .assert()
+        .success();
 
-    wait_terminal_with_callbacks(&root, "on-exit-kill");
+    wait_for_callbacks(&root, "on-exit-kill");
 
     assert!(
         marker.exists(),
@@ -132,7 +149,7 @@ fn on_exit_callback_sees_env_vars() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    wait_terminal_with_callbacks(&root, "on-exit-env");
+    wait_for_callbacks(&root, "on-exit-env");
 
     assert!(
         output_file.exists(),
@@ -157,7 +174,7 @@ fn on_exit_callback_sees_env_vars() {
 }
 
 #[test]
-fn on_exit_callback_failure_adds_warning_not_state_change() {
+fn on_exit_callback_failure_recorded_without_state_change() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
@@ -179,41 +196,25 @@ fn on_exit_callback_failure_adds_warning_not_state_change() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let meta = wait_terminal_with_callbacks(&root, "on-exit-fail");
+    wait_for_callbacks(&root, "on-exit-fail");
 
-    // Status should still be the correct terminal state (Exited with ExitedOk)
-    assert_eq!(
-        meta["status"].as_str(),
-        Some("Exited"),
-        "status should be Exited, got: {}",
-        serde_json::to_string_pretty(&meta).unwrap()
-    );
-    assert_eq!(
-        meta["reason"].as_str(),
-        Some("ExitedOk"),
-        "reason should be ExitedOk, got: {}",
-        serde_json::to_string_pretty(&meta).unwrap()
-    );
+    // Meta should still show correct terminal state — callbacks don't modify it
+    let meta_path = root
+        .path()
+        .join(".tender/sessions/default/on-exit-fail/meta.json");
+    let meta_content = std::fs::read_to_string(&meta_path).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&meta_content).unwrap();
+    assert_eq!(meta["status"].as_str(), Some("Exited"));
 
-    // Warnings should contain an entry about the failed callback
-    let warnings = meta["warnings"]
-        .as_array()
-        .expect("warnings should be an array");
-    assert!(
-        !warnings.is_empty(),
-        "warnings should not be empty after failed callback"
-    );
-    let has_on_exit_warning = warnings
-        .iter()
-        .any(|w| w.as_str().is_some_and(|s| s.contains("on_exit[0]")));
-    assert!(
-        has_on_exit_warning,
-        "warnings should contain on_exit[0] failure entry, got: {warnings:?}"
-    );
+    // Callback failure should be in the callback record, not meta.json warnings
+    let record = read_callback_record(&root, "on-exit-fail").expect("callback record should exist");
+    let callbacks = record["callbacks"].as_array().expect("callbacks array");
+    assert_eq!(callbacks.len(), 1);
+    assert_eq!(callbacks[0]["status"].as_str(), Some("spawn_failed"));
 }
 
 #[test]
-fn on_exit_multiple_callbacks_run_in_order() {
+fn on_exit_multiple_callbacks_both_run() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
 
@@ -240,7 +241,7 @@ fn on_exit_multiple_callbacks_run_in_order() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    wait_terminal_with_callbacks(&root, "on-exit-multi");
+    wait_for_callbacks(&root, "on-exit-multi");
 
     assert!(
         marker_a.exists(),

@@ -155,7 +155,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     let session_root = SessionRoot::new(root.to_path_buf());
     let session = session::open_raw(&session_root, &namespace, &session_name)?;
 
-    let _lock = LockGuard::try_acquire(&session)?;
+    let lock = LockGuard::try_acquire(&session)?;
 
     // Read launch spec
     let spec_path = session_dir.join("launch_spec.json");
@@ -297,51 +297,92 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         meta.add_warning(warning);
     }
 
-    // --- Write terminal state ---
+    // --- Write terminal state (run state machine ends here) ---
     let exit_reason_debug = format!("{exit_reason:?}");
     meta.transition_exited(exit_reason, EpochTimestamp::now())?;
     session::write_meta_atomic(&session, &meta)?;
 
-    // --- Execute on_exit callbacks (terminal state is already durable) ---
-    let on_exit_callbacks = meta.launch_spec().on_exit.clone();
-    for (i, callback_cmd) in on_exit_callbacks.iter().enumerate() {
-        let argv = shell_words::split(callback_cmd).unwrap_or_else(|_| vec![callback_cmd.clone()]);
-        if argv.is_empty() {
-            continue;
-        }
-        let result = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .env("TENDER_SESSION", meta.session().as_str())
-            .env(
-                "TENDER_NAMESPACE",
-                meta.launch_spec().namespace.as_deref().unwrap_or("default"),
-            )
-            .env("TENDER_RUN_ID", meta.run_id().to_string())
-            .env("TENDER_GENERATION", meta.generation().to_string())
-            .env("TENDER_EXIT_REASON", &exit_reason_debug)
-            .env("TENDER_SESSION_DIR", session_dir.to_str().unwrap_or(""))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output();
+    // --- Release lock: session is now available for --replace ---
+    drop(lock);
 
-        match result {
-            Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                meta.add_warning(format!(
-                    "on_exit[{i}] failed (exit {}): {}",
-                    output.status,
-                    stderr.trim()
-                ));
-            }
-            Err(e) => {
-                meta.add_warning(format!("on_exit[{i}] spawn failed: {e}"));
-            }
-            Ok(_) => {}
-        }
-    }
-    // Re-write meta with any callback warnings
+    // --- Execute on_exit callbacks (unlocked, separate from run lifecycle) ---
+    let on_exit_callbacks = meta.launch_spec().on_exit.clone();
     if !on_exit_callbacks.is_empty() {
-        let _ = session::write_meta_atomic(&session, &meta);
+        let run_id = meta.run_id().to_string();
+        let session_name = meta.session().as_str().to_string();
+        let namespace = meta
+            .launch_spec()
+            .namespace
+            .as_deref()
+            .unwrap_or("default")
+            .to_string();
+        let generation = meta.generation().to_string();
+        let session_dir_str = session_dir.to_str().unwrap_or("").to_string();
+
+        let mut callback_results: Vec<serde_json::Value> = Vec::new();
+
+        for (i, callback_cmd) in on_exit_callbacks.iter().enumerate() {
+            let argv =
+                shell_words::split(callback_cmd).unwrap_or_else(|_| vec![callback_cmd.clone()]);
+            if argv.is_empty() {
+                continue;
+            }
+            let result = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .env("TENDER_SESSION", &session_name)
+                .env("TENDER_NAMESPACE", &namespace)
+                .env("TENDER_RUN_ID", &run_id)
+                .env("TENDER_GENERATION", &generation)
+                .env("TENDER_EXIT_REASON", &exit_reason_debug)
+                .env("TENDER_SESSION_DIR", &session_dir_str)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output();
+
+            let record = match result {
+                Ok(output) if output.status.success() => {
+                    serde_json::json!({"index": i, "command": callback_cmd, "status": "ok"})
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    serde_json::json!({
+                        "index": i,
+                        "command": callback_cmd,
+                        "status": "failed",
+                        "exit_code": output.status.code(),
+                        "stderr": stderr.trim()
+                    })
+                }
+                Err(e) => {
+                    serde_json::json!({
+                        "index": i,
+                        "command": callback_cmd,
+                        "status": "spawn_failed",
+                        "error": e.to_string()
+                    })
+                }
+            };
+            callback_results.push(record);
+        }
+
+        // Write callback results keyed by run_id, outside the session dir
+        // This survives --replace (which removes the session dir)
+        let callbacks_dir = session_dir
+            .ancestors()
+            .find(|p| p.ends_with("sessions"))
+            .and_then(|p| p.parent())
+            .map(|tender_root| tender_root.join("callbacks"));
+
+        if let Some(dir) = callbacks_dir {
+            let _ = std::fs::create_dir_all(&dir);
+            let record = serde_json::json!({
+                "run_id": run_id,
+                "session": session_name,
+                "namespace": namespace,
+                "callbacks": callback_results
+            });
+            let _ = std::fs::write(dir.join(format!("{run_id}.json")), record.to_string());
+        }
     }
 
     Ok(())
