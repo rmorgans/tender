@@ -15,6 +15,9 @@ Complete the Windows platform implementation started in Phase 2A.
 
 Nothing — Phase 2A skeleton and Platform trait already exist.
 
-## Status
+## Status (as of Slice 0, 2026-03-28)
 
-Skeleton in `src/platform/windows.rs` — identity + status methods implemented, rest returns Unsupported.
+- Skeleton in `src/platform/windows.rs` — identity + status methods implemented, rest returns Unsupported
+- Signature-compatible: all 17 test binaries compile on Windows (rustc 1.93.1)
+- Backend-stubbed: integration tests fail at spawn_child (expected)
+- Pre-existing: 4 session_fs meta read/write tests fail on Windows (path separator or fsync behavior — not gated, needs investigation)
