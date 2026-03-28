@@ -1,0 +1,340 @@
+mod harness;
+
+use harness::{tender, wait_terminal};
+use std::sync::Mutex;
+use tempfile::TempDir;
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Wait for meta.json to show Running state under a specific namespace.
+fn wait_running_ns(root: &TempDir, namespace: &str, session: &str) {
+    let path = root
+        .path()
+        .join(format!(".tender/sessions/{namespace}/{session}/meta.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                if meta["status"].as_str() == Some("Running") {
+                    return;
+                }
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for Running state in {namespace}/{session}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Wait for meta.json to reach a terminal state under a specific namespace.
+fn wait_terminal_ns(root: &TempDir, namespace: &str, session: &str) -> serde_json::Value {
+    let path = root
+        .path()
+        .join(format!(".tender/sessions/{namespace}/{session}/meta.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                let status = meta["status"].as_str().unwrap_or("");
+                if status != "Starting" && status != "Running" {
+                    return meta;
+                }
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for terminal state in {namespace}/{session}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn start_in_explicit_namespace() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args([
+            "start",
+            "ns-echo",
+            "--namespace",
+            "myns",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    wait_terminal_ns(&root, "myns", "ns-echo");
+
+    let meta_path = root.path().join(".tender/sessions/myns/ns-echo/meta.json");
+    assert!(
+        meta_path.exists(),
+        "meta.json should exist at namespace path: {meta_path:?}"
+    );
+}
+
+#[test]
+fn same_name_different_namespace() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Start "job" in ns-a
+    let out_a = tender(&root)
+        .args(["start", "job", "--namespace", "ns-a", "--", "sleep", "60"])
+        .output()
+        .unwrap();
+    assert!(
+        out_a.status.success(),
+        "start in ns-a failed: {}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
+    wait_running_ns(&root, "ns-a", "job");
+
+    // Start "job" in ns-b — should succeed because different namespace
+    let out_b = tender(&root)
+        .args(["start", "job", "--namespace", "ns-b", "--", "sleep", "60"])
+        .output()
+        .unwrap();
+    assert!(
+        out_b.status.success(),
+        "start in ns-b failed: {}",
+        String::from_utf8_lossy(&out_b.stderr)
+    );
+    wait_running_ns(&root, "ns-b", "job");
+
+    // Verify status works for each
+    let status_a = tender(&root)
+        .args(["status", "job", "--namespace", "ns-a"])
+        .output()
+        .unwrap();
+    assert!(status_a.status.success(), "status for ns-a/job failed");
+
+    let status_b = tender(&root)
+        .args(["status", "job", "--namespace", "ns-b"])
+        .output()
+        .unwrap();
+    assert!(status_b.status.success(), "status for ns-b/job failed");
+
+    // Cleanup both
+    tender(&root)
+        .args(["kill", "--force", "job", "--namespace", "ns-a"])
+        .output()
+        .unwrap();
+    tender(&root)
+        .args(["kill", "--force", "job", "--namespace", "ns-b"])
+        .output()
+        .unwrap();
+    wait_terminal_ns(&root, "ns-a", "job");
+    wait_terminal_ns(&root, "ns-b", "job");
+}
+
+#[test]
+fn list_with_namespace_filters() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Create sessions in two namespaces
+    tender(&root)
+        .args(["start", "alpha", "--namespace", "ns-a", "--", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running_ns(&root, "ns-a", "alpha");
+
+    tender(&root)
+        .args(["start", "beta", "--namespace", "ns-b", "--", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running_ns(&root, "ns-b", "beta");
+
+    // list --namespace ns-a should only show ns-a sessions
+    let list_out = tender(&root)
+        .args(["list", "--namespace", "ns-a"])
+        .output()
+        .unwrap();
+    assert!(list_out.status.success(), "list --namespace ns-a failed");
+
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&list_out.stdout).expect("list output not JSON");
+
+    assert_eq!(entries.len(), 1, "should have exactly 1 session in ns-a");
+    assert_eq!(entries[0]["namespace"], "ns-a");
+    assert_eq!(entries[0]["name"], "alpha");
+
+    // Cleanup
+    tender(&root)
+        .args(["kill", "--force", "alpha", "--namespace", "ns-a"])
+        .output()
+        .unwrap();
+    tender(&root)
+        .args(["kill", "--force", "beta", "--namespace", "ns-b"])
+        .output()
+        .unwrap();
+    wait_terminal_ns(&root, "ns-a", "alpha");
+    wait_terminal_ns(&root, "ns-b", "beta");
+}
+
+#[test]
+fn list_without_namespace_returns_all() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    // Create sessions in two namespaces
+    tender(&root)
+        .args(["start", "one", "--namespace", "ns-a", "--", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running_ns(&root, "ns-a", "one");
+
+    tender(&root)
+        .args(["start", "two", "--namespace", "ns-b", "--", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running_ns(&root, "ns-b", "two");
+
+    // list without --namespace should return all
+    let list_out = tender(&root).args(["list"]).output().unwrap();
+    assert!(list_out.status.success(), "list (all) failed");
+
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&list_out.stdout).expect("list output not JSON");
+
+    assert!(
+        entries.len() >= 2,
+        "should have at least 2 sessions, got {}",
+        entries.len()
+    );
+
+    // Verify namespace field is present on all entries
+    for entry in &entries {
+        assert!(
+            entry["namespace"].is_string(),
+            "each entry should have a namespace field"
+        );
+    }
+
+    // Verify both namespaces are represented
+    let namespaces: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["namespace"].as_str())
+        .collect();
+    assert!(
+        namespaces.contains(&"ns-a"),
+        "should contain ns-a, got: {namespaces:?}"
+    );
+    assert!(
+        namespaces.contains(&"ns-b"),
+        "should contain ns-b, got: {namespaces:?}"
+    );
+
+    // Cleanup
+    tender(&root)
+        .args(["kill", "--force", "one", "--namespace", "ns-a"])
+        .output()
+        .unwrap();
+    tender(&root)
+        .args(["kill", "--force", "two", "--namespace", "ns-b"])
+        .output()
+        .unwrap();
+    wait_terminal_ns(&root, "ns-a", "one");
+    wait_terminal_ns(&root, "ns-b", "two");
+}
+
+#[test]
+fn start_with_namespace_idempotent() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out1 = tender(&root)
+        .args([
+            "start",
+            "idem-ns",
+            "--namespace",
+            "myns",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "first start failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    wait_running_ns(&root, "myns", "idem-ns");
+
+    let meta1: serde_json::Value =
+        serde_json::from_slice(&out1.stdout).expect("first output not JSON");
+    let run_id1 = meta1["run_id"].as_str().expect("no run_id in first output");
+
+    // Same name + same spec + same namespace = idempotent
+    let out2 = tender(&root)
+        .args([
+            "start",
+            "idem-ns",
+            "--namespace",
+            "myns",
+            "--",
+            "sleep",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "second start should succeed (idempotent): {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    let meta2: serde_json::Value =
+        serde_json::from_slice(&out2.stdout).expect("second output not JSON");
+    let run_id2 = meta2["run_id"]
+        .as_str()
+        .expect("no run_id in second output");
+
+    assert_eq!(
+        run_id1, run_id2,
+        "idempotent start should return same run_id"
+    );
+
+    // Cleanup
+    tender(&root)
+        .args(["kill", "--force", "idem-ns", "--namespace", "myns"])
+        .output()
+        .unwrap();
+    wait_terminal_ns(&root, "myns", "idem-ns");
+}
+
+#[test]
+fn default_namespace_used_when_omitted() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args(["start", "no-ns", "--", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Use the default-namespace harness helper
+    wait_terminal(&root, "no-ns");
+
+    // Verify session created under .tender/sessions/default/
+    let meta_path = root.path().join(".tender/sessions/default/no-ns/meta.json");
+    assert!(
+        meta_path.exists(),
+        "session without --namespace should be under 'default': {meta_path:?}"
+    );
+}
