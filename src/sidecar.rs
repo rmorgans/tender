@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
-use crate::model::ids::{EpochTimestamp, Generation, RunId, SessionName};
+use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
@@ -139,11 +139,21 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("invalid session directory"))?;
     let session_name = SessionName::new(session_name_str)?;
 
-    let root = session_dir
+    // Path structure: root/<namespace>/<session>/
+    let ns_dir = session_dir
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("session dir has no parent"))?;
+        .ok_or_else(|| anyhow::anyhow!("session dir has no parent (namespace)"))?;
+    let namespace_str = ns_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid namespace directory"))?;
+    let namespace = Namespace::new(namespace_str)?;
+
+    let root = ns_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("namespace dir has no parent (root)"))?;
     let session_root = SessionRoot::new(root.to_path_buf());
-    let session = session::open_raw(&session_root, &session_name)?;
+    let session = session::open_raw(&session_root, &namespace, &session_name)?;
 
     let _lock = LockGuard::try_acquire(&session)?;
 

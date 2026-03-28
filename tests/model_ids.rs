@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use tender::model::ids::{
-    EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName, SessionNameError,
+    EpochTimestamp, Generation, Namespace, NamespaceError, ProcessIdentity, RunId, SessionName,
+    SessionNameError,
 };
 
 #[test]
@@ -214,4 +215,105 @@ fn epoch_timestamp_serializes_as_string() {
     let json = serde_json::to_string(&ts).unwrap();
     // Must be a quoted string, not bare integer
     assert_eq!(json, r#""1773653954""#);
+}
+
+// === Namespace ===
+
+#[test]
+fn namespace_valid() {
+    assert!(Namespace::new("default").is_ok());
+    assert!(Namespace::new("my-workspace").is_ok());
+    assert!(Namespace::new("prod_123").is_ok());
+    assert!(Namespace::new("a").is_ok());
+}
+
+#[test]
+fn namespace_default() {
+    let ns = Namespace::default_namespace();
+    assert_eq!(ns.as_str(), "default");
+}
+
+#[test]
+fn namespace_empty_rejected() {
+    assert!(matches!(
+        Namespace::new("").unwrap_err(),
+        NamespaceError::Empty
+    ));
+}
+
+#[test]
+fn namespace_slash_rejected() {
+    assert!(matches!(
+        Namespace::new("a/b").unwrap_err(),
+        NamespaceError::ContainsSlash
+    ));
+}
+
+#[test]
+fn namespace_dot_rejected() {
+    assert!(matches!(
+        Namespace::new("a.b").unwrap_err(),
+        NamespaceError::ContainsDot
+    ));
+}
+
+#[test]
+fn namespace_whitespace_rejected() {
+    assert!(matches!(
+        Namespace::new("a b").unwrap_err(),
+        NamespaceError::ContainsWhitespace
+    ));
+    assert!(matches!(
+        Namespace::new("a\tb").unwrap_err(),
+        NamespaceError::ContainsWhitespace
+    ));
+}
+
+#[test]
+fn namespace_too_long_rejected() {
+    let long_name = "a".repeat(256);
+    assert!(matches!(
+        Namespace::new(&long_name).unwrap_err(),
+        NamespaceError::TooLong
+    ));
+    // 255 bytes is the limit — should succeed
+    let max_name = "a".repeat(255);
+    assert!(Namespace::new(&max_name).is_ok());
+}
+
+#[test]
+fn namespace_underscore_prefix_rejected() {
+    assert!(matches!(
+        Namespace::new("_hidden").unwrap_err(),
+        NamespaceError::StartsWithUnderscore
+    ));
+}
+
+#[test]
+fn namespace_serde_roundtrip() {
+    let ns = Namespace::new("production").unwrap();
+    let json = serde_json::to_string(&ns).unwrap();
+    let back: Namespace = serde_json::from_str(&json).unwrap();
+    assert_eq!(ns, back);
+}
+
+#[test]
+fn namespace_rejects_invalid_on_deserialize() {
+    // Empty
+    let result: Result<Namespace, _> = serde_json::from_str(r#""""#);
+    assert!(result.is_err());
+
+    // Contains slash
+    let result: Result<Namespace, _> = serde_json::from_str(r#""a/b""#);
+    assert!(result.is_err());
+
+    // Starts with underscore
+    let result: Result<Namespace, _> = serde_json::from_str(r#""_bad""#);
+    assert!(result.is_err());
+}
+
+#[test]
+fn namespace_display() {
+    let ns = Namespace::new("staging").unwrap();
+    assert_eq!(format!("{ns}"), "staging");
 }

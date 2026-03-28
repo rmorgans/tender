@@ -187,6 +187,93 @@ impl<'de> Deserialize<'de> for SessionName {
     }
 }
 
+/// Validated namespace for grouping sessions. Same validation rules as SessionName.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Namespace(String);
+
+#[derive(Debug, Error)]
+pub enum NamespaceError {
+    #[error("namespace cannot be empty")]
+    Empty,
+    #[error("namespace cannot contain '/'")]
+    ContainsSlash,
+    #[error("namespace cannot contain '.'")]
+    ContainsDot,
+    #[error("namespace cannot contain whitespace")]
+    ContainsWhitespace,
+    #[error("namespace cannot start with '_'")]
+    StartsWithUnderscore,
+    #[error("namespace too long (max {MAX_NAMESPACE_LEN} bytes)")]
+    TooLong,
+}
+
+const MAX_NAMESPACE_LEN: usize = 255;
+
+impl Namespace {
+    /// Create a new validated namespace.
+    ///
+    /// # Errors
+    /// Returns `NamespaceError` if the name is empty, contains invalid
+    /// characters, or starts with an underscore.
+    pub fn new(name: &str) -> Result<Self, NamespaceError> {
+        Self::validate(name)?;
+        Ok(Self(name.to_owned()))
+    }
+
+    fn validate(name: &str) -> Result<(), NamespaceError> {
+        if name.is_empty() {
+            return Err(NamespaceError::Empty);
+        }
+        if name.len() > MAX_NAMESPACE_LEN {
+            return Err(NamespaceError::TooLong);
+        }
+        if name.contains('/') {
+            return Err(NamespaceError::ContainsSlash);
+        }
+        if name.contains('.') {
+            return Err(NamespaceError::ContainsDot);
+        }
+        if name.chars().any(|c| c.is_whitespace()) {
+            return Err(NamespaceError::ContainsWhitespace);
+        }
+        if name.starts_with('_') {
+            return Err(NamespaceError::StartsWithUnderscore);
+        }
+        Ok(())
+    }
+
+    /// Returns the default namespace ("default").
+    #[must_use]
+    pub fn default_namespace() -> Self {
+        Self("default".to_owned())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for Namespace {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Namespace {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::validate(&s).map_err(serde::de::Error::custom)?;
+        Ok(Self(s))
+    }
+}
+
 /// Identity of a running process. PID alone is unsafe due to reuse —
 /// always pair with birth time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

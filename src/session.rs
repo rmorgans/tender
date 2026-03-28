@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::model::ids::SessionName;
+use crate::model::ids::{Namespace, SessionName};
 use crate::model::meta::Meta;
 
 /// Errors from session directory operations.
@@ -80,10 +80,16 @@ impl SessionDir {
 
 /// Create a new session directory. Fails if it already exists.
 /// Uses atomic mkdir to avoid TOCTOU race between exists() and create().
-pub fn create(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, SessionError> {
-    let path = root.path().join(name.as_str());
-    // Ensure parent exists
-    fs::create_dir_all(root.path())?;
+/// Path: `root/<namespace>/<session>/`
+pub fn create(
+    root: &SessionRoot,
+    namespace: &Namespace,
+    name: &SessionName,
+) -> Result<SessionDir, SessionError> {
+    let ns_path = root.path().join(namespace.as_str());
+    let path = ns_path.join(name.as_str());
+    // Ensure namespace directory exists
+    fs::create_dir_all(&ns_path)?;
     // Atomic: create_dir fails if already exists, no race window
     match fs::create_dir(&path) {
         Ok(()) => Ok(SessionDir {
@@ -101,8 +107,13 @@ pub fn create(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, Sess
 /// Returns Corrupt if the path exists but is not a directory, or if
 /// the directory exists but has no meta.json (newly created dirs
 /// that haven't had meta written yet are not valid open targets).
-pub fn open(root: &SessionRoot, name: &SessionName) -> Result<Option<SessionDir>, SessionError> {
-    let path = root.path().join(name.as_str());
+/// Path: `root/<namespace>/<session>/`
+pub fn open(
+    root: &SessionRoot,
+    namespace: &Namespace,
+    name: &SessionName,
+) -> Result<Option<SessionDir>, SessionError> {
+    let path = root.path().join(namespace.as_str()).join(name.as_str());
     if !path.exists() {
         return Ok(None);
     }
@@ -128,8 +139,13 @@ pub fn open(root: &SessionRoot, name: &SessionName) -> Result<Option<SessionDir>
 /// Open a session directory without requiring meta.json.
 /// Used internally by the sidecar before it writes meta.
 /// Returns NotFound if the directory doesn't exist.
-pub fn open_raw(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, SessionError> {
-    let path = root.path().join(name.as_str());
+/// Path: `root/<namespace>/<session>/`
+pub fn open_raw(
+    root: &SessionRoot,
+    namespace: &Namespace,
+    name: &SessionName,
+) -> Result<SessionDir, SessionError> {
+    let path = root.path().join(namespace.as_str()).join(name.as_str());
     if !path.exists() {
         return Err(SessionError::NotFound(name.to_string()));
     }
@@ -145,30 +161,64 @@ pub fn open_raw(root: &SessionRoot, name: &SessionName) -> Result<SessionDir, Se
     })
 }
 
-/// List all session directory names under root.
+/// List session directory names, optionally filtered by namespace.
+///
+/// - `Some(ns)`: list sessions in `root/<ns>/`
+/// - `None`: iterate all namespace dirs under root, then sessions within each
+///
 /// Returns only directories with valid session names.
 /// Non-directory entries and invalid names (hidden files, underscore-prefixed)
 /// are silently skipped — these are not sessions.
 /// Directories with valid names but missing/corrupt meta.json ARE included —
 /// use `open()` or `read_meta()` to distinguish healthy from corrupt sessions.
-pub fn list(root: &SessionRoot) -> Result<Vec<SessionName>, SessionError> {
+pub fn list(
+    root: &SessionRoot,
+    namespace: Option<&Namespace>,
+) -> Result<Vec<(Namespace, SessionName)>, SessionError> {
     let root_path = root.path();
     if !root_path.exists() {
         return Ok(vec![]);
     }
+
+    let namespaces: Vec<Namespace> = match namespace {
+        Some(ns) => vec![ns.clone()],
+        None => {
+            let mut ns_list = Vec::new();
+            for entry in fs::read_dir(root_path)? {
+                let entry = entry?;
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                if let Some(name_str) = entry.file_name().to_str() {
+                    if let Ok(ns) = Namespace::new(name_str) {
+                        ns_list.push(ns);
+                    }
+                }
+            }
+            ns_list.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            ns_list
+        }
+    };
+
     let mut sessions = Vec::new();
-    for entry in fs::read_dir(root_path)? {
-        let entry = entry?;
-        if !entry.path().is_dir() {
+    for ns in &namespaces {
+        let ns_path = root_path.join(ns.as_str());
+        if !ns_path.exists() {
             continue;
         }
-        if let Some(name_str) = entry.file_name().to_str() {
-            if let Ok(name) = SessionName::new(name_str) {
-                sessions.push(name);
+        for entry in fs::read_dir(&ns_path)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            if let Some(name_str) = entry.file_name().to_str() {
+                if let Ok(name) = SessionName::new(name_str) {
+                    sessions.push((ns.clone(), name));
+                }
             }
         }
     }
-    sessions.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    sessions.sort_by(|a, b| (&a.0.as_str(), a.1.as_str()).cmp(&(&b.0.as_str(), b.1.as_str())));
     Ok(sessions)
 }
 
