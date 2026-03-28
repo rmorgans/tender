@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Context;
 use tender::model::ids::SessionName;
 use tender::model::spec::{LaunchSpec, StdinMode};
@@ -31,11 +33,15 @@ pub fn cmd_start(
         StdinMode::None
     };
     launch_spec.timeout_s = timeout;
-    launch_spec.cwd = cwd.map(|p| p.to_path_buf());
+    launch_spec.cwd = cwd.map(Path::to_path_buf);
     for entry in env_vars {
         let (key, value) = entry
             .split_once('=')
             .with_context(|| format!("invalid --env format: expected KEY=VALUE, got: {entry}"))?;
+        anyhow::ensure!(
+            !key.is_empty(),
+            "invalid --env format: key cannot be empty, got: {entry}"
+        );
         launch_spec.env.insert(key.to_string(), value.to_string());
     }
 

@@ -284,6 +284,26 @@ fn start_with_invalid_env_format_fails() {
 }
 
 #[test]
+fn start_with_empty_env_key_fails() {
+    let _guard = SERIAL.lock().unwrap();
+    let root = TempDir::new().unwrap();
+
+    let out = tender(&root)
+        .args(["start", "empty-key", "--env", "=foo", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--env '=foo' should fail (empty key)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("key cannot be empty"),
+        "error should mention empty key, got: {stderr}"
+    );
+}
+
+#[test]
 fn start_with_env_preserves_inherited_environment() {
     let _guard = SERIAL.lock().unwrap();
     let root = TempDir::new().unwrap();
