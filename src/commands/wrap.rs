@@ -306,7 +306,7 @@ fn wait_with_signal_handling(
             break status;
         }
         if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_forwarded {
-            let _ = Current::kill_child(kill_handle, false);
+            Current::kill_child(kill_handle, false)?;
             stop_forwarded = true;
         }
         std::thread::sleep(POLL_INTERVAL);
