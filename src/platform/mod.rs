@@ -104,6 +104,11 @@ pub trait Platform {
     /// Does NOT consume the child -- handles stay open for cleanup.
     fn child_wait(child: &mut Self::SupervisedChild) -> io::Result<ExitStatus>;
 
+    /// Poll for child exit without blocking.
+    /// Returns `Ok(Some(status))` if the child has exited, `Ok(None)` if still
+    /// running, or `Err` on OS failure.
+    fn child_try_wait(child: &mut Self::SupervisedChild) -> io::Result<Option<ExitStatus>>;
+
     /// Take the child's stdout stream for capture.
     /// Returns None if already taken. Moves ownership to the caller
     /// (typically a capture thread).
@@ -125,10 +130,14 @@ pub trait Platform {
     fn child_kill_handle(child: &Self::SupervisedChild) -> Self::ChildKillHandle;
 
     /// Kill a supervised child via its kill handle.
-    /// Uses the live backend context (process group on Unix, Job Object on Windows).
     ///
-    /// - Unix: kill(-pgid, signal) with identity verification
-    /// - Windows: TerminateJobObject (force) or SetEvent (graceful)
+    /// - `force = false`: request graceful stop (SIGTERM on Unix,
+    ///   best-effort CTRL_BREAK on Windows); waits up to 5s then
+    ///   escalates to force termination.
+    /// - `force = true`: immediate termination (SIGKILL / TerminateJobObject).
+    ///
+    /// Does not reap the child. Callers must still call `child_wait`
+    /// or `child_try_wait` afterward.
     fn kill_child(handle: &Self::ChildKillHandle, force: bool) -> io::Result<()>;
 
     /// Kill an orphaned process by persisted identity (no live handle).

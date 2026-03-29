@@ -90,6 +90,10 @@ impl Platform for WindowsPlatform {
         Err(unsupported("child_wait"))
     }
 
+    fn child_try_wait(_child: &mut SupervisedChild) -> io::Result<Option<ExitStatus>> {
+        Err(unsupported("child_try_wait"))
+    }
+
     fn child_stdout(_child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
         None
     }

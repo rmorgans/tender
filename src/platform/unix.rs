@@ -110,6 +110,10 @@ impl Platform for UnixPlatform {
         child.child.wait()
     }
 
+    fn child_try_wait(child: &mut SupervisedChild) -> io::Result<Option<ExitStatus>> {
+        child.child.try_wait()
+    }
+
     fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
         child
             .child
