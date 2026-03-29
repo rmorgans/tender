@@ -116,10 +116,15 @@ impl Platform for WindowsPlatform {
 
         // Assign child to Job Object immediately after spawn.
         // Race window: child may briefly run before assignment. See Decision #2.
-        assign_process_to_job(
+        if let Err(e) = assign_process_to_job(
             job.as_raw_handle() as *mut _,
             child.as_raw_handle() as *mut _,
-        )?;
+        ) {
+            // Kill the child so it doesn't run unsupervised outside the job.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
 
         let pid = child.id();
         let identity = process_identity(pid)?;
@@ -179,16 +184,15 @@ impl Platform for WindowsPlatform {
             return terminate_job(&handle.job_object);
         }
 
-        // Graceful: best-effort CTRL_BREAK, then poll, then escalate.
-        // Contract: degrades to force if child has no console or ignores the signal.
+        // Graceful: best-effort CTRL_BREAK, then poll via WaitForSingleObject,
+        // then escalate. Uses a real waitable handle instead of process_status
+        // because Windows keeps the process object alive while any handle is
+        // open (e.g. SupervisedChild's std::process::Child), making PID-based
+        // liveness checks unreliable.
         send_ctrl_break(handle.identity.pid.get());
 
-        for _ in 0..50 {
-            match process_status(&handle.identity) {
-                ProcessStatus::Missing | ProcessStatus::IdentityMismatch => return Ok(()),
-                _ => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        if wait_for_process_exit(handle.identity.pid.get(), 5000) {
+            return Ok(());
         }
 
         // Grace period expired — escalate to force.
@@ -310,6 +314,32 @@ fn terminate_job(job: &OwnedHandle) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Wait for a process to exit using WaitForSingleObject.
+/// Opens a SYNCHRONIZE handle to the process by PID, waits up to `timeout_ms`.
+/// Returns true if the process exited within the timeout, false otherwise.
+/// Returns true (treat as exited) if the process handle cannot be opened
+/// (process already gone or access denied).
+fn wait_for_process_exit(pid: u32, timeout_ms: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    // SAFETY: OpenProcess with SYNCHRONIZE is the minimum right for waiting.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        // Can't open — process likely already exited.
+        return true;
+    }
+
+    // SAFETY: handle is valid from OpenProcess. WaitForSingleObject blocks
+    // until the process exits or the timeout expires.
+    let result = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    unsafe { CloseHandle(handle) };
+
+    result == WAIT_OBJECT_0
 }
 
 /// Best-effort CTRL_BREAK to a process group. No-op if the child has no console.
