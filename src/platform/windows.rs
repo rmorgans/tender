@@ -110,7 +110,7 @@ impl Platform for WindowsPlatform {
         // No CREATE_SUSPENDED — std::process::Child doesn't expose the thread
         // handle needed for ResumeThread. See Decision #2 for the race trade-off.
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
 
         let job = create_job_object()?;
 
