@@ -71,7 +71,7 @@ CLI flags override directives. Directives override defaults.
 
 ## Depends On
 
-All dependencies are satisfied (Phase 2B slices 0-2 are complete).
+All dependencies are satisfied.
 
 ## Why Frontlog
 

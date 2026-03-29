@@ -19,9 +19,4 @@ Claude Code skill and atch migration path.
 
 ## Depends On
 
-- Phase 2B frontlog complete (skill needs namespace, watch)
-- Remote SSH transport needed for fleet migration only, NOT for the Claude Code skill itself
-
-## Notes
-
-Original design spec Phase 6.
+See frontmatter `depends_on`. Remote SSH transport (`remote-ssh-transport`) needed for fleet migration only, NOT for the Claude Code skill itself.

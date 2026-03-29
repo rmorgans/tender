@@ -62,7 +62,7 @@ If internal `_emit_annotation` is ever needed (SDK, trusted adapters), it stays 
 
 ## Depends On
 
-All dependencies are satisfied (Phase 2B and wrap are complete).
+All dependencies are satisfied.
 
 ## exec: wrap applied to supervised shells
 

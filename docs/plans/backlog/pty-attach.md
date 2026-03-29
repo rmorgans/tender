@@ -22,9 +22,8 @@ Let humans take over when agents can't handle it.
 
 ## Depends On
 
-- Phase 2B frontlog complete (session model must be stable)
-- Remote SSH transport is NOT a hard dependency — PTY attach is useful locally ("my agent is stuck, let me take over"). Remote combination is nice but not required.
+See frontmatter `depends_on`. Remote SSH transport (`remote-ssh-transport`) is NOT a hard dependency — PTY attach is useful locally ("my agent is stuck, let me take over").
 
 ## Notes
 
-Original design spec Phase 5. Lowest priority — agents are the primary consumer.
+Lowest priority — agents are the primary consumer.
