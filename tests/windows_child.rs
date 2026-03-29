@@ -160,3 +160,40 @@ fn windows_spawn_with_env() {
         "env var should be visible, got: {buf}"
     );
 }
+
+/// Cooperative CTRL_BREAK: child handles the signal and exits cleanly with code 42.
+/// Proves graceful kill works without escalating to TerminateJobObject.
+#[test]
+fn windows_kill_graceful_cooperative() {
+    use std::os::windows::process::ExitStatusExt;
+
+    let helper = env!("CARGO_BIN_EXE_ctrl_break_responder");
+    let argv = vec![helper.to_string()];
+    let mut child = WindowsPlatform::spawn_child(&argv, false, None, &BTreeMap::new())
+        .expect("spawn_child should succeed");
+
+    // Give the helper a moment to install its console control handler.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let handle = WindowsPlatform::child_kill_handle(&child);
+
+    let start = std::time::Instant::now();
+    WindowsPlatform::kill_child(&handle, false).expect("graceful kill should succeed");
+    let elapsed = start.elapsed();
+
+    let status = WindowsPlatform::child_wait(&mut child).expect("wait should succeed");
+
+    // Exit code 42 proves the child handled CTRL_BREAK cooperatively.
+    // TerminateJobObject would produce exit code 1.
+    assert_eq!(
+        status.code(),
+        Some(42),
+        "child should exit with code 42 from cooperative CTRL_BREAK handler, got: {status:?}"
+    );
+
+    // Should complete well under the 5s escalation timeout.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "graceful kill should not need escalation, took: {elapsed:?}"
+    );
+}
