@@ -165,8 +165,6 @@ fn windows_spawn_with_env() {
 /// Proves graceful kill works without escalating to TerminateJobObject.
 #[test]
 fn windows_kill_graceful_cooperative() {
-    use std::os::windows::process::ExitStatusExt;
-
     let helper = env!("CARGO_BIN_EXE_ctrl_break_responder");
     let argv = vec![helper.to_string()];
     let mut child = WindowsPlatform::spawn_child(&argv, false, None, &BTreeMap::new())
