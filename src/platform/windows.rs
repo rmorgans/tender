@@ -7,8 +7,11 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroU32;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus};
+use std::sync::Arc;
 
 use crate::model::ids::ProcessIdentity;
 use crate::platform::{Platform, ProcessStatus};
@@ -17,17 +20,21 @@ use crate::platform::{Platform, ProcessStatus};
 pub struct WindowsPlatform;
 
 /// Opaque supervised-child state for Windows.
-/// Will hold: process HANDLE, Job Object HANDLE, stop event HANDLE, I/O pipes.
+/// Wraps a `std::process::Child` with its verified `ProcessIdentity`
+/// and an Arc'd Job Object for tree kill.
 pub struct SupervisedChild {
-    _private: (), // placeholder — real fields added in 2A.3
+    child: std::process::Child,
+    identity: ProcessIdentity,
+    job_object: Arc<OwnedHandle>,
 }
 
 /// Lightweight kill handle for Windows.
-/// Will hold: Job Object HANDLE + stop event HANDLE for tree kill.
+/// Carries an Arc'd Job Object HANDLE for tree kill and ProcessIdentity
+/// for status checks and GenerateConsoleCtrlEvent targeting.
 #[derive(Clone)]
 pub struct ChildKillHandle {
-    #[allow(dead_code)] // used when kill_child is implemented in 2A.3
     identity: ProcessIdentity,
+    job_object: Arc<OwnedHandle>,
 }
 
 /// Stdin transport for Windows.
@@ -74,46 +81,115 @@ impl Platform for WindowsPlatform {
     }
 
     fn spawn_child(
-        _argv: &[String],
-        _stdin_piped: bool,
-        _cwd: Option<&Path>,
-        _env: &BTreeMap<String, String>,
+        argv: &[String],
+        stdin_piped: bool,
+        cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
     ) -> io::Result<SupervisedChild> {
-        Err(unsupported("spawn_child"))
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+        let mut cmd = Command::new(&argv[0]);
+        if argv.len() > 1 {
+            cmd.args(&argv[1..]);
+        }
+        if stdin_piped {
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.stdin(std::process::Stdio::null());
+        }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        if !env.is_empty() {
+            cmd.envs(env);
+        }
+
+        // CREATE_NEW_PROCESS_GROUP: required for GenerateConsoleCtrlEvent targeting.
+        // No CREATE_SUSPENDED — std::process::Child doesn't expose the thread
+        // handle needed for ResumeThread. See Decision #2 for the race trade-off.
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        let child = cmd.spawn()?;
+
+        let job = create_job_object()?;
+
+        // Assign child to Job Object immediately after spawn.
+        // Race window: child may briefly run before assignment. See Decision #2.
+        assign_process_to_job(job.as_raw_handle() as isize, child.as_raw_handle() as isize)?;
+
+        let pid = child.id();
+        let identity = process_identity(pid)?;
+
+        Ok(SupervisedChild {
+            child,
+            identity,
+            job_object: Arc::new(job),
+        })
     }
 
-    fn child_identity(_child: &SupervisedChild) -> io::Result<ProcessIdentity> {
-        Err(unsupported("child_identity"))
+    fn child_identity(child: &SupervisedChild) -> io::Result<ProcessIdentity> {
+        Ok(child.identity)
     }
 
-    fn child_wait(_child: &mut SupervisedChild) -> io::Result<ExitStatus> {
-        Err(unsupported("child_wait"))
+    fn child_wait(child: &mut SupervisedChild) -> io::Result<ExitStatus> {
+        child.child.wait()
     }
 
-    fn child_try_wait(_child: &mut SupervisedChild) -> io::Result<Option<ExitStatus>> {
-        Err(unsupported("child_try_wait"))
+    fn child_try_wait(child: &mut SupervisedChild) -> io::Result<Option<ExitStatus>> {
+        child.child.try_wait()
     }
 
-    fn child_stdout(_child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
-        None
+    fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+        child
+            .child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
     }
 
-    fn child_stderr(_child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
-        None
+    fn child_stderr(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+        child
+            .child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
     }
 
-    fn child_stdin(_child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
-        None
+    fn child_stdin(child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
+        child
+            .child
+            .stdin
+            .take()
+            .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
     }
 
-    fn child_kill_handle(_child: &SupervisedChild) -> ChildKillHandle {
-        // This can only be called after spawn_child succeeds, which
-        // currently returns Err, so this is unreachable.
-        unreachable!("child_kill_handle called without a spawned child")
+    fn child_kill_handle(child: &SupervisedChild) -> ChildKillHandle {
+        ChildKillHandle {
+            identity: child.identity,
+            job_object: child.job_object.clone(),
+        }
     }
 
-    fn kill_child(_handle: &ChildKillHandle, _force: bool) -> io::Result<()> {
-        Err(unsupported("kill_child"))
+    fn kill_child(handle: &ChildKillHandle, force: bool) -> io::Result<()> {
+        if force {
+            return terminate_job(&handle.job_object);
+        }
+
+        // Graceful: best-effort CTRL_BREAK, then poll, then escalate.
+        // Contract: degrades to force if child has no console or ignores the signal.
+        send_ctrl_break(handle.identity.pid.get());
+
+        for _ in 0..50 {
+            match process_status(&handle.identity) {
+                ProcessStatus::Missing | ProcessStatus::IdentityMismatch => return Ok(()),
+                _ => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Grace period expired — escalate to force.
+        terminate_job(&handle.job_object)
     }
 
     fn kill_orphan(id: &ProcessIdentity, _force: bool) -> io::Result<()> {
@@ -163,6 +239,79 @@ impl Platform for WindowsPlatform {
         // Windows uses precise HANDLE_LIST — no sealing needed.
         Ok(())
     }
+}
+
+// --- Job Object helpers ---
+
+/// Create a Job Object with KILL_ON_JOB_CLOSE (safety net for crashes).
+fn create_job_object() -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    // SAFETY: null name = anonymous job object. Returns null on failure.
+    let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Configure kill-on-close before returning, while we still have the raw handle.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    let ret = unsafe {
+        SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ret == 0 {
+        // Close the job handle before returning the error.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: handle is a valid non-null HANDLE from CreateJobObjectW.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle as *mut _) })
+}
+
+/// Assign a process to a Job Object.
+fn assign_process_to_job(job: isize, process: isize) -> io::Result<()> {
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+    // SAFETY: both handles are valid — job from create_job_object,
+    // process from std::process::Child (which owns the process HANDLE).
+    let ret = unsafe { AssignProcessToJobObject(job, process) };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Terminate all processes in a Job Object. Idempotent — already-dead is Ok.
+fn terminate_job(job: &OwnedHandle) -> io::Result<()> {
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+    let ret = unsafe { TerminateJobObject(job.as_raw_handle() as isize, 1) };
+    if ret == 0 {
+        let err = io::Error::last_os_error();
+        // ERROR_ACCESS_DENIED can mean the job is already terminated.
+        if err.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort CTRL_BREAK to a process group. No-op if the child has no console.
+fn send_ctrl_break(pid: u32) {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    // The child was created with CREATE_NEW_PROCESS_GROUP, so pid == group id.
+    // Failure is silently ignored — this is a best-effort graceful stop.
+    unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
 }
 
 // --- Process identity implementation ---
