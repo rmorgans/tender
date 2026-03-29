@@ -131,6 +131,7 @@ pub trait Platform {
 
     /// Kill a supervised child via its kill handle.
     ///
+    /// Contract (what implementations must provide):
     /// - `force = false`: request graceful stop (SIGTERM on Unix,
     ///   best-effort CTRL_BREAK on Windows); waits up to 5s then
     ///   escalates to force termination.
@@ -138,6 +139,8 @@ pub trait Platform {
     ///
     /// Does not reap the child. Callers must still call `child_wait`
     /// or `child_try_wait` afterward.
+    ///
+    /// Note: the Windows backend does not yet implement this contract.
     fn kill_child(handle: &Self::ChildKillHandle, force: bool) -> io::Result<()>;
 
     /// Kill an orphaned process by persisted identity (no live handle).
