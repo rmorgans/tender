@@ -33,7 +33,43 @@ links:
 | `child_kill_handle` | Real — Arc'd Job Object |
 | `child_identity` / `process_identity` / `process_status` | Real |
 | `self_identity` | Real |
-| `seal_ready_fd` | No-op (to be implemented in this slice) |
+| `seal_ready_fd` | Real — `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT` |
+
+---
+
+## Progress
+
+**Branch:** `windows-full-backend` (pushed to origin)
+
+**Slice 1 — Tasks 1-7 complete, Tasks 8-9 blocked on rick-windows.**
+
+| Task | Commit | Status |
+|------|--------|--------|
+| 1. windows-sys features | `9712c42` | Done |
+| 2. ready_channel (CreatePipe) | `9712c42` | Done |
+| 3. read/write_ready_signal | `9712c42` | Done |
+| 4. ready_writer_from_env | `9712c42` | Done |
+| 5. seal_ready_fd | `9712c42` | Done |
+| 6. spawn_sidecar | `9712c42` | Done |
+| 7. prepare_sidecar_console | `2124564` | Done |
+| 8. sidecar graceful-kill test | — | Blocked: rick-windows offline |
+| 9. Slice 1 verification | — | Blocked: rick-windows offline |
+
+**macOS verification:** All tests green (no regressions). `cargo check` clean.
+
+**To resume:** SSH to rick-windows (`rick@100.90.60.48`), then:
+```bash
+cd ~/tender
+git fetch origin
+git checkout windows-full-backend
+cargo test 2>&1
+```
+
+**Stop conditions (from plan review):**
+- If readiness pipe inheritance does not work under `Command::spawn` → stop, redesign
+- If `AllocConsole` does not preserve graceful child stop → stop, redesign
+
+**After verification passes:** Continue to Slice 2 (stdin transport) or Slice 3 (orphan kill).
 
 ---
 
