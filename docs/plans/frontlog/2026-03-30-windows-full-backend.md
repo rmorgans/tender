@@ -47,9 +47,10 @@ links:
 |---|----------|--------|
 | 0 | Anonymous pipe | `CreatePipe` with `SECURITY_ATTRIBUTES.bInheritHandle = TRUE` on write end. Read end non-inheritable (parent only). |
 | 1 | Handle passing | Pass write HANDLE value as string in `TENDER_READY_HANDLE` env var (same pattern as Unix `TENDER_READY_FD`). Rust's `Command::spawn` sets `bInheritHandles=TRUE` unconditionally in `CreateProcessW`, so all inheritable handles are inherited by the child. Verified in stdlib source. |
-| 2 | Sidecar detachment | `CREATE_NEW_PROCESS_GROUP` + `CREATE_NO_WINDOW`. **NOT `DETACHED_PROCESS`** — detached processes have no console, which breaks `GenerateConsoleCtrlEvent` for graceful child stop. `CREATE_NO_WINDOW` allocates a hidden console that children inherit, preserving the CTRL_BREAK graceful-stop path in `kill_child`. |
-| 3 | Handle leak prevention | Two points: (a) Parent must clear inheritability on the write HANDLE after spawning the sidecar, so subsequent child spawns don't inherit it. (b) Sidecar must clear inheritability on the ready HANDLE before spawning the child (`seal_ready_fd`), so the child doesn't hold the write end open and block the CLI's read. Both use `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT`. |
-| 4 | ReadyReader / ReadyWriter types | Both `File` (same as Unix). Windows `File` wraps an owned HANDLE internally. |
+| 2 | Sidecar detachment | `DETACHED_PROCESS` + `CREATE_NEW_PROCESS_GROUP`. The sidecar spawns with no console (detached from parent). |
+| 3 | Sidecar console setup | The sidecar calls `AllocConsole()` + `ShowWindow(GetConsoleWindow(), SW_HIDE)` in its own startup, BEFORE spawning the child. This gives the sidecar a hidden console that children inherit via `CREATE_NEW_PROCESS_GROUP`. `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` then works because sidecar and child share the same console. **Why not `CREATE_NO_WINDOW` or skip `DETACHED_PROCESS`?** Neither gives the sidecar a usable console — `CREATE_NO_WINDOW` means "console handle is not set" per MS docs, not "hidden console." `AllocConsole` is the supported way for a detached process to acquire a console (MS AllocConsole docs). The `ShowWindow(SW_HIDE)` step is best-effort — `AllocConsole` is the important part. |
+| 4 | Handle leak prevention | Two points: (a) Parent drops the write HANDLE after spawning the sidecar (already happens in `start.rs` via `drop(write_end)`). (b) Sidecar clears inheritability on the ready HANDLE before spawning the child (`seal_ready_fd`), so the child doesn't hold the write end open and block the CLI's read. Uses `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT`. |
+| 5 | ReadyReader / ReadyWriter types | Both `File` (same as Unix). Windows `File` wraps an owned HANDLE internally. |
 
 ### Task 1: Add windows_sys pipe features
 
@@ -225,7 +226,7 @@ fn spawn_sidecar(
 ) -> io::Result<u32> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+        CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
     };
 
     let handle_value = ready_writer.as_raw_handle() as usize;
@@ -240,33 +241,132 @@ fn spawn_sidecar(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // CREATE_NO_WINDOW: allocates a hidden console (not DETACHED_PROCESS,
-    // which has NO console — that would break GenerateConsoleCtrlEvent
-    // for graceful child stop). The hidden console is inherited by children,
-    // preserving the CTRL_BREAK graceful-stop path in kill_child.
+    // DETACHED_PROCESS: sidecar has no console initially.
+    // The sidecar calls prepare_sidecar_console() in its own startup
+    // to AllocConsole + hide window before spawning any children.
+    // See Decision #3.
     //
     // CREATE_NEW_PROCESS_GROUP: own process group, detached from parent's
-    // console signal routing.
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    // signal routing.
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
 
     let child = cmd.spawn()?;
     Ok(child.id())
 }
 ```
 
-**After spawning the sidecar in `start.rs`:** The parent (CLI process) must also clear inheritability on the write HANDLE so it doesn't leak to other children. This happens naturally when `drop(write_end)` is called in `spawn_and_wait_ready` (line 229 of `start.rs`), which closes the HANDLE entirely. No extra code needed in the parent.
-
 **Verify:** `cargo check` on Windows.
 
-**Commit:** `feat(windows): implement spawn_sidecar with CREATE_NO_WINDOW`
+**Commit:** `feat(windows): implement spawn_sidecar with DETACHED_PROCESS`
 
 ---
 
-### Task 7: Verify Slice 1 on Windows
+### Task 7: Implement `prepare_sidecar_console`
+
+**Files:** `src/platform/windows.rs`, `src/commands/sidecar.rs`
+
+Add a Windows-only platform helper that allocates a hidden console for the sidecar. Called from the sidecar entry point before any child spawning.
+
+In `src/platform/windows.rs`:
+
+```rust
+/// Allocate a hidden console for the sidecar process.
+///
+/// The sidecar spawns with DETACHED_PROCESS (no console). Before spawning
+/// children, it must acquire a console so that:
+/// - Children inherit it via CREATE_NEW_PROCESS_GROUP
+/// - GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) can reach them
+///
+/// The ShowWindow(SW_HIDE) step is best-effort — AllocConsole is the
+/// important part. If the window can't be hidden, graceful stop still works;
+/// the user just sees a brief console flash.
+pub fn prepare_sidecar_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: AllocConsole is safe to call from any thread.
+    // Returns FALSE if the process already has a console — harmless.
+    unsafe { AllocConsole() };
+
+    // Best-effort: hide the console window.
+    let hwnd = unsafe { GetConsoleWindow() };
+    if !hwnd.is_null() {
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+}
+```
+
+In `src/commands/sidecar.rs`, add the platform call:
+
+```rust
+pub fn cmd_sidecar(session_dir: PathBuf) -> anyhow::Result<()> {
+    // On Windows, allocate a hidden console so children can receive
+    // GenerateConsoleCtrlEvent for graceful stop.
+    #[cfg(windows)]
+    tender::platform::windows::prepare_sidecar_console();
+
+    let ready_writer = Current::ready_writer_from_env()?;
+    tender::sidecar::run(session_dir, ready_writer)
+}
+```
+
+**New Cargo.toml features needed:** `Win32_UI_WindowsAndMessaging` for `ShowWindow`, `SW_HIDE`, `GetConsoleWindow`.
+
+```toml
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+```
+
+**Verify:** `cargo check` on macOS. `cargo check` on Windows.
+
+**Commit:** `feat(windows): add prepare_sidecar_console for hidden console allocation`
+
+---
+
+### Task 8: Add sidecar graceful-kill integration test
+
+**Files:** `tests/windows_child.rs`
+
+The existing `windows_kill_graceful_cooperative` test exercises `Platform::kill_child` directly. This test proves the same behavior works through a sidecar-started session (which uses `DETACHED_PROCESS` + `AllocConsole`).
+
+```rust
+/// Prove that a sidecar-started child responds to graceful kill via
+/// the sidecar's AllocConsole'd console. This verifies that the
+/// DETACHED_PROCESS → AllocConsole → child inheritance chain works
+/// for GenerateConsoleCtrlEvent.
+#[test]
+fn windows_sidecar_child_graceful_kill() {
+    // Start a session with ctrl_break_responder (exits 42 on CTRL_BREAK)
+    let helper = env!("CARGO_BIN_EXE_ctrl_break_responder");
+    // Use tender start → tender kill (graceful) → check exit code
+    // Exit code 42 proves CTRL_BREAK was delivered through the sidecar's console
+    // Exit code 1 would mean TerminateJobObject (escalation, AllocConsole failed)
+    // ... (exact implementation depends on harness availability on Windows)
+}
+```
+
+Note: This test may need to use the CLI directly (`tender start` + `tender kill`) rather than Platform methods, since the point is to exercise the sidecar's `AllocConsole` path. If `tender kill` requires `kill_orphan` (Slice 3), this test should instead start a session, verify the sidecar's child PID, then call `Platform::kill_child` via a helper, or defer this test to after Slice 3.
+
+**Design decision needed at implementation time:** Whether this test can run in Slice 1 (without kill_orphan) or must wait for Slice 3.
+
+**Commit:** `test(windows): add sidecar graceful-kill integration test`
+
+---
+
+### Task 9: Verify Slice 1 on Windows
 
 Run on `rick-windows` via SSH.
 
-**Expected GREEN (92 tests):**
+**Expected GREEN (92+ tests):**
 
 | Test file | Tests | Notes |
 |-----------|-------|-------|
@@ -282,6 +382,9 @@ Run on `rick-windows` via SSH.
 | `cli_namespace` | 8 | (excludes `push_resolves_session_in_namespace`) |
 | `cli_prune` | 10 | (excludes Unix-only `prune_delete_failure`) |
 | `cli_wrap` | 11 | (excludes Unix-only `wrap_forwards_sigterm`) |
+| `windows_child` | 9+ | includes new sidecar graceful-kill test |
+
+**Console verification gate:** The sidecar graceful-kill test (Task 8) must pass — this proves `DETACHED_PROCESS` + `AllocConsole` + `GenerateConsoleCtrlEvent` works end-to-end through a real sidecar.
 
 **Expected RED (to be fixed in later slices):**
 
@@ -320,7 +423,7 @@ Run on `rick-windows` via SSH.
 | 4 | Reading from pipe | Non-owning `PipeReader` wrapper with `ReadFile`. Maps `ERROR_BROKEN_PIPE` to EOF (Ok(0)). |
 | 5 | StdinTransport type | Holds `OwnedHandle` (server pipe) + `String` (pipe name). |
 
-### Task 8: Implement `StdinTransport`, `create_stdin_transport`, and helpers
+### Task 10: Implement `StdinTransport`, `create_stdin_transport`, and helpers
 
 **Files:** `src/platform/windows.rs`
 
@@ -392,7 +495,7 @@ fn create_stdin_transport(session_dir: &Path) -> io::Result<StdinTransport> {
 
 ---
 
-### Task 9: Implement `accept_stdin_connection` and `PipeReader`
+### Task 11: Implement `accept_stdin_connection` and `PipeReader`
 
 **Files:** `src/platform/windows.rs`
 
@@ -470,7 +573,7 @@ fn accept_stdin_connection(
 
 ---
 
-### Task 10: Implement `open_stdin_writer` and `remove_stdin_transport`
+### Task 12: Implement `open_stdin_writer` and `remove_stdin_transport`
 
 **Files:** `src/platform/windows.rs`
 
@@ -521,7 +624,7 @@ fn remove_stdin_transport(_session_dir: &Path) {
 
 ---
 
-### Task 11: Verify Slice 2 on Windows
+### Task 13: Verify Slice 2 on Windows
 
 **Expected GREEN (8 additional tests):**
 
@@ -544,7 +647,7 @@ On Unix, `kill_orphan` delegates to the same `kill_process` function — signals
 
 On Windows without a Job Object handle, we can only kill the individual process by PID. No descendant tree kill. This is a known degradation — acceptable because orphan kill is a recovery path (sidecar crashed), not the normal lifecycle.
 
-### Task 12: Implement `kill_orphan`
+### Task 14: Implement `kill_orphan`
 
 **Files:** `src/platform/windows.rs`
 
@@ -617,7 +720,7 @@ fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
 
 ---
 
-### Task 13: Verify Slice 3 on Windows
+### Task 15: Verify Slice 3 on Windows
 
 **Expected GREEN (8 additional tests):**
 
