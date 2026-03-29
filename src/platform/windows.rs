@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
@@ -61,23 +61,79 @@ impl Platform for WindowsPlatform {
     type ReadyWriter = File;
 
     fn spawn_sidecar(
-        _tender_bin: &Path,
-        _session_dir: &Path,
-        _ready_writer: &File,
+        tender_bin: &Path,
+        session_dir: &Path,
+        ready_writer: &File,
     ) -> io::Result<u32> {
-        Err(unsupported("spawn_sidecar"))
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+
+        let handle_value = ready_writer.as_raw_handle() as usize;
+
+        let mut cmd = Command::new(tender_bin);
+        cmd.arg("_sidecar")
+            .arg("--session-dir")
+            .arg(session_dir)
+            .env("TENDER_READY_HANDLE", handle_value.to_string());
+
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        // DETACHED_PROCESS: sidecar has no console initially. It calls
+        // prepare_sidecar_console() in its own startup to AllocConsole
+        // + hide window before spawning children. See plan Decision #3.
+        //
+        // CREATE_NEW_PROCESS_GROUP: own process group, detached from
+        // parent's signal routing.
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+
+        let child = cmd.spawn()?;
+        Ok(child.id())
     }
 
     fn ready_channel() -> io::Result<(File, File)> {
-        Err(unsupported("ready_channel"))
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+
+        let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.bInheritHandle = 1; // TRUE — both handles inheritable initially
+
+        let mut read_handle = std::ptr::null_mut();
+        let mut write_handle = std::ptr::null_mut();
+
+        // SAFETY: sa is valid, pointers are valid out params.
+        let ret = unsafe { CreatePipe(&mut read_handle, &mut write_handle, &sa, 0) };
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Make read end non-inheritable — only the parent reads.
+        set_handle_inheritable(read_handle, false)?;
+
+        // SAFETY: both handles are valid from CreatePipe.
+        let read_file = unsafe { File::from_raw_handle(read_handle as *mut _) };
+        let write_file = unsafe { File::from_raw_handle(write_handle as *mut _) };
+
+        Ok((read_file, write_file))
     }
 
-    fn read_ready_signal(_reader: File) -> io::Result<String> {
-        Err(unsupported("read_ready_signal"))
+    fn read_ready_signal(mut reader: File) -> io::Result<String> {
+        let mut buf = String::new();
+        reader.read_to_string(&mut buf)?;
+        if buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "sidecar died without signaling readiness",
+            ));
+        }
+        Ok(buf)
     }
 
-    fn write_ready_signal(_writer: File, _message: &str) -> io::Result<()> {
-        Err(unsupported("write_ready_signal"))
+    fn write_ready_signal(mut writer: File, message: &str) -> io::Result<()> {
+        writer.write_all(message.as_bytes())?;
+        // writer dropped here — closes HANDLE, reader sees EOF
+        Ok(())
     }
 
     fn spawn_child(
@@ -239,13 +295,42 @@ impl Platform for WindowsPlatform {
     }
 
     fn ready_writer_from_env() -> io::Result<File> {
-        Err(unsupported("ready_writer_from_env"))
+        let handle_str = std::env::var("TENDER_READY_HANDLE")
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "TENDER_READY_HANDLE not set"))?;
+        let handle: usize = handle_str.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TENDER_READY_HANDLE is not a valid handle",
+            )
+        })?;
+        // SAFETY: handle was inherited from the parent via CreatePipe with
+        // bInheritHandle=TRUE. from_raw_handle takes ownership.
+        Ok(unsafe { File::from_raw_handle(handle as *mut _) })
     }
 
-    fn seal_ready_fd(_writer: &File) -> io::Result<()> {
-        // Windows uses precise HANDLE_LIST — no sealing needed.
-        Ok(())
+    fn seal_ready_fd(writer: &File) -> io::Result<()> {
+        // Mark the ready HANDLE as non-inheritable so the child process
+        // doesn't hold the write end open (which would block the CLI's read).
+        set_handle_inheritable(writer.as_raw_handle() as *mut _, false)
     }
+}
+
+// --- Handle helpers ---
+
+/// Set or clear the inheritable flag on a HANDLE.
+fn set_handle_inheritable(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    inheritable: bool,
+) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+    use windows_sys::Win32::System::Threading::SetHandleInformation;
+
+    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
+    let ret = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 // --- Job Object helpers ---
