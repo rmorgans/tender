@@ -1,7 +1,8 @@
 ---
-id: backlog-02
+id: skill-and-migration
 title: "Skill + Migration"
 created: 2026-03-17
+closed:
 depends_on: []
 links: []
 ---

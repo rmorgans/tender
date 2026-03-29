@@ -1,10 +1,11 @@
 ---
-id: backlog-04
+id: pty-attach
 title: "PTY Attach — Human Escape Hatch"
 created: 2026-03-17
+closed:
 depends_on:
-  - frontlog-01
-  - frontlog-02
+  - run-shebang
+  - wrap-annotation-ingestion
 links: []
 ---
 

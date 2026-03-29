@@ -1,10 +1,11 @@
 ---
-id: backlog-03
+id: remote-ssh-transport
 title: "Remote Backend And SSH Transport"
 created: 2026-03-17
+closed:
 depends_on:
-  - frontlog-01
-  - frontlog-02
+  - run-shebang
+  - wrap-annotation-ingestion
 links: []
 ---
 
