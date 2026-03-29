@@ -5,7 +5,7 @@ created: 2026-03-30
 closed:
 depends_on: []
 links:
-  - ../backlog/windows-full-backend.md
+  - ../completed/windows-full-backend.md
 ---
 
 # Windows Full Backend — Implementation Plan
@@ -14,9 +14,9 @@ links:
 
 **Goal:** Complete the Windows platform implementation so all tender CLI commands work end-to-end on Windows — `start`, `kill`, `status`, `list`, `watch`, `log`, `push`, `wrap`.
 
-**Architecture:** Three slices building on the child lifecycle already landed. Slice 1 (sidecar spawn + readiness) is the main unlock. Slice 2 (stdin transport via named pipes) enables `push`. Slice 3 (orphan kill) completes parity. Each slice has named CLI tests as verification gates.
+**Architecture:** Three slices building on the child lifecycle already landed. Slice 1 (sidecar spawn + readiness) is the main unlock. Slice 2 (stdin transport via named pipes) enables `push`. Slice 3 (orphan kill) enables `kill` from the CLI. Each slice has exact CLI test gates.
 
-**Tech Stack:** Rust, `windows_sys` 0.61, `CreatePipe`, `CreateNamedPipeW`, `DETACHED_PROCESS`, `SetHandleInformation`.
+**Tech Stack:** Rust, `windows_sys` 0.61, `CreatePipe`, `CreateNamedPipeW`, `CREATE_NO_WINDOW`, `SetHandleInformation`.
 
 **Quality gates:** `cargo fmt` before each commit. `cargo clippy` on changed files. `cargo check` on macOS (cross-check). Full `cargo test` on Windows per slice.
 
@@ -28,27 +28,27 @@ links:
 |--------|--------|
 | `spawn_child` | Real — `CREATE_NEW_PROCESS_GROUP` + Job Object |
 | `child_try_wait` / `child_wait` | Real |
-| `kill_child` | Real — CTRL_BREAK → WaitForSingleObject → TerminateJobObject |
+| `kill_child` | Real — `GenerateConsoleCtrlEvent(CTRL_BREAK)` → `WaitForSingleObject` → `TerminateJobObject` |
 | `child_stdout/stderr/stdin` | Real |
 | `child_kill_handle` | Real — Arc'd Job Object |
 | `child_identity` / `process_identity` / `process_status` | Real |
 | `self_identity` | Real |
-| `seal_ready_fd` | No-op (correct — Windows uses inheritable HANDLE marking) |
+| `seal_ready_fd` | No-op (to be implemented in this slice) |
 
 ---
 
 ## Slice 1: Sidecar Spawn + Readiness
 
-**Unlocks:** `tender start`, and therefore `status`, `list`, `watch`, `log`, `kill`, `wrap` (all CLI commands except `push`).
+**Unlocks:** `tender start`, and therefore `status`, `list`, `watch`, `log`, `wrap` (NOT `kill` — see Slice 3, NOT `push` — see Slice 2).
 
-### Design Decisions
+### Design Decisions (locked)
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 0 | Anonymous pipe | `CreatePipe` with `SECURITY_ATTRIBUTES.bInheritHandle = TRUE` on write end. Read end stays non-inheritable (parent only). |
-| 1 | Handle passing | Pass write HANDLE value as string in `TENDER_READY_HANDLE` env var (same pattern as Unix's `TENDER_READY_FD`). Simpler than `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. |
-| 2 | Sidecar detachment | `CREATE_NEW_PROCESS_GROUP` + `DETACHED_PROCESS` creation flags. No `setsid` equivalent needed — these flags detach from the parent console. |
-| 3 | Handle leak to child | The sidecar must mark the ready HANDLE as non-inheritable before spawning the child, so the child doesn't hold the write end open. Use `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT`. This is the Windows equivalent of `seal_ready_fd` (which is currently a no-op). |
+| 0 | Anonymous pipe | `CreatePipe` with `SECURITY_ATTRIBUTES.bInheritHandle = TRUE` on write end. Read end non-inheritable (parent only). |
+| 1 | Handle passing | Pass write HANDLE value as string in `TENDER_READY_HANDLE` env var (same pattern as Unix `TENDER_READY_FD`). Rust's `Command::spawn` sets `bInheritHandles=TRUE` unconditionally in `CreateProcessW`, so all inheritable handles are inherited by the child. Verified in stdlib source. |
+| 2 | Sidecar detachment | `CREATE_NEW_PROCESS_GROUP` + `CREATE_NO_WINDOW`. **NOT `DETACHED_PROCESS`** — detached processes have no console, which breaks `GenerateConsoleCtrlEvent` for graceful child stop. `CREATE_NO_WINDOW` allocates a hidden console that children inherit, preserving the CTRL_BREAK graceful-stop path in `kill_child`. |
+| 3 | Handle leak prevention | Two points: (a) Parent must clear inheritability on the write HANDLE after spawning the sidecar, so subsequent child spawns don't inherit it. (b) Sidecar must clear inheritability on the ready HANDLE before spawning the child (`seal_ready_fd`), so the child doesn't hold the write end open and block the CLI's read. Both use `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT`. |
 | 4 | ReadyReader / ReadyWriter types | Both `File` (same as Unix). Windows `File` wraps an owned HANDLE internally. |
 
 ### Task 1: Add windows_sys pipe features
@@ -76,11 +76,29 @@ windows-sys = { version = "0.61.2", features = [
 
 ---
 
-### Task 2: Implement `ready_channel`
+### Task 2: Implement `ready_channel` and `set_handle_inheritable` helper
 
 **Files:** `src/platform/windows.rs`
 
-Create an anonymous pipe. The write end must be inheritable (sidecar will inherit it). The read end stays non-inheritable (parent only).
+```rust
+/// Set or clear the inheritable flag on a HANDLE.
+fn set_handle_inheritable(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    inheritable: bool,
+) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+    use windows_sys::Win32::System::Threading::SetHandleInformation;
+
+    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
+    let ret = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+```
+
+Replace the `ready_channel` stub:
 
 ```rust
 fn ready_channel() -> io::Result<(File, File)> {
@@ -89,12 +107,12 @@ fn ready_channel() -> io::Result<(File, File)> {
 
     let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
     sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-    sa.bInheritHandle = 1; // TRUE — handles are inheritable by default
+    sa.bInheritHandle = 1; // TRUE — both handles inheritable initially
 
     let mut read_handle = std::ptr::null_mut();
     let mut write_handle = std::ptr::null_mut();
 
-    // SAFETY: sa is a valid SECURITY_ATTRIBUTES, pointers are valid out params.
+    // SAFETY: sa is valid, pointers are valid out params.
     let ret = unsafe { CreatePipe(&mut read_handle, &mut write_handle, &sa, 0) };
     if ret == 0 {
         return Err(io::Error::last_os_error());
@@ -111,27 +129,6 @@ fn ready_channel() -> io::Result<(File, File)> {
 }
 ```
 
-Add helper:
-
-```rust
-/// Set or clear the inheritable flag on a HANDLE.
-fn set_handle_inheritable(
-    handle: windows_sys::Win32::Foundation::HANDLE,
-    inheritable: bool,
-) -> io::Result<()> {
-    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
-    use windows_sys::Win32::System::Threading::SetHandleInformation;
-
-    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
-    // SAFETY: handle is a valid HANDLE. SetHandleInformation is safe to call.
-    let ret = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
-    if ret == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-```
-
 **Verify:** `cargo check` on macOS. `cargo check` on Windows.
 
 **Commit:** `feat(windows): implement ready_channel with CreatePipe`
@@ -142,7 +139,7 @@ fn set_handle_inheritable(
 
 **Files:** `src/platform/windows.rs`
 
-These are identical to Unix — just read/write on a File:
+Replace the stubs. These are identical to Unix — just read/write on a `File`:
 
 ```rust
 fn read_ready_signal(mut reader: File) -> io::Result<String> {
@@ -159,7 +156,7 @@ fn read_ready_signal(mut reader: File) -> io::Result<String> {
 
 fn write_ready_signal(mut writer: File, message: &str) -> io::Result<()> {
     writer.write_all(message.as_bytes())?;
-    // writer is dropped here, closing the handle — reader sees EOF
+    // writer dropped here — closes HANDLE, reader sees EOF
     Ok(())
 }
 ```
@@ -202,17 +199,13 @@ fn ready_writer_from_env() -> io::Result<File> {
 
 **Files:** `src/platform/windows.rs`
 
-Replace the no-op with `SetHandleInformation` to clear inheritability:
+Replace the no-op. The sidecar must mark the ready HANDLE as non-inheritable before spawning the child, so the child doesn't hold the write end open (which would block the CLI's `read_to_string`):
 
 ```rust
 fn seal_ready_fd(writer: &File) -> io::Result<()> {
-    // Mark the ready HANDLE as non-inheritable so the child process
-    // doesn't hold the write end open (which would block the CLI's read).
     set_handle_inheritable(writer.as_raw_handle() as *mut _, false)
 }
 ```
-
-Note: this requires changing the function signature concern — `as_raw_handle()` returns `*mut c_void` on Windows, which needs to be cast to `HANDLE`. Check the actual type.
 
 **Verify:** `cargo check` on Windows.
 
@@ -232,7 +225,7 @@ fn spawn_sidecar(
 ) -> io::Result<u32> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     };
 
     let handle_value = ready_writer.as_raw_handle() as usize;
@@ -247,20 +240,25 @@ fn spawn_sidecar(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // DETACHED_PROCESS: no console allocation, detached from parent.
-    // CREATE_NEW_PROCESS_GROUP: own process group for signal targeting.
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    // CREATE_NO_WINDOW: allocates a hidden console (not DETACHED_PROCESS,
+    // which has NO console — that would break GenerateConsoleCtrlEvent
+    // for graceful child stop). The hidden console is inherited by children,
+    // preserving the CTRL_BREAK graceful-stop path in kill_child.
+    //
+    // CREATE_NEW_PROCESS_GROUP: own process group, detached from parent's
+    // console signal routing.
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 
     let child = cmd.spawn()?;
     Ok(child.id())
 }
 ```
 
-**Key difference from Unix:** No `pre_exec` needed. Handle inheritance is controlled by `SECURITY_ATTRIBUTES.bInheritHandle` on the pipe (set in `ready_channel`). Detachment is via creation flags, not `setsid`.
+**After spawning the sidecar in `start.rs`:** The parent (CLI process) must also clear inheritability on the write HANDLE so it doesn't leak to other children. This happens naturally when `drop(write_end)` is called in `spawn_and_wait_ready` (line 229 of `start.rs`), which closes the HANDLE entirely. No extra code needed in the parent.
 
 **Verify:** `cargo check` on Windows.
 
-**Commit:** `feat(windows): implement spawn_sidecar with DETACHED_PROCESS`
+**Commit:** `feat(windows): implement spawn_sidecar with CREATE_NO_WINDOW`
 
 ---
 
@@ -268,33 +266,42 @@ fn spawn_sidecar(
 
 Run on `rick-windows` via SSH.
 
-**Expected to turn green (143 tests across 16 files):**
+**Expected GREEN (92 tests):**
 
-Core sidecar tests:
-- `cargo test --test sidecar_ready` — 9 tests (start, status, list basics)
-- `cargo test --test sidecar_child` — 10 tests (child lifecycle through sidecar)
+| Test file | Tests | Notes |
+|-----------|-------|-------|
+| `sidecar_ready` | 9 | start, status, list basics |
+| `sidecar_child` | 10 | child lifecycle through sidecar |
+| `cli_start_idempotent` | 11 | |
+| `cli_timeout` | 2 | |
+| `cli_log` | 9 | |
+| `cli_wait` | 6 | |
+| `cli_replace` | 4 | |
+| `cli_on_exit` | 5 | |
+| `cli_watch` | 7 | |
+| `cli_namespace` | 8 | (excludes `push_resolves_session_in_namespace`) |
+| `cli_prune` | 10 | (excludes Unix-only `prune_delete_failure`) |
+| `cli_wrap` | 11 | (excludes Unix-only `wrap_forwards_sigterm`) |
 
-CLI tests:
-- `cargo test --test cli_start_idempotent` — 11 tests
-- `cargo test --test cli_timeout` — 2 tests
-- `cargo test --test cli_log` — 9 tests
-- `cargo test --test cli_wait` — 6 tests
-- `cargo test --test cli_replace` — 4 tests
-- `cargo test --test cli_on_exit` — 5 tests
-- `cargo test --test cli_watch` — 7 tests
-- `cargo test --test cli_namespace` — 8 of 9 tests (1 needs push/Slice 2)
-- `cargo test --test cli_prune` — 10 of 11 tests (1 Unix-only)
-- `cargo test --test cli_wrap` — 11 of 12 tests (1 Unix-only SIGTERM test)
+**Expected RED (to be fixed in later slices):**
 
-**Expected to still fail:**
-- `cli_push` (7 tests) — needs Slice 2
-- `cli_namespace::push_resolves_session_in_namespace` — needs Slice 2
-- `cli_kill` (6 tests) + `cli_kill_forced` (2 tests) — needs Slice 3 (kill_orphan for sidecar-crashed cases) OR may partially work since kill_child is implemented
-- `cli_reconcile` (3 tests) — Unix-only, stays gated
+| Test file | Tests | Needs |
+|-----------|-------|-------|
+| `cli_push` | 7 | Slice 2 (stdin transport) |
+| `cli_namespace::push_resolves_session_in_namespace` | 1 | Slice 2 |
+| `cli_kill` | 6 | Slice 3 (kill_orphan) |
+| `cli_kill_forced` | 2 | Slice 3 |
 
-**Run full suite:** `cargo test` on Windows. Compare results with pre-slice baseline.
+**Expected PERMANENTLY Unix-only:**
 
-**Commit:** No code commit. Record results in plan progress section.
+| Test file | Tests | Reason |
+|-----------|-------|--------|
+| `cli_reconcile` | 3 | Uses `libc::kill()` |
+| `cli_prune::prune_delete_failure...` | 1 | Uses `PermissionsExt` |
+| `cli_wrap::wrap_forwards_sigterm...` | 1 | Uses SIGTERM trap |
+| `session_fs` lock tests | 5 | Uses `libc::flock()` |
+
+**Run:** `cargo test` on Windows. Record exact pass/fail counts.
 
 ---
 
@@ -302,66 +309,43 @@ CLI tests:
 
 **Unlocks:** `tender push` (8 tests).
 
-### Design Decisions
+### Design Decisions (locked)
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 0 | Transport mechanism | Named pipe at `\\.\pipe\tender-<session-hash>`. Path derived from session dir hash (Windows named pipes have a 256-char limit and can't use filesystem paths). |
-| 1 | Server side | `CreateNamedPipeW` with `PIPE_ACCESS_INBOUND` (sidecar reads). Overlapped I/O not needed — the forwarding thread blocks on `ConnectNamedPipe`. |
-| 2 | Client side | `CreateFileW` with `GENERIC_WRITE`. Maps `ERROR_PIPE_BUSY` to `ConnectionRefused` (same semantic as Unix ENXIO). |
-| 3 | Multiple connections | After each client disconnects, call `DisconnectNamedPipe` + loop back to `ConnectNamedPipe`. Same outer-loop pattern as Unix FIFO. |
-| 4 | StdinTransport type | Holds the named pipe server HANDLE + the pipe name (for cleanup). |
+| 0 | Transport mechanism | Named pipe at `\\.\pipe\tender-stdin-<hash>`. Hash derived from session dir path (first 16 hex chars of SHA256). Windows named pipes have a 256-char limit. |
+| 1 | Server side | `CreateNamedPipeW` with `PIPE_ACCESS_INBOUND`, `PIPE_TYPE_BYTE`, `PIPE_WAIT`. Max 1 instance. Blocking mode. |
+| 2 | Client side | `CreateFileW` with `GENERIC_WRITE` + `OPEN_EXISTING`. Maps `ERROR_PIPE_BUSY` and `ERROR_FILE_NOT_FOUND` to `ConnectionRefused`. |
+| 3 | Multiple connections | `DisconnectNamedPipe` before each `ConnectNamedPipe`. Same outer-loop pattern as Unix FIFO reopen. |
+| 4 | Reading from pipe | Non-owning `PipeReader` wrapper with `ReadFile`. Maps `ERROR_BROKEN_PIPE` to EOF (Ok(0)). |
+| 5 | StdinTransport type | Holds `OwnedHandle` (server pipe) + `String` (pipe name). |
 
-### Task 8: Implement `create_stdin_transport` and `StdinTransport`
+### Task 8: Implement `StdinTransport`, `create_stdin_transport`, and helpers
 
-**Files:** `src/platform/windows.rs`, `Cargo.toml`
+**Files:** `src/platform/windows.rs`
 
 Replace `StdinTransport` placeholder:
 
 ```rust
 pub struct StdinTransport {
     pipe_handle: OwnedHandle,
+    #[allow(dead_code)] // name used conceptually for debugging; cleanup is via handle drop
     pipe_name: String,
 }
 ```
 
-Implement `create_stdin_transport`:
-
-```rust
-fn create_stdin_transport(session_dir: &Path) -> io::Result<StdinTransport> {
-    let pipe_name = stdin_pipe_name(session_dir);
-    let handle = create_named_pipe_server(&pipe_name)?;
-    Ok(StdinTransport {
-        pipe_handle: handle,
-        pipe_name,
-    })
-}
-```
-
-Add helpers:
-
-```rust
-/// Derive a named pipe path from the session directory.
-/// Uses a hash because Windows named pipes have a 256-char limit.
-fn stdin_pipe_name(session_dir: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(session_dir.as_os_str().as_encoded_bytes());
-    let short = &hex::encode(hash)[..16]; // first 16 hex chars
-    format!(r"\\.\pipe\tender-stdin-{short}")
-}
-```
-
-Wait — tender doesn't have a `hex` dependency. Use the existing `sha2` + format manually:
+Add `stdin_pipe_name`:
 
 ```rust
 fn stdin_pipe_name(session_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(session_dir.as_os_str().as_encoded_bytes());
-    // First 8 bytes as hex = 16 hex chars, unique enough for local pipes.
     let hex: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
     format!(r"\\.\pipe\tender-stdin-{hex}")
 }
 ```
+
+Add `create_named_pipe_server`:
 
 ```rust
 fn create_named_pipe_server(name: &str) -> io::Result<OwnedHandle> {
@@ -371,17 +355,16 @@ fn create_named_pipe_server(name: &str) -> io::Result<OwnedHandle> {
 
     let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
-    // SAFETY: wide_name is a valid null-terminated UTF-16 string.
     let handle = unsafe {
         CreateNamedPipeW(
             wide_name.as_ptr(),
-            PIPE_ACCESS_INBOUND,         // server reads
-            PIPE_TYPE_BYTE | PIPE_WAIT,  // byte mode, blocking
-            1,                           // max instances
-            0,                           // out buffer (not used for inbound)
-            8192,                        // in buffer
-            0,                           // default timeout
-            std::ptr::null(),            // default security
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            1,    // max instances
+            0,    // out buffer
+            8192, // in buffer
+            0,    // default timeout
+            std::ptr::null(),
         )
     };
 
@@ -393,53 +376,27 @@ fn create_named_pipe_server(name: &str) -> io::Result<OwnedHandle> {
 }
 ```
 
+Implement trait method:
+
+```rust
+fn create_stdin_transport(session_dir: &Path) -> io::Result<StdinTransport> {
+    let pipe_name = stdin_pipe_name(session_dir);
+    let pipe_handle = create_named_pipe_server(&pipe_name)?;
+    Ok(StdinTransport { pipe_handle, pipe_name })
+}
+```
+
 **Verify:** `cargo check` on Windows.
 
 **Commit:** `feat(windows): implement stdin transport with named pipes`
 
 ---
 
-### Task 9: Implement `accept_stdin_connection`
+### Task 9: Implement `accept_stdin_connection` and `PipeReader`
 
 **Files:** `src/platform/windows.rs`
 
-```rust
-fn accept_stdin_connection(
-    transport: &StdinTransport,
-    _session_dir: &Path,
-) -> Option<Box<dyn io::Read + Send>> {
-    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
-
-    let handle = transport.pipe_handle.as_raw_handle() as *mut _;
-
-    // SAFETY: handle is a valid named pipe from CreateNamedPipeW.
-    // ConnectNamedPipe blocks until a client connects.
-    let ret = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
-    if ret == 0 {
-        let err = io::Error::last_os_error();
-        // ERROR_PIPE_CONNECTED means client connected before we called
-        // ConnectNamedPipe — that's fine, proceed.
-        if err.raw_os_error() != Some(
-            windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED as i32
-        ) {
-            return None; // pipe broken or removed
-        }
-    }
-
-    // Wrap the pipe handle in a reader. We need to clone/dup the handle
-    // since OwnedHandle in StdinTransport still owns it for reuse.
-    // Actually — on Windows named pipes, after ConnectNamedPipe, we read
-    // from the same handle. We can't clone it easily, so we create a
-    // wrapper that reads from the raw handle without owning it.
-    Some(Box::new(PipeReader {
-        handle: transport.pipe_handle.as_raw_handle() as *mut _,
-    }))
-}
-```
-
-This needs a `PipeReader` wrapper and a disconnect mechanism. After the reader is done (EOF), the forwarding loop in sidecar.rs will call `accept_stdin_connection` again, which needs `DisconnectNamedPipe` first.
-
-Actually, the simpler approach: `accept_stdin_connection` disconnects the previous client (if any) before waiting for a new one. The reader wraps the raw handle.
+Add `PipeReader`:
 
 ```rust
 /// Non-owning reader for a named pipe handle.
@@ -447,7 +404,6 @@ struct PipeReader {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
-// SAFETY: Windows HANDLEs can be sent between threads.
 unsafe impl Send for PipeReader {}
 
 impl io::Read for PipeReader {
@@ -455,7 +411,6 @@ impl io::Read for PipeReader {
         use windows_sys::Win32::Storage::FileSystem::ReadFile;
 
         let mut bytes_read: u32 = 0;
-        // SAFETY: handle is valid, buf is valid with correct length.
         let ret = unsafe {
             ReadFile(
                 self.handle,
@@ -467,11 +422,10 @@ impl io::Read for PipeReader {
         };
         if ret == 0 {
             let err = io::Error::last_os_error();
-            // ERROR_BROKEN_PIPE = client disconnected = EOF
             if err.raw_os_error()
                 == Some(windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32)
             {
-                return Ok(0); // EOF
+                return Ok(0); // EOF — client disconnected
             }
             return Err(err);
         }
@@ -480,7 +434,7 @@ impl io::Read for PipeReader {
 }
 ```
 
-And update `accept_stdin_connection` to disconnect previous client first:
+Implement trait method:
 
 ```rust
 fn accept_stdin_connection(
@@ -498,10 +452,11 @@ fn accept_stdin_connection(
     let ret = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
     if ret == 0 {
         let err = io::Error::last_os_error();
+        // ERROR_PIPE_CONNECTED = client connected before ConnectNamedPipe — fine.
         if err.raw_os_error()
             != Some(windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED as i32)
         {
-            return None;
+            return None; // pipe broken or closed
         }
     }
 
@@ -515,7 +470,7 @@ fn accept_stdin_connection(
 
 ---
 
-### Task 10: Implement `open_stdin_writer`
+### Task 10: Implement `open_stdin_writer` and `remove_stdin_transport`
 
 **Files:** `src/platform/windows.rs`
 
@@ -523,9 +478,8 @@ fn accept_stdin_connection(
 fn open_stdin_writer(session_dir: &Path) -> io::Result<File> {
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE, OPEN_EXISTING,
     };
-    use windows_sys::Win32::Storage::FileSystem::GENERIC_WRITE;
 
     let pipe_name = stdin_pipe_name(session_dir);
     let wide_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -534,18 +488,16 @@ fn open_stdin_writer(session_dir: &Path) -> io::Result<File> {
         CreateFileW(
             wide_name.as_ptr(),
             GENERIC_WRITE,
-            0,                    // no sharing
-            std::ptr::null(),     // default security
+            0,
+            std::ptr::null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(), // no template
+            std::ptr::null_mut(),
         )
     };
 
     if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         let err = io::Error::last_os_error();
-        // ERROR_PIPE_BUSY = server exists but no ConnectNamedPipe pending
-        // ERROR_FILE_NOT_FOUND = pipe doesn't exist yet
         if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
             || err.kind() == io::ErrorKind::NotFound
         {
@@ -556,61 +508,50 @@ fn open_stdin_writer(session_dir: &Path) -> io::Result<File> {
 
     Ok(unsafe { File::from_raw_handle(handle as *mut _) })
 }
+
+fn remove_stdin_transport(_session_dir: &Path) {
+    // Named pipes are kernel objects cleaned up when all handles close.
+    // StdinTransport's OwnedHandle drop handles this.
+}
 ```
 
 **Verify:** `cargo check` on Windows.
 
-**Commit:** `feat(windows): implement open_stdin_writer for named pipe client`
+**Commit:** `feat(windows): implement open_stdin_writer and remove_stdin_transport`
 
 ---
 
-### Task 11: Implement `remove_stdin_transport`
+### Task 11: Verify Slice 2 on Windows
 
-**Files:** `src/platform/windows.rs`
+**Expected GREEN (8 additional tests):**
 
-Named pipes are kernel objects — they're cleaned up when all handles are closed. No filesystem cleanup needed. But we should update the no-op to be explicit:
+| Test file | Tests |
+|-----------|-------|
+| `cli_push` | 7 |
+| `cli_namespace::push_resolves_session_in_namespace` | 1 |
 
-```rust
-fn remove_stdin_transport(_session_dir: &Path) {
-    // Named pipes are kernel objects cleaned up on handle close.
-    // The StdinTransport's OwnedHandle drop handles this.
-}
-```
-
-**Commit:** `chore(windows): document remove_stdin_transport no-op for named pipes`
-
----
-
-### Task 12: Verify Slice 2 on Windows
-
-Run on `rick-windows`:
-
-**Expected to turn green (8 additional tests):**
-- `cargo test --test cli_push` — 7 tests
-- `cargo test --test cli_namespace -- push_resolves_session_in_namespace` — 1 test
-
-**Run full suite:** `cargo test` on Windows.
+**Run:** `cargo test` on Windows.
 
 ---
 
 ## Slice 3: Orphan Kill
 
-**Unlocks:** `tender kill` for crashed-sidecar recovery (11 tests).
+**Unlocks:** `tender kill` from CLI (8 tests). The `kill` command uses `kill_orphan` (not `kill_child`) because the CLI process only has `ProcessIdentity` from meta.json — no live `SupervisedChild` handle.
 
 ### Design
 
-On Unix, `kill_orphan` delegates to the same `kill_process` function used by `kill_child` — it sends signals to the process group by PID after verifying identity.
+On Unix, `kill_orphan` delegates to the same `kill_process` function — signals by PID after identity verification.
 
-On Windows, orphan kill is harder because we don't have a Job Object handle (the sidecar that owned it crashed). We can only kill the individual process by PID, not its descendants.
+On Windows without a Job Object handle, we can only kill the individual process by PID. No descendant tree kill. This is a known degradation — acceptable because orphan kill is a recovery path (sidecar crashed), not the normal lifecycle.
 
-### Task 13: Implement `kill_orphan`
+### Task 12: Implement `kill_orphan`
 
 **Files:** `src/platform/windows.rs`
 
 ```rust
 fn kill_orphan(id: &ProcessIdentity, force: bool) -> io::Result<()> {
     // Without a Job Object handle (sidecar crashed), we can only kill the
-    // process directly — no tree kill. This is a known degradation on Windows.
+    // process directly — no tree kill. Known degradation on Windows.
     match process_status(id) {
         ProcessStatus::Missing => return Ok(()),
         ProcessStatus::IdentityMismatch => {
@@ -652,8 +593,7 @@ fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
 
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if handle.is_null() {
-        // Can't open — process likely already exited.
-        return Ok(());
+        return Ok(()); // Can't open — process likely already exited.
     }
 
     let ret = unsafe { TerminateProcess(handle, 1) };
@@ -661,7 +601,6 @@ fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
 
     if ret == 0 {
         let err = io::Error::last_os_error();
-        // Suppress "access denied" for already-terminated processes.
         if err.raw_os_error()
             != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
         {
@@ -678,37 +617,38 @@ fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
 
 ---
 
-### Task 14: Verify Slice 3 on Windows
+### Task 13: Verify Slice 3 on Windows
 
-Run on `rick-windows`:
+**Expected GREEN (8 additional tests):**
 
-**Expected to turn green (8 additional tests):**
-- `cargo test --test cli_kill` — 6 tests
-- `cargo test --test cli_kill_forced` — 2 tests
+| Test file | Tests |
+|-----------|-------|
+| `cli_kill` | 6 |
+| `cli_kill_forced` | 2 |
 
-**Expected to stay Unix-only:**
+**Expected PERMANENTLY Unix-only:**
 - `cli_reconcile` (3 tests) — uses `libc::kill()` for sidecar signal injection
 
-**Run full suite:** `cargo test` on Windows.
+**Run:** `cargo test` on Windows.
 
 ---
 
-## Verification Summary
+## Final Verification Summary
 
 | Slice | Tests Unlocked | Key Commands |
 |-------|---------------|-------------|
-| 1 (sidecar spawn) | ~143 | start, status, list, watch, log, kill (live), wrap |
+| 1 (sidecar spawn) | 92 | start, status, list, watch, log, wrap |
 | 2 (stdin transport) | 8 | push |
-| 3 (orphan kill) | 8 | kill (crashed sidecar) |
+| 3 (orphan kill) | 8 | kill |
 
-**Expected remaining Unix-only tests after all slices:**
-- `cli_reconcile` (3) — uses `libc::kill()`
-- `cli_prune::prune_delete_failure_reports_error_and_continues` (1) — uses `PermissionsExt`
-- `cli_wrap::wrap_forwards_sigterm_and_writes_annotation` (1) — uses SIGTERM trap
-- `session_fs` lock tests (5) — use `libc::flock()`
+**After all 3 slices — expected permanently Unix-only (10 tests):**
+- `cli_reconcile` (3) — `libc::kill()`
+- `cli_prune::prune_delete_failure_reports_error_and_continues` (1) — `PermissionsExt`
+- `cli_wrap::wrap_forwards_sigterm_and_writes_annotation` (1) — SIGTERM trap
+- `session_fs` lock tests (5) — `libc::flock()`
 
-**Expected remaining failures to investigate separately:**
-- `session_fs` meta read/write tests (4 pre-existing) — path separator or fsync behavior
+**Pre-existing failures to investigate separately (not in scope):**
+- `session_fs` meta read/write tests (4) — path separator or fsync behavior
 
 ---
 
@@ -721,7 +661,7 @@ Run on `rick-windows`:
 
 ## Not In Scope
 
-- `STARTUPINFOEX` / `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` — simpler env-var handle passing is sufficient
+- `STARTUPINFOEX` / `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` — env-var handle passing verified sufficient
 - Windows CI on GitHub Actions — separate initiative
 - `session_fs` pre-existing test failures — tracked separately
 - `cli_reconcile` Windows equivalent — requires different signal injection mechanism
