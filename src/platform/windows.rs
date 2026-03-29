@@ -315,6 +315,32 @@ impl Platform for WindowsPlatform {
     }
 }
 
+// --- Sidecar runtime ---
+
+/// Allocate a hidden console for the sidecar process.
+///
+/// The sidecar spawns with DETACHED_PROCESS (no console). Before spawning
+/// children, it must acquire a console so that:
+/// - Children inherit it via CREATE_NEW_PROCESS_GROUP
+/// - GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) can reach them
+///
+/// The ShowWindow(SW_HIDE) step is best-effort — AllocConsole is the
+/// important part. If the window can't be hidden, graceful stop still works.
+pub fn prepare_sidecar_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, GetConsoleWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+
+    // SAFETY: AllocConsole is safe to call. Returns FALSE if the process
+    // already has a console — harmless.
+    unsafe { AllocConsole() };
+
+    // Best-effort: hide the console window.
+    let hwnd = unsafe { GetConsoleWindow() };
+    if !hwnd.is_null() {
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+}
+
 // --- Handle helpers ---
 
 /// Set or clear the inheritable flag on a HANDLE.
