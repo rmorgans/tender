@@ -116,7 +116,10 @@ impl Platform for WindowsPlatform {
 
         // Assign child to Job Object immediately after spawn.
         // Race window: child may briefly run before assignment. See Decision #2.
-        assign_process_to_job(job.as_raw_handle() as isize, child.as_raw_handle() as isize)?;
+        assign_process_to_job(
+            job.as_raw_handle() as *mut _,
+            child.as_raw_handle() as *mut _,
+        )?;
 
         let pid = child.id();
         let identity = process_identity(pid)?;
@@ -279,7 +282,10 @@ fn create_job_object() -> io::Result<OwnedHandle> {
 }
 
 /// Assign a process to a Job Object.
-fn assign_process_to_job(job: isize, process: isize) -> io::Result<()> {
+fn assign_process_to_job(
+    job: windows_sys::Win32::Foundation::HANDLE,
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> io::Result<()> {
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
     // SAFETY: both handles are valid — job from create_job_object,
@@ -295,7 +301,7 @@ fn assign_process_to_job(job: isize, process: isize) -> io::Result<()> {
 fn terminate_job(job: &OwnedHandle) -> io::Result<()> {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
-    let ret = unsafe { TerminateJobObject(job.as_raw_handle() as isize, 1) };
+    let ret = unsafe { TerminateJobObject(job.as_raw_handle() as *mut _, 1) };
     if ret == 0 {
         let err = io::Error::last_os_error();
         // ERROR_ACCESS_DENIED can mean the job is already terminated.
