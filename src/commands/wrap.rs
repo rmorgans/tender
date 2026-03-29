@@ -1,12 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tender::model::ids::{Namespace, SessionName, Source};
+use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
 /// Maximum annotation line length (timestamp + tag + json + newline).
@@ -16,12 +15,9 @@ const MAX_ANNOTATION_LINE: usize = 4096;
 /// Maximum size for individual payload fields before truncation.
 const MAX_FIELD_BYTES: usize = 3000;
 
-#[cfg(unix)]
-const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-#[cfg(unix)]
-const SIGTERM_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn cmd_wrap(
     session: &str,
@@ -44,49 +40,27 @@ pub fn cmd_wrap(
     let mut stdin_buf = Vec::new();
     io::stdin().read_to_end(&mut stdin_buf)?;
 
-    // Install SIGTERM handler (Unix only)
-    #[cfg(unix)]
-    {
-        SIGTERM_RECEIVED.store(false, Ordering::SeqCst);
-        install_sigterm_handler();
-    }
+    // Install stop-notification handler
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    install_stop_handler();
 
-    // Spawn child
+    // Spawn child via Platform trait
     if cmd.is_empty() {
         anyhow::bail!("no command specified");
     }
-    let mut command = Command::new(&cmd[0]);
-    command
-        .args(&cmd[1..])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    #[cfg(unix)]
-    // SAFETY: pre_exec runs between fork() and exec(). The closure must be
-    // async-signal-safe. setpgid(2) is async-signal-safe per POSIX, and we
-    // perform no heap allocation or locking inside the closure.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = command
-        .spawn()
+    let env = BTreeMap::new();
+    let mut child = Current::spawn_child(&cmd, true, None, &env)
         .map_err(|e| anyhow::anyhow!("failed to spawn '{}': {e}", cmd[0]))?;
+    let kill_handle = Current::child_kill_handle(&child);
 
     // Pipe buffered stdin to child
-    if let Some(mut child_stdin) = child.stdin.take() {
+    if let Some(mut child_stdin) = Current::child_stdin(&mut child) {
         let _ = child_stdin.write_all(&stdin_buf);
         // Drop closes the pipe — child sees EOF
     }
 
-    // Wait for child, handling SIGTERM
-    let output = wait_with_signal_handling(&mut child);
+    // Wait for child, handling stop requests
+    let output = wait_with_signal_handling(&mut child, &kill_handle);
 
     let (stdout_bytes, stderr_bytes, exit_code) = match output {
         Ok(out) => (out.stdout, out.stderr, out.status.code()),
@@ -271,26 +245,43 @@ fn timestamp_micros() -> String {
 }
 
 #[cfg(unix)]
-fn install_sigterm_handler() {
+fn install_stop_handler() {
     // SAFETY: signal() is async-signal-safe. The handler only sets an AtomicBool.
     // Using raw libc here because rustix does not wrap signal-handler registration.
     unsafe {
         libc::signal(
             libc::SIGTERM,
-            sigterm_handler as *const () as libc::sighandler_t,
+            stop_signal_handler as *const () as libc::sighandler_t,
         );
     }
 }
 
 #[cfg(unix)]
-extern "C" fn sigterm_handler(_: libc::c_int) {
-    SIGTERM_RECEIVED.store(true, Ordering::SeqCst);
+extern "C" fn stop_signal_handler(_: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-fn wait_with_signal_handling(child: &mut std::process::Child) -> io::Result<std::process::Output> {
+#[cfg(windows)]
+fn install_stop_handler() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    unsafe extern "system" fn handler(_ctrl_type: u32) -> i32 {
+        STOP_REQUESTED.store(true, Ordering::SeqCst);
+        1 // TRUE — handled
+    }
+
+    // SAFETY: handler is a valid extern "system" function. We pass TRUE (1)
+    // to add the handler.
+    unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+}
+
+fn wait_with_signal_handling(
+    child: &mut <Current as Platform>::SupervisedChild,
+    kill_handle: &<Current as Platform>::ChildKillHandle,
+) -> io::Result<std::process::Output> {
     // Collect stdout/stderr in threads so we don't deadlock
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = Current::child_stdout(child);
+    let stderr = Current::child_stderr(child);
 
     let stdout_handle = std::thread::spawn(move || -> Vec<u8> {
         let mut buf = Vec::new();
@@ -308,10 +299,18 @@ fn wait_with_signal_handling(child: &mut std::process::Child) -> io::Result<std:
         buf
     });
 
-    #[cfg(unix)]
-    let status = wait_for_child_with_sigterm(child)?;
-    #[cfg(not(unix))]
-    let status = child.wait()?;
+    // Uniform poll loop — Platform::kill_child handles graceful→force escalation
+    let mut stop_forwarded = false;
+    let status = loop {
+        if let Some(status) = Current::child_try_wait(child)? {
+            break status;
+        }
+        if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_forwarded {
+            let _ = Current::kill_child(kill_handle, false);
+            stop_forwarded = true;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
 
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
@@ -321,61 +320,4 @@ fn wait_with_signal_handling(child: &mut std::process::Child) -> io::Result<std:
         stdout: stdout_bytes,
         stderr: stderr_bytes,
     })
-}
-
-#[cfg(unix)]
-fn wait_for_child_with_sigterm(child: &mut std::process::Child) -> io::Result<ExitStatus> {
-    let mut term_forwarded = false;
-    let mut kill_forwarded = false;
-    let mut kill_deadline = None;
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-
-        if SIGTERM_RECEIVED.load(Ordering::SeqCst) {
-            let pid = child.id() as i32;
-
-            if !term_forwarded {
-                send_signal(pid, rustix::process::Signal::TERM)?;
-                term_forwarded = true;
-                kill_deadline = Some(Instant::now() + SIGTERM_GRACE_PERIOD);
-            } else if !kill_forwarded
-                && kill_deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                send_signal(pid, rustix::process::Signal::KILL)?;
-                kill_forwarded = true;
-            }
-        }
-
-        std::thread::sleep(SIGNAL_POLL_INTERVAL);
-    }
-}
-
-#[cfg(unix)]
-fn send_signal(pid: i32, signal: rustix::process::Signal) -> io::Result<()> {
-    send_signal_group(pid, signal).or_else(|_| send_signal_direct(pid, signal))
-}
-
-#[cfg(unix)]
-fn send_signal_group(pid: i32, signal: rustix::process::Signal) -> io::Result<()> {
-    let pid = rustix::process::Pid::from_raw(pid)
-        .ok_or_else(|| io::Error::other("invalid pid for process group signal"))?;
-    match rustix::process::kill_process_group(pid, signal) {
-        Ok(()) => Ok(()),
-        Err(e) if e == rustix::io::Errno::SRCH => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-#[cfg(unix)]
-fn send_signal_direct(pid: i32, signal: rustix::process::Signal) -> io::Result<()> {
-    let pid = rustix::process::Pid::from_raw(pid)
-        .ok_or_else(|| io::Error::other("invalid pid for direct signal"))?;
-    match rustix::process::kill_process(pid, signal) {
-        Ok(()) => Ok(()),
-        Err(e) if e == rustix::io::Errno::SRCH => Ok(()),
-        Err(e) => Err(e.into()),
-    }
 }
