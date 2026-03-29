@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use tender::model::ids::Namespace;
+use tender::model::ids::{Namespace, Source};
 
 mod commands;
 
@@ -122,9 +122,30 @@ enum Commands {
         /// Emit log output events only
         #[arg(long)]
         logs: bool,
+        /// Emit annotation events
+        #[arg(long)]
+        annotations: bool,
         /// Skip initial state snapshot, only emit new events
         #[arg(long = "from-now")]
         from_now: bool,
+    },
+    /// Run a command and record an annotation in the session's event log
+    Wrap {
+        /// Session name (defaults to TENDER_SESSION env var)
+        #[arg(long)]
+        session: Option<String>,
+        /// Namespace (defaults to TENDER_NAMESPACE env var)
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Annotation source (e.g. "cmux.claude-hook")
+        #[arg(long)]
+        source: String,
+        /// Event name (e.g. "pre-tool-use")
+        #[arg(long)]
+        event: String,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
     },
     /// Delete terminal sessions older than a threshold
     Prune {
@@ -227,12 +248,13 @@ fn main() {
             namespace,
             events,
             logs,
+            annotations,
             from_now,
         } => match namespace
             .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
             .transpose()
         {
-            Ok(ns) => commands::cmd_watch(ns.as_ref(), events, logs, from_now),
+            Ok(ns) => commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now),
             Err(e) => Err(e),
         },
         Commands::Prune {
@@ -247,6 +269,25 @@ fn main() {
             Ok(ns) => commands::cmd_prune(older_than, all, ns.as_ref(), dry_run),
             Err(e) => Err(e),
         },
+        Commands::Wrap {
+            session,
+            namespace,
+            source,
+            event,
+            cmd,
+        } => {
+            let session = session
+                .or_else(|| std::env::var("TENDER_SESSION").ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--session required (or set TENDER_SESSION env var)")
+                });
+            let namespace = namespace.or_else(|| std::env::var("TENDER_NAMESPACE").ok());
+            let source = Source::new(&source).map_err(anyhow::Error::from);
+            match (session, resolve_namespace(namespace), source) {
+                (Ok(s), Ok(ns), Ok(src)) => commands::cmd_wrap(&s, &ns, &src, &event, cmd),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+            }
+        }
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
     };
 

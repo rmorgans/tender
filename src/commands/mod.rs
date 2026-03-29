@@ -8,6 +8,7 @@ mod start;
 mod status;
 mod wait;
 mod watch;
+mod wrap;
 
 pub use kill::cmd_kill;
 pub use list::cmd_list;
@@ -19,3 +20,4 @@ pub use start::cmd_start;
 pub use status::cmd_status;
 pub use wait::cmd_wait;
 pub use watch::cmd_watch;
+pub use wrap::cmd_wrap;

@@ -40,7 +40,7 @@ proptest! {
     fn logline_rejects_invalid_tag(
         secs in 0u64..10_000_000_000,
         micros in 0u64..1_000_000,
-        tag in "[^OE]",
+        tag in "[^OEA]",
         content in "[^\n\r]{0,50}",
     ) {
         let line = format!("{secs}.{micros:06} {tag} {content}");

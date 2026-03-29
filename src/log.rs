@@ -217,12 +217,13 @@ pub fn parse_since(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("epoch overflow: {value:?}"))
 }
 
-/// Parsed representation of a single sidecar log line.
+/// Parsed representation of a single output.log line.
 ///
-/// The on-disk format produced by `sidecar::capture_stream` is:
+/// The on-disk format is:
 /// ```text
-/// {epoch_secs}.{micros:06} {O|E} {content}\n
+/// {epoch_secs}.{micros:06} {O|E|A} {content}\n
 /// ```
+/// Tags: `O` = stdout, `E` = stderr, `A` = annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
     /// Microseconds since Unix epoch.
@@ -253,7 +254,7 @@ impl LogLine {
 
         // Next character must be the tag, followed by a space.
         let tag = rest.as_bytes().first().copied()? as char;
-        if tag != 'O' && tag != 'E' {
+        if !matches!(tag, 'O' | 'E' | 'A') {
             return None;
         }
 
@@ -324,6 +325,17 @@ mod tests {
         let line = "1773653954.012345 O   hello   world  ";
         let parsed = LogLine::parse(line).expect("should parse");
         assert_eq!(parsed.content, "  hello   world  ");
+    }
+
+    #[test]
+    fn parse_annotation_line() {
+        let line = r#"1773653954.012345 A {"source":"cmux.hook","event":"pre-tool-use"}"#;
+        let parsed = LogLine::parse(line).expect("should parse");
+        assert_eq!(parsed.tag, 'A');
+        assert_eq!(
+            parsed.content,
+            r#"{"source":"cmux.hook","event":"pre-tool-use"}"#
+        );
     }
 
     #[test]

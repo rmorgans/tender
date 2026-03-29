@@ -84,6 +84,7 @@ fn emit_event(
     namespace: &str,
     session: &str,
     run_id: &str,
+    source: &str,
     kind: &str,
     name: &str,
     data: serde_json::Value,
@@ -93,7 +94,7 @@ fn emit_event(
         "namespace": namespace,
         "session": session,
         "run_id": run_id,
-        "source": "tender.sidecar",
+        "source": source,
         "kind": kind,
         "name": name,
         "data": data,
@@ -112,13 +113,17 @@ pub fn cmd_watch(
     namespace: Option<&Namespace>,
     events: bool,
     logs: bool,
+    annotations: bool,
     from_now: bool,
 ) -> anyhow::Result<()> {
     let root = SessionRoot::default_path()?;
 
-    // If neither --events nor --logs specified, emit both.
-    let emit_events = events || !logs;
-    let emit_logs = logs || !events;
+    // If no filter flags specified, emit events + logs (not annotations).
+    // Annotations require explicit --annotations.
+    let any_filter = events || logs || annotations;
+    let emit_events = events || !any_filter;
+    let emit_logs = logs || !any_filter;
+    let emit_annotations = annotations;
 
     let mut watchers: HashMap<(String, String), SessionWatcher> = HashMap::new();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
@@ -173,6 +178,7 @@ pub fn cmd_watch(
                         &watcher.namespace,
                         &watcher.session,
                         &watcher.run_id,
+                        "tender.sidecar",
                         "run",
                         run_event_name(meta.status()),
                         run_event_data(meta.status()),
@@ -201,6 +207,7 @@ pub fn cmd_watch(
                         &watcher.namespace,
                         &watcher.session,
                         &watcher.run_id,
+                        "tender.sidecar",
                         "run",
                         run_event_name(meta.status()),
                         run_event_data(meta.status()),
@@ -221,7 +228,7 @@ pub fn cmd_watch(
             }
 
             // Read new log lines.
-            if emit_logs {
+            if emit_logs || emit_annotations {
                 let watcher = watchers.get_mut(&key).unwrap();
                 let log_path = session_dir.path().join("output.log");
                 if log_path.exists() {
@@ -242,22 +249,59 @@ pub fn cmd_watch(
                                             buf.trim_end_matches('\n').trim_end_matches('\r');
                                         if let Some(parsed) = LogLine::parse(trimmed) {
                                             let ts_secs = parsed.timestamp_us as f64 / 1_000_000.0;
-                                            let log_name = if parsed.tag == 'O' {
-                                                "log.stdout"
-                                            } else {
-                                                "log.stderr"
-                                            };
-                                            if !emit_event(
-                                                &mut stdout,
-                                                ts_secs,
-                                                &watcher.namespace,
-                                                &watcher.session,
-                                                &watcher.run_id,
-                                                "log",
-                                                log_name,
-                                                serde_json::json!({"content": parsed.content}),
-                                            ) {
-                                                return Ok(());
+                                            match parsed.tag {
+                                                'O' | 'E' if emit_logs => {
+                                                    let log_name = if parsed.tag == 'O' {
+                                                        "log.stdout"
+                                                    } else {
+                                                        "log.stderr"
+                                                    };
+                                                    if !emit_event(
+                                                        &mut stdout,
+                                                        ts_secs,
+                                                        &watcher.namespace,
+                                                        &watcher.session,
+                                                        &watcher.run_id,
+                                                        "tender.sidecar",
+                                                        "log",
+                                                        log_name,
+                                                        serde_json::json!({"content": parsed.content}),
+                                                    ) {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                'A' if emit_annotations => {
+                                                    if let Ok(ann) =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &parsed.content,
+                                                        )
+                                                    {
+                                                        let source = ann["source"]
+                                                            .as_str()
+                                                            .unwrap_or("unknown")
+                                                            .to_owned();
+                                                        let event_name = ann["event"]
+                                                            .as_str()
+                                                            .unwrap_or("unknown")
+                                                            .to_owned();
+                                                        let name =
+                                                            format!("annotation.{event_name}");
+                                                        if !emit_event(
+                                                            &mut stdout,
+                                                            ts_secs,
+                                                            &watcher.namespace,
+                                                            &watcher.session,
+                                                            &watcher.run_id,
+                                                            &source,
+                                                            "annotation",
+                                                            &name,
+                                                            ann,
+                                                        ) {
+                                                            return Ok(());
+                                                        }
+                                                    }
+                                                }
+                                                _ => {} // skip if not emitting this type
                                             }
                                         }
                                     }

@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 use tender::model::ids::{
     EpochTimestamp, Generation, Namespace, NamespaceError, ProcessIdentity, RunId, SessionName,
-    SessionNameError,
+    SessionNameError, Source, SourceError,
 };
 
 #[test]
@@ -316,4 +316,91 @@ fn namespace_rejects_invalid_on_deserialize() {
 fn namespace_display() {
     let ns = Namespace::new("staging").unwrap();
     assert_eq!(format!("{ns}"), "staging");
+}
+
+// --- Source ---
+
+#[test]
+fn source_valid() {
+    assert!(Source::new("cmux.claude-hook").is_ok());
+    assert!(Source::new("my-tool.pre-commit").is_ok());
+    assert!(Source::new("ci.build-observer").is_ok());
+    assert!(Source::new("a.b").is_ok());
+}
+
+#[test]
+fn source_empty_rejected() {
+    assert!(matches!(Source::new("").unwrap_err(), SourceError::Empty));
+}
+
+#[test]
+fn source_no_dot_rejected() {
+    assert!(matches!(
+        Source::new("nodot").unwrap_err(),
+        SourceError::NoDot
+    ));
+}
+
+#[test]
+fn source_reserved_tender_prefix_rejected() {
+    assert!(matches!(
+        Source::new("tender.sidecar").unwrap_err(),
+        SourceError::ReservedPrefix
+    ));
+    assert!(matches!(
+        Source::new("tender.anything").unwrap_err(),
+        SourceError::ReservedPrefix
+    ));
+}
+
+#[test]
+fn source_invalid_char_rejected() {
+    assert!(matches!(
+        Source::new("a.b/c").unwrap_err(),
+        SourceError::InvalidChar('/')
+    ));
+    assert!(matches!(
+        Source::new("a.b c").unwrap_err(),
+        SourceError::InvalidChar(' ')
+    ));
+}
+
+#[test]
+fn source_empty_segment_rejected() {
+    assert!(matches!(
+        Source::new(".foo").unwrap_err(),
+        SourceError::EmptySegment
+    ));
+    assert!(matches!(
+        Source::new("foo.").unwrap_err(),
+        SourceError::EmptySegment
+    ));
+    assert!(matches!(
+        Source::new("foo..bar").unwrap_err(),
+        SourceError::EmptySegment
+    ));
+}
+
+#[test]
+fn source_too_long_rejected() {
+    let long = format!("a.{}", "b".repeat(127));
+    assert!(matches!(
+        Source::new(&long).unwrap_err(),
+        SourceError::TooLong
+    ));
+}
+
+#[test]
+fn source_serde_roundtrip() {
+    let src = Source::new("test.source").unwrap();
+    let json = serde_json::to_string(&src).unwrap();
+    assert_eq!(json, r#""test.source""#);
+    let parsed: Source = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.as_str(), "test.source");
+}
+
+#[test]
+fn source_display() {
+    let src = Source::new("cmux.hook").unwrap();
+    assert_eq!(format!("{src}"), "cmux.hook");
 }

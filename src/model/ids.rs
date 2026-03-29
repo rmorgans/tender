@@ -274,6 +274,91 @@ impl<'de> Deserialize<'de> for Namespace {
     }
 }
 
+/// Validated annotation source. Dotted string identifying who produced an annotation.
+/// `tender.*` is reserved for internal use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Source(String);
+
+#[derive(Debug, Error)]
+pub enum SourceError {
+    #[error("source cannot be empty")]
+    Empty,
+    #[error("source must contain at least one '.'")]
+    NoDot,
+    #[error("source contains invalid character '{0}' (allowed: ASCII alphanumeric, '.', '-')")]
+    InvalidChar(char),
+    #[error("source cannot start with 'tender.' (reserved)")]
+    ReservedPrefix,
+    #[error("source has empty segment (leading, trailing, or consecutive dots)")]
+    EmptySegment,
+    #[error("source too long (max {MAX_SOURCE_LEN} bytes)")]
+    TooLong,
+}
+
+const MAX_SOURCE_LEN: usize = 128;
+
+impl Source {
+    /// Create a new validated source.
+    ///
+    /// # Errors
+    /// Returns `SourceError` if the source is empty, missing a dot,
+    /// contains invalid characters, or uses the reserved `tender.*` prefix.
+    pub fn new(s: &str) -> Result<Self, SourceError> {
+        Self::validate(s)?;
+        Ok(Self(s.to_owned()))
+    }
+
+    fn validate(s: &str) -> Result<(), SourceError> {
+        if s.is_empty() {
+            return Err(SourceError::Empty);
+        }
+        if s.len() > MAX_SOURCE_LEN {
+            return Err(SourceError::TooLong);
+        }
+        if let Some(c) = s
+            .chars()
+            .find(|c| !c.is_ascii_alphanumeric() && *c != '.' && *c != '-')
+        {
+            return Err(SourceError::InvalidChar(c));
+        }
+        if !s.contains('.') {
+            return Err(SourceError::NoDot);
+        }
+        if s.starts_with('.') || s.ends_with('.') || s.contains("..") {
+            return Err(SourceError::EmptySegment);
+        }
+        if s.starts_with("tender.") {
+            return Err(SourceError::ReservedPrefix);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Serialize for Source {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Source {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::validate(&s).map_err(serde::de::Error::custom)?;
+        Ok(Self(s))
+    }
+}
+
 /// Identity of a running process. PID alone is unsafe due to reuse —
 /// always pair with birth time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

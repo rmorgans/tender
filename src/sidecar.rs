@@ -199,13 +199,27 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             .map_err(|e| anyhow::anyhow!("failed to set CLOEXEC on ready fd: {e}"))?;
     }
 
+    // Build effective env: user-supplied first, then TENDER_* overlay (authoritative).
+    let mut effective_env = meta.launch_spec().env.clone();
+    effective_env.insert(
+        "TENDER_SESSION".to_owned(),
+        meta.session().as_str().to_owned(),
+    );
+    effective_env.insert("TENDER_NAMESPACE".to_owned(), namespace.as_str().to_owned());
+    effective_env.insert("TENDER_RUN_ID".to_owned(), run_id.to_string());
+    effective_env.insert("TENDER_GENERATION".to_owned(), generation.to_string());
+    effective_env.insert(
+        "TENDER_SESSION_DIR".to_owned(),
+        session_dir.to_str().unwrap_or("").to_owned(),
+    );
+
     // --- Spawn child (with SpawnFailed handling inline) ---
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
     let mut child = match Current::spawn_child(
         meta.launch_spec().argv(),
         stdin_piped,
         meta.launch_spec().cwd.as_deref(),
-        &meta.launch_spec().env,
+        &effective_env,
     ) {
         Ok(c) => c,
         Err(e) => {
