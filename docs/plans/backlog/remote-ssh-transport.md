@@ -1,3 +1,13 @@
+---
+id: backlog-03
+title: "Remote Backend And SSH Transport"
+created: 2026-03-17
+depends_on:
+  - frontlog-01
+  - frontlog-02
+links: []
+---
+
 # Remote Backend And SSH Transport
 
 Add remote execution without introducing a second lifecycle model.

@@ -1,3 +1,11 @@
+---
+id: backlog-01
+title: "Windows Full Backend"
+created: 2026-03-17
+depends_on: []
+links: []
+---
+
 # Windows Full Backend
 
 Complete the Windows platform implementation started in Phase 2A.

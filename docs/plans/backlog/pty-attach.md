@@ -1,3 +1,13 @@
+---
+id: backlog-04
+title: "PTY Attach — Human Escape Hatch"
+created: 2026-03-17
+depends_on:
+  - frontlog-01
+  - frontlog-02
+links: []
+---
+
 # PTY Attach — Human Escape Hatch
 
 Let humans take over when agents can't handle it.

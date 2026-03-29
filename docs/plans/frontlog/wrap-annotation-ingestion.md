@@ -1,3 +1,11 @@
+---
+id: frontlog-02
+title: "Wrap — Transparent Annotation Ingestion"
+created: 2026-03-17
+depends_on: []
+links: []
+---
+
 # Wrap — Transparent Annotation Ingestion
 
 Tap agent hook events without modifying agents or hook scripts.
@@ -53,8 +61,7 @@ If internal `_emit_annotation` is ever needed (SDK, trusted adapters), it stays 
 
 ## Depends On
 
-- Phase 2B complete (namespace, watch, event envelope)
-- Annotation event kind support in watch (`--annotations` flag)
+All dependencies are satisfied (Phase 2B and wrap are complete).
 
 ## exec: wrap applied to supervised shells
 

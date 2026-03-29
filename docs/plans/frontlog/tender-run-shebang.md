@@ -1,3 +1,11 @@
+---
+id: frontlog-01
+title: "tender run — Supervised Script Shebang"
+created: 2026-03-17
+depends_on: []
+links: []
+---
+
 # tender run — Supervised Script Shebang
 
 Turn any script into a supervised run by changing the shebang.
@@ -62,11 +70,7 @@ CLI flags override directives. Directives override defaults.
 
 ## Depends On
 
-- Phase 2B Slice 0 (launch fidelity — cwd, env)
-- Phase 2B Slice 1 (namespace)
-- Phase 2B Slice 2 (on-exit)
-
-Does NOT need watch or wrap. Can ship immediately after Phase 2B core slices.
+All dependencies are satisfied (Phase 2B slices 0-2 are complete).
 
 ## Why Frontlog
 
