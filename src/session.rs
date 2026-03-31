@@ -260,8 +260,13 @@ pub fn write_meta_atomic(session: &SessionDir, meta: &Meta) -> Result<(), Sessio
 
     // Fsync the parent directory to ensure the directory entry update is durable.
     // Without this, the rename could be lost on power failure.
-    let dir = File::open(session.path())?;
-    dir.sync_all()?;
+    // On Windows, FlushFileBuffers on a directory handle returns ACCESS_DENIED,
+    // and NTFS metadata updates from rename are journal-durable without explicit fsync.
+    #[cfg(unix)]
+    {
+        let dir = File::open(session.path())?;
+        dir.sync_all()?;
+    }
 
     Ok(())
 }
