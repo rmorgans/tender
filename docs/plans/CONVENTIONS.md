@@ -1,66 +1,54 @@
-# Docs Conventions
+# Plan Conventions
 
-## Work tracking
-
-Work items live in `docs/plans/frontlog/` and `docs/plans/backlog/`. The filesystem is the index.
+## Directory layout
 
 ```
 docs/plans/
-├── frontlog/          # active queue — semantic slug filenames
-│   ├── tender-run-shebang.md
-│   └── wrap-annotation-ingestion.md
-├── backlog/           # deferred — semantic slug or date-slugged
-│   ├── windows-full-backend.md
-│   └── pty-attach.md
-├── completed/         # archived completed items
+├── README.md
+├── CONVENTIONS.md
+├── active/          # ordered current work — numbered prefix filenames
+├── backlog/         # unordered future work — slug filenames
+├── completed/       # archived done work — date-prefixed filenames
+└── specs/           # long-lived design docs (not queue items)
 ```
 
-### Naming
+## Naming
 
 | Location | Naming | Example |
 |----------|--------|---------|
-| `frontlog/` | Semantic slug or date-prefixed slug | `tender-run-shebang.md` or `2026-03-28-wrap.md` |
-| `backlog/` | Semantic slug or date-prefixed slug | `windows-full-backend.md` or `2026-03-14-name.md` |
-| `completed/` | Date-prefixed slug | `2026-03-29-windows-child-lifecycle.md` |
+| `active/` | `NN_slug.md` — number sets priority | `00_windows-full-backend.md` |
+| `backlog/` | `slug.md` | `pty-attach.md` |
+| `completed/` | `YYYY-MM-DD-slug.md` | `2026-03-28-wrap.md` |
+| `specs/` | `slug.md` | `tender-agent-process-sitter.md` |
 
-Ordering is tracked in `README.md`, not in filenames. Filenames are stable slugs.
+Priority lives in filenames. `ls active/` is the ordered queue — no README table needed for ordering.
 
-### Frontmatter schema
+## Frontmatter
 
-Every work item has YAML frontmatter:
+Minimal. Only machine-useful fields:
 
 ```yaml
 ---
-id: run-shebang                   # semantic, never changes on reorder/archive
-title: Short Title
-created: 2026-03-17
-closed:                           # date when moved to completed/
-depends_on: []                    # stable ids, e.g. [run-shebang]
-links: []                         # relative paths to related docs
+id: windows-full-backend       # semantic, never changes
+depends_on: []                  # stable ids
+links:                          # relative paths to related docs
+  - ../completed/windows-full-backend.md
 ---
 ```
 
-- **No `status:` field.** Directory placement is the status.
-- **Semantic ids** — not queue numbers. `run-shebang` not `frontlog-01`.
-- **`depends_on`** references stable ids only — not prose like "Phase 2B complete".
-- **One file per item.** Card + implementation plan in the same file.
+No `title` (heading is the title), no `created` (git history), no `closed` (archive location).
 
-### Lifecycle
+## Lifecycle
 
-1. New work → create in `frontlog/` with semantic slug filename
-2. Deferred work → create in `backlog/`
-3. Completed → `git mv` to `completed/`, set `closed:` date in frontmatter
+1. New work → create in `active/` with numbered prefix
+2. Deferred work → create in `backlog/` with slug filename
+3. Completed → `git mv` to `completed/`, add date prefix
+4. Reorder → rename number prefix (e.g. `10_` → `05_`)
 
-### Prose dependency sections
+## Dependency references
 
-If a plan body has a "Depends On" section, it must reference stable IDs from frontmatter, not phase labels or prose descriptions. If all dependencies are satisfied, say so explicitly.
+`depends_on` uses stable `id` values only — not prose, not phase labels.
 
 ## This pattern is shared
 
-The same frontmatter schema is used across:
-- `tender` (this repo) — uses `completed/` for archives
-- `rick--edge-platform` — uses `frontlog/done/` for archives
-- `rick--machine-learning`
-- `rick--starling-edr`
-
-File layout varies per repo; the frontmatter contract is what's shared.
+Same frontmatter schema across: tender, edge-platform, machine-learning, starling-edr. File layout varies per repo.

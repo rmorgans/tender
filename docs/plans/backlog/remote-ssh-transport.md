@@ -1,8 +1,5 @@
 ---
 id: remote-ssh-transport
-title: "Remote Backend And SSH Transport"
-created: 2026-03-17
-closed:
 depends_on:
   - run-shebang
   - wrap-annotation-ingestion

@@ -1,8 +1,5 @@
 ---
 id: windows-full-backend
-title: "Windows Full Backend"
-created: 2026-03-30
-closed:
 depends_on: []
 links:
   - ../completed/windows-full-backend.md

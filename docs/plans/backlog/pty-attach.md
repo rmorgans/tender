@@ -1,8 +1,5 @@
 ---
 id: pty-attach
-title: "PTY Attach — Human Escape Hatch"
-created: 2026-03-17
-closed:
 depends_on:
   - run-shebang
   - wrap-annotation-ingestion
