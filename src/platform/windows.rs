@@ -308,10 +308,38 @@ impl Platform for WindowsPlatform {
         Ok(unsafe { File::from_raw_handle(handle as *mut _) })
     }
 
-    fn seal_ready_fd(writer: &File) -> io::Result<()> {
-        // Mark the ready HANDLE as non-inheritable so the child process
-        // doesn't hold the write end open (which would block the CLI's read).
-        set_handle_inheritable(writer.as_raw_handle() as *mut _, false)
+    fn seal_ready_fd(writer: File) -> io::Result<File> {
+        // Replace the inheritable HANDLE with a non-inheritable duplicate.
+        // Takes ownership of the old File (closing the inheritable handle)
+        // and returns a new File wrapping a non-inheritable copy.
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let old_handle = writer.into_raw_handle() as *mut _;
+        let current_process = unsafe { GetCurrentProcess() };
+        let mut new_handle: *mut core::ffi::c_void = std::ptr::null_mut();
+
+        let ret = unsafe {
+            DuplicateHandle(
+                current_process,
+                old_handle,
+                current_process,
+                &mut new_handle,
+                0,    // ignored with DUPLICATE_SAME_ACCESS
+                0,    // bInheritHandle = FALSE
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+
+        // Close the original inheritable handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(old_handle) };
+
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: new_handle is a valid, non-inheritable duplicate.
+        Ok(unsafe { File::from_raw_handle(new_handle) })
     }
 }
 

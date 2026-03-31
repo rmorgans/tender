@@ -193,7 +193,7 @@ pub trait Platform {
     fn ready_writer_from_env() -> io::Result<Self::ReadyWriter>;
 
     /// Prevent the ready channel from leaking to the child process.
-    /// Unix: set CLOEXEC on the ready fd.
-    /// Windows: no-op (HANDLE_LIST already controls inheritance).
-    fn seal_ready_fd(writer: &Self::ReadyWriter) -> io::Result<()>;
+    /// Unix: set CLOEXEC on the ready fd (returns the same file).
+    /// Windows: replace the inheritable HANDLE with a non-inheritable duplicate.
+    fn seal_ready_fd(writer: Self::ReadyWriter) -> io::Result<Self::ReadyWriter>;
 }

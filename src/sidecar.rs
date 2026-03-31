@@ -194,9 +194,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     // The sidecar inherited this fd with CLOEXEC cleared (so it survived the sidecar's exec),
     // but the child must NOT hold the pipe open -- otherwise the CLI's read_to_string blocks
     // until the child exits, defeating the readiness handshake.
-    if let Some(writer) = ready.as_ref() {
-        Current::seal_ready_fd(writer)
-            .map_err(|e| anyhow::anyhow!("failed to set CLOEXEC on ready fd: {e}"))?;
+    if let Some(writer) = ready.take() {
+        let sealed = Current::seal_ready_fd(writer)
+            .map_err(|e| anyhow::anyhow!("failed to seal ready fd: {e}"))?;
+        *ready = Some(sealed);
     }
 
     // Build effective env: user-supplied first, then TENDER_* overlay (authoritative).
