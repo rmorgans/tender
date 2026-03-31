@@ -65,30 +65,10 @@ impl Platform for WindowsPlatform {
         session_dir: &Path,
         ready_writer: &File,
     ) -> io::Result<u32> {
-        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
-
-        let handle_value = ready_writer.as_raw_handle() as usize;
-
-        let mut cmd = Command::new(tender_bin);
-        cmd.arg("_sidecar")
-            .arg("--session-dir")
-            .arg(session_dir)
-            .env("TENDER_READY_HANDLE", handle_value.to_string());
-
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-
-        // DETACHED_PROCESS: sidecar has no console initially. It calls
-        // prepare_sidecar_console() in its own startup to AllocConsole
-        // + hide window before spawning children. See plan Decision #3.
-        //
-        // CREATE_NEW_PROCESS_GROUP: own process group, detached from
-        // parent's signal routing.
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-
-        let child = cmd.spawn()?;
-        Ok(child.id())
+        // Raw CreateProcessW with STARTUPINFOEXW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+        // This is the only way to inherit exactly one handle (the ready pipe)
+        // without leaking every other inheritable handle from the parent.
+        spawn_sidecar_raw(tender_bin, session_dir, ready_writer)
     }
 
     fn ready_channel() -> io::Result<(File, File)> {
@@ -385,6 +365,141 @@ fn set_handle_inheritable(
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+// --- Sidecar spawn (raw CreateProcessW) ---
+
+/// Spawn the sidecar with explicit handle whitelisting.
+///
+/// Uses STARTUPINFOEXW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the sidecar
+/// inherits ONLY the ready pipe write handle. Without this, CreateProcessW
+/// with bInheritHandles=TRUE leaks every inheritable handle from the parent
+/// (stdout/stderr pipes from test harnesses, SSH sessions, etc.).
+///
+/// Requires Windows 7+ (PROC_THREAD_ATTRIBUTE_HANDLE_LIST support).
+fn spawn_sidecar_raw(
+    tender_bin: &Path,
+    session_dir: &Path,
+    ready_writer: &File,
+) -> io::Result<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        UpdateProcThreadAttribute, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+    };
+
+    let ready_handle: HANDLE = ready_writer.as_raw_handle() as *mut _;
+
+    // --- Build command line ---
+    // CreateProcessW wants a single mutable wide string for the command line.
+    let cmdline = format!(
+        "\"{}\" _sidecar --session-dir \"{}\"",
+        tender_bin.display(),
+        session_dir.display(),
+    );
+    let mut cmdline_wide: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // --- Build environment block ---
+    // Unicode environment block: sorted KEY=VALUE\0 pairs, terminated by \0.
+    let mut env_vars: Vec<(String, String)> = std::env::vars().collect();
+    // Add/override the ready handle env var.
+    let handle_value = ready_handle as usize;
+    let ready_key = "TENDER_READY_HANDLE";
+    if let Some(entry) = env_vars.iter_mut().find(|(k, _)| k == ready_key) {
+        entry.1 = handle_value.to_string();
+    } else {
+        env_vars.push((ready_key.to_string(), handle_value.to_string()));
+    }
+    // Sort case-insensitively (Windows requirement for environment blocks).
+    env_vars.sort_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()));
+    let mut env_block: Vec<u16> = Vec::new();
+    for (k, v) in &env_vars {
+        let entry = format!("{k}={v}");
+        env_block.extend(entry.encode_utf16());
+        env_block.push(0);
+    }
+    env_block.push(0); // double-null terminator
+
+    // --- Initialize proc thread attribute list ---
+    // First call: query required size.
+    let mut attr_size: usize = 0;
+    unsafe {
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
+    }
+    // attr_size now holds the required allocation size.
+    let mut attr_buf: Vec<u8> = vec![0u8; attr_size];
+    let attr_list = attr_buf.as_mut_ptr() as *mut _;
+
+    let ret = unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Set the handle list: only the ready pipe write handle.
+    let mut handles: [HANDLE; 1] = [ready_handle];
+    let ret = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            handles.as_mut_ptr().cast(),
+            std::mem::size_of_val(&handles),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if ret == 0 {
+        let err = io::Error::last_os_error();
+        unsafe { DeleteProcThreadAttributeList(attr_list) };
+        return Err(err);
+    }
+
+    // --- Build STARTUPINFOEXW ---
+    let mut si_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    si_ex.lpAttributeList = attr_list;
+
+    // --- Create process ---
+    let creation_flags = CREATE_NEW_PROCESS_GROUP
+        | DETACHED_PROCESS
+        | EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_UNICODE_ENVIRONMENT;
+
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    let ret = unsafe {
+        CreateProcessW(
+            std::ptr::null(),                      // lpApplicationName (use cmdline)
+            cmdline_wide.as_mut_ptr(),             // lpCommandLine
+            std::ptr::null(),                      // lpProcessAttributes
+            std::ptr::null(),                      // lpThreadAttributes
+            1,                                     // bInheritHandles = TRUE
+            creation_flags,                        // dwCreationFlags
+            env_block.as_ptr().cast(),             // lpEnvironment
+            std::ptr::null(),                      // lpCurrentDirectory (inherit)
+            &si_ex.StartupInfo,                    // lpStartupInfo
+            &mut pi,                               // lpProcessInformation
+        )
+    };
+
+    unsafe { DeleteProcThreadAttributeList(attr_list) };
+
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let pid = pi.dwProcessId;
+
+    // Close process and thread handles — we don't need them.
+    // The sidecar runs independently; we track it by PID.
+    unsafe {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+
+    Ok(pid)
 }
 
 // --- Job Object helpers ---
