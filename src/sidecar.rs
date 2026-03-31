@@ -39,7 +39,7 @@ pub fn run(session_dir: PathBuf, ready_writer: ReadyWriter) -> anyhow::Result<()
     if let Err(ref e) = result {
         // Only signal error if the file hasn't been consumed yet
         if let Some(file) = ready.take() {
-            let _ = Current::write_ready_signal(file, &format!("ERROR:{e:#}\n"));
+            let _ = Current::write_ready_signal(file, &format!("ERROR:[run_inner] {e:#}\n"));
         }
     }
 
