@@ -349,7 +349,7 @@ fn set_handle_inheritable(
     inheritable: bool,
 ) -> io::Result<()> {
     use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
-    use windows_sys::Win32::Storage::FileSystem::SetHandleInformation;
+    use windows_sys::Win32::Foundation::SetHandleInformation;
 
     let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
     let ret = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
