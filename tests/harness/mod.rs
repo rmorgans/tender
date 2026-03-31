@@ -8,6 +8,16 @@ use tempfile::TempDir;
 pub fn tender(root: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("tender").expect("tender binary not found");
     cmd.env("HOME", root.path());
+    // On Windows, ensure Git-for-Windows coreutils (echo, sleep, true, cat)
+    // are on PATH so tests can spawn Unix-style commands.
+    #[cfg(windows)]
+    {
+        let git_usr_bin = std::path::Path::new(r"C:\Program Files\Git\usr\bin");
+        if git_usr_bin.exists() {
+            let path = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{};{path}", git_usr_bin.display()));
+        }
+    }
     cmd
 }
 
