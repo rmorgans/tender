@@ -131,7 +131,8 @@ fn collect_warnings(session_dir: &Path, stdin_errors: &Arc<Mutex<Vec<String>>>) 
 
 fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Result<()> {
     // --- Setup: lock, read spec, create meta ---
-    let sidecar_identity = Current::self_identity()?;
+    let sidecar_identity = Current::self_identity()
+        .context("self_identity failed")?;
 
     let session_name_str = session_dir
         .file_name()
@@ -153,9 +154,11 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         .parent()
         .ok_or_else(|| anyhow::anyhow!("namespace dir has no parent (root)"))?;
     let session_root = SessionRoot::new(root.to_path_buf());
-    let session = session::open_raw(&session_root, &namespace, &session_name)?;
+    let session = session::open_raw(&session_root, &namespace, &session_name)
+        .context("open_raw failed")?;
 
-    let lock = LockGuard::try_acquire(&session)?;
+    let lock = LockGuard::try_acquire(&session)
+        .context("lock acquire failed")?;
 
     // Read launch spec
     let spec_path = session_dir.join("launch_spec.json");
