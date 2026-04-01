@@ -17,6 +17,41 @@ pub fn cmd_start(
     on_exit: &[String],
     namespace: &Namespace,
 ) -> anyhow::Result<()> {
+    let (meta, _session) = launch_session(
+        name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, namespace,
+    )?;
+
+    let json = serde_json::to_string_pretty(&meta)?;
+    println!("{json}");
+
+    // Exit non-zero if the child failed to spawn — agents branch on exit code
+    if matches!(
+        meta.status(),
+        tender::model::state::RunStatus::SpawnFailed { .. }
+    ) {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+/// Launch a session: create directory, spawn sidecar, wait for readiness.
+///
+/// Returns the Meta snapshot from the sidecar's ready signal and the SessionDir.
+/// Does not print to stdout or call process::exit — callers decide what to do.
+///
+/// Returns `Ok(None)` for idempotent starts (session already running with same spec).
+pub(crate) fn launch_session(
+    name: &str,
+    cmd: Vec<String>,
+    stdin: bool,
+    replace: bool,
+    timeout: Option<u64>,
+    cwd: Option<&std::path::Path>,
+    env_vars: &[String],
+    on_exit: &[String],
+    namespace: &Namespace,
+) -> anyhow::Result<(tender::model::meta::Meta, session::SessionDir)> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
 
@@ -54,8 +89,17 @@ pub fn cmd_start(
         Ok(s) => s,
         Err(session::SessionError::AlreadyExists(_)) => {
             match try_idempotent_start(&root, namespace, &session_name, &launch_spec)? {
-                None => return Ok(()), // idempotent return printed
-                Some(s) => s,          // orphan cleaned, session re-created
+                None => {
+                    // Idempotent: already running with same spec.
+                    // Re-open and return existing meta.
+                    let existing =
+                        session::open(&root, namespace, &session_name)?.ok_or_else(|| {
+                            anyhow::anyhow!("session vanished during idempotent check")
+                        })?;
+                    let meta = session::read_meta(&existing)?;
+                    return Ok((meta, existing));
+                }
+                Some(s) => s, // orphan cleaned, session re-created
             }
         }
         Err(e) => return Err(e.into()),
@@ -69,7 +113,8 @@ pub fn cmd_start(
         );
     }
 
-    spawn_and_wait_ready(&session, &launch_spec)
+    let meta = spawn_and_wait_ready_inner(&session, &launch_spec)?;
+    Ok((meta, session))
 }
 
 /// Handle `--replace`: kill any existing session and remove its directory.
@@ -159,8 +204,6 @@ fn try_idempotent_start(
     ) {
         // Running -- check spec match for idempotent return
         if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
-            let json = serde_json::to_string_pretty(&existing_meta)?;
-            println!("{json}");
             Ok(None)
         } else {
             anyhow::bail!(
@@ -177,11 +220,11 @@ fn try_idempotent_start(
     }
 }
 
-/// Write launch spec, spawn sidecar, wait for readiness, and print meta JSON.
-fn spawn_and_wait_ready(
+/// Write launch spec, spawn sidecar, wait for readiness, return meta.
+fn spawn_and_wait_ready_inner(
     session: &session::SessionDir,
     launch_spec: &LaunchSpec,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<tender::model::meta::Meta> {
     // Write launch spec for sidecar to read
     let spec_json = serde_json::to_string_pretty(launch_spec)?;
     std::fs::write(session.path().join("launch_spec.json"), &spec_json)?;
@@ -230,16 +273,5 @@ fn spawn_and_wait_ready(
         .trim();
 
     let meta: tender::model::meta::Meta = serde_json::from_str(meta_json)?;
-    let json = serde_json::to_string_pretty(&meta)?;
-    println!("{json}");
-
-    // Exit non-zero if the child failed to spawn -- agents branch on exit code
-    if matches!(
-        meta.status(),
-        tender::model::state::RunStatus::SpawnFailed { .. }
-    ) {
-        std::process::exit(2); // exit code 2 = process error per contract
-    }
-
-    Ok(())
+    Ok(meta)
 }

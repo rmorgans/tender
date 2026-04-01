@@ -44,6 +44,44 @@ enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Run a script as a supervised session
+    Run {
+        /// Script file to run
+        script: PathBuf,
+        /// Interpreter to use (default: bash, or direct if +x)
+        #[arg(long)]
+        shell: Option<String>,
+        /// Return immediately after start (don't wait for exit)
+        #[arg(long, conflicts_with = "foreground")]
+        detach: bool,
+        /// Force foreground mode (overrides #tender: detach directive)
+        #[arg(long, conflicts_with = "detach")]
+        foreground: bool,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Enable stdin pipe for push command
+        #[arg(long)]
+        stdin: bool,
+        /// Replace existing session (kill + restart)
+        #[arg(long)]
+        replace: bool,
+        /// Kill child after N seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Working directory for the child process
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Environment variable override (KEY=VALUE)
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env_vars: Vec<String>,
+        /// Command to run after the child exits (repeatable)
+        #[arg(long = "on-exit", value_name = "COMMAND")]
+        on_exit: Vec<String>,
+        /// Arguments to pass to the script
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Send stdin to a running session's child process
     Push {
         /// Session name
@@ -176,12 +214,22 @@ fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
 }
 
 /// Resolve an optional namespace string into a `Namespace`, defaulting to "default".
+/// Used by commands that always operate in exactly one namespace.
 fn resolve_namespace(namespace: Option<String>) -> anyhow::Result<Namespace> {
     namespace
         .map(|s| Namespace::new(&s))
         .transpose()
         .map(|opt| opt.unwrap_or_else(Namespace::default_namespace))
         .map_err(Into::into)
+}
+
+/// Parse an optional namespace string without defaulting.
+/// Returns `None` when no namespace was provided — meaning varies by command:
+/// "all namespaces" (list/watch/prune) or "defer to directive/default" (run).
+fn parse_optional_namespace(namespace: Option<String>) -> anyhow::Result<Option<Namespace>> {
+    namespace
+        .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
+        .transpose()
 }
 
 fn main() {
@@ -211,6 +259,35 @@ fn main() {
                 &ns,
             )
         }),
+        Commands::Run {
+            script,
+            shell,
+            detach,
+            foreground,
+            namespace,
+            stdin,
+            replace,
+            timeout,
+            cwd,
+            env_vars,
+            on_exit,
+            args,
+        } => parse_optional_namespace(namespace).and_then(|ns| {
+            commands::cmd_run(
+                &script,
+                args,
+                shell,
+                detach,
+                foreground,
+                ns.as_ref(),
+                timeout,
+                stdin,
+                replace,
+                cwd.as_deref(),
+                &env_vars,
+                &on_exit,
+            )
+        }),
         Commands::Push { name, namespace } => {
             resolve_namespace(namespace).and_then(|ns| commands::cmd_push(&name, &ns))
         }
@@ -222,13 +299,9 @@ fn main() {
             namespace,
             force,
         } => resolve_namespace(namespace).and_then(|ns| commands::cmd_kill(&name, force, &ns)),
-        Commands::List { namespace } => match namespace
-            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
-            .transpose()
-        {
-            Ok(ns) => commands::cmd_list(ns.as_ref()),
-            Err(e) => Err(e),
-        },
+        Commands::List { namespace } => {
+            parse_optional_namespace(namespace).and_then(|ns| commands::cmd_list(ns.as_ref()))
+        }
         Commands::Log {
             name,
             namespace,
@@ -250,25 +323,15 @@ fn main() {
             logs,
             annotations,
             from_now,
-        } => match namespace
-            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
-            .transpose()
-        {
-            Ok(ns) => commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now),
-            Err(e) => Err(e),
-        },
+        } => parse_optional_namespace(namespace)
+            .and_then(|ns| commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now)),
         Commands::Prune {
             older_than,
             all,
             namespace,
             dry_run,
-        } => match namespace
-            .map(|s| Namespace::new(&s).map_err(anyhow::Error::from))
-            .transpose()
-        {
-            Ok(ns) => commands::cmd_prune(older_than, all, ns.as_ref(), dry_run),
-            Err(e) => Err(e),
-        },
+        } => parse_optional_namespace(namespace)
+            .and_then(|ns| commands::cmd_prune(older_than, all, ns.as_ref(), dry_run)),
         Commands::Wrap {
             session,
             namespace,
