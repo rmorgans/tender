@@ -134,17 +134,13 @@ pub fn cmd_exec(
 
 fn run_exec(
     session: &SessionDir,
-    _meta: &tender::model::meta::Meta,
+    meta: &tender::model::meta::Meta,
     cmd: &[String],
     token: &str,
     timeout: Option<u64>,
 ) -> anyhow::Result<ExecResult> {
-    let session_name = session
-        .path()
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+    let session_name = meta.session().as_str().to_string();
+    let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
 
     // 1. Capture log cursor
     let log_path = session.path().join("output.log");
@@ -157,6 +153,11 @@ fn run_exec(
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
     let mut writer = loop {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                anyhow::bail!("timeout connecting to stdin transport");
+            }
+        }
         match Current::open_stdin_writer(session.path()) {
             Ok(f) => break f,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
@@ -173,9 +174,6 @@ fn run_exec(
     };
     writer.write_all(framed.as_bytes())?;
     drop(writer);
-
-    // 4. Tail output.log from cursor until sentinel
-    let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
 
     let mut stdout_lines: Vec<String> = Vec::new();
     let mut stderr_lines: Vec<String> = Vec::new();
