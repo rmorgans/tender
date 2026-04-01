@@ -40,7 +40,7 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
         }
     };
 
-    // Write kill_forced marker before force-killing so sidecar can detect it
+    // Write kill_forced marker before killing so sidecar can detect it
     let kill_forced_path = if force {
         let p = session.path().join("kill_forced");
         let _ = std::fs::write(&p, "");
@@ -49,17 +49,45 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
         None
     };
 
-    // Kill the child's process group. Verifies identity first.
+    // Choose kill strategy based on whether the sidecar is alive.
+    // If locked, the sidecar holds the session lock and has the live Job Object
+    // (Windows) or process group context. Signal it via a control file so it
+    // can perform tree-aware kill_child. Fall back to kill_orphan if the sidecar
+    // is gone or doesn't respond in time.
+    let sidecar_alive = session::is_locked(&session).unwrap_or(false);
+
+    if sidecar_alive {
+        // Write kill request for the sidecar to pick up.
+        let request = serde_json::json!({ "force": force });
+        let kill_request_path = session.path().join("kill_request");
+        std::fs::write(&kill_request_path, request.to_string())?;
+
+        // Give the sidecar time to act (up to 3 seconds).
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Ok(m) = session::read_meta(&session) {
+                if m.status().is_terminal() {
+                    let json = serde_json::to_string_pretty(&m)?;
+                    println!("{json}");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Sidecar didn't act in time -- fall through to direct kill.
+    }
+
+    // Direct kill: sidecar is gone or unresponsive.
     if let Err(e) = Current::kill_orphan(&child, force) {
-        // Clean up marker on error -- don't leave a stale marker that could
-        // mislabel a later exit as KilledForced
+        // Clean up markers on error
         if let Some(ref p) = kill_forced_path {
             let _ = std::fs::remove_file(p);
         }
+        let _ = std::fs::remove_file(session.path().join("kill_request"));
         return Err(e.into());
     }
 
-    // Wait briefly for sidecar to write terminal state, then re-read
+    // Wait for sidecar to write terminal state (up to 5 seconds)
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(m) = session::read_meta(&session) {
