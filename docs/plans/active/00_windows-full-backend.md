@@ -38,7 +38,7 @@ links:
 
 **Branch:** `windows-full-backend` (pushed to origin)
 
-**Slice 1 — Tasks 1-7 complete, Tasks 8-9 blocked on rick-windows.**
+**Slice 1 — Complete. Verified on Windows.**
 
 | Task | Commit | Status |
 |------|--------|--------|
@@ -49,13 +49,43 @@ links:
 | 5. seal_ready_fd | `9712c42` | Done |
 | 6. spawn_sidecar | `9712c42` | Done |
 | 7. prepare_sidecar_console | `2124564` | Done |
-| 8. sidecar graceful-kill test | — | Blocked: rick-windows offline |
-| 9. Slice 1 verification | — | Blocked: rick-windows offline |
+| 8. sidecar graceful-kill test | `3f8cc1f` | Done |
+| 9. Slice 1 verification | `d5b7138` | Done |
 
-**macOS verification:** All tests green (no regressions). `cargo check` clean.
+**Additional work landed during Slice 1 verification:**
 
-**To resume:** SSH to rick-windows (`rick@100.90.60.48`), then:
+| Fix | Commit | Description |
+|-----|--------|-------------|
+| SetHandleInformation import | `cd02c01` | Was in wrong module |
+| Directory fsync | `26f4ec9` | `sync_all()` on dir returns ACCESS_DENIED on Windows; now `#[cfg(unix)]` |
+| Git-for-Windows PATH | `1ff3803` | Test harness adds coreutils to PATH |
+| seal_ready_fd DuplicateHandle | `cfe6480` | Replace inheritable handle with non-inheritable duplicate |
+| STARTUPINFOEXW handle whitelist | `2138940` | Raw CreateProcessW with PROC_THREAD_ATTRIBUTE_HANDLE_LIST for sidecar spawn |
+| kill_orphan | `3f8cc1f` | Identity-verified single-process termination for orphans |
+| Sidecar-mediated kill | `3cfc035` | CLI kill signals sidecar via kill_request file; sidecar uses Job Object |
+| Kill review fixes | `d5b7138` | run_id scoping, 8s timeout alignment, atomic writes |
+| Test mutex de-poisoning | `3f8cc1f` | unwrap_or_else across 14 test files |
+| Plans restructure | `8455294` | active/backlog/completed/specs layout |
+
+**Windows test results (226/237 pass, 11 fail):**
+
+| Category | Tests | Notes |
+|----------|-------|-------|
+| Passing | 226 | All Slice 1 functionality works |
+| Slice 2 (push) | 6 fail | Expected — stdin transport not implemented |
+| cli_on_exit | 4 fail | To investigate — on-exit callbacks on Windows |
+| cli_start_idempotent | 1 fail | `start_with_cwd` — Windows path handling |
+
+**macOS:** All 234 tests green.
+
+**To resume — next work items:**
+1. Investigate cli_on_exit failures (4 tests)
+2. Investigate `start_with_cwd_child_runs_in_requested_directory` (1 test)
+3. Slice 2: stdin transport via named pipes
+
 ```bash
+# Connect to Windows for testing:
+ssh rick@100.90.60.48
 cd ~/tender
 git fetch origin
 git checkout windows-full-backend
