@@ -15,10 +15,12 @@ pub fn cmd_start(
     cwd: Option<&std::path::Path>,
     env_vars: &[String],
     on_exit: &[String],
+    after: &[String],
+    any_exit: bool,
     namespace: &Namespace,
 ) -> anyhow::Result<()> {
     let (meta, _session) = launch_session(
-        name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, namespace,
+        name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, after, any_exit, namespace,
     )?;
 
     let json = serde_json::to_string_pretty(&meta)?;
@@ -51,6 +53,8 @@ pub(crate) fn launch_session(
     cwd: Option<&std::path::Path>,
     env_vars: &[String],
     on_exit: &[String],
+    after: &[String],
+    any_exit: bool,
     namespace: &Namespace,
 ) -> anyhow::Result<(tender::model::meta::Meta, session::SessionDir)> {
     let session_name = SessionName::new(name)?;
@@ -84,6 +88,23 @@ pub(crate) fn launch_session(
         launch_spec.env.insert(key.to_string(), value.to_string());
     }
     launch_spec.on_exit = on_exit.to_vec();
+
+    // Resolve --after: capture each dependency's run_id at bind time
+    if !after.is_empty() {
+        for dep_name in after {
+            let dep_session_name = SessionName::new(dep_name)?;
+            let dep_session = session::open(&root, namespace, &dep_session_name)?
+                .ok_or_else(|| anyhow::anyhow!("--after: session not found: {dep_name}"))?;
+            let dep_meta = session::read_meta(&dep_session)?;
+            launch_spec
+                .after
+                .push(tender::model::spec::DependencyBinding {
+                    session: dep_session_name,
+                    run_id: dep_meta.run_id(),
+                });
+        }
+        launch_spec.after_any_exit = any_exit;
+    }
 
     // Create session directory (with idempotent handling)
     let session = match session::create(&root, namespace, &session_name) {

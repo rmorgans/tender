@@ -22,6 +22,8 @@ pub fn cmd_run(
     cwd: Option<&Path>,
     env_vars: &[String],
     on_exit: &[String],
+    after: &[String],
+    any_exit: bool,
 ) -> anyhow::Result<()> {
     // --- Validate script file ---
     anyhow::ensure!(script.exists(), "script not found: {}", script.display());
@@ -58,6 +60,8 @@ pub fn cmd_run(
         cwd,
         env_vars,
         on_exit,
+        after,
+        any_exit,
     );
 
     // --foreground overrides #tender: detach. --detach forces detach.
@@ -80,6 +84,8 @@ pub fn cmd_run(
         effective.cwd.as_deref(),
         &effective.env_vars,
         &effective.on_exit,
+        &effective.after,
+        effective.any_exit,
         &effective.namespace,
     )?;
 
@@ -218,6 +224,8 @@ struct EffectiveOptions {
     cwd: Option<PathBuf>,
     env_vars: Vec<String>,
     on_exit: Vec<String>,
+    after: Vec<String>,
+    any_exit: bool,
 }
 
 fn merge_directives_with_cli(
@@ -229,6 +237,8 @@ fn merge_directives_with_cli(
     cli_cwd: Option<&Path>,
     cli_env_vars: &[String],
     cli_on_exit: &[String],
+    cli_after: &[String],
+    cli_any_exit: bool,
 ) -> EffectiveOptions {
     // CLI namespace (pre-validated in main.rs) overrides directive namespace
     // (pre-validated in parse_directives). Fall back to default if neither set.
@@ -260,6 +270,10 @@ fn merge_directives_with_cli(
         cli_on_exit.to_vec()
     };
 
+    // --after and --any-exit: CLI-only, no directive equivalent
+    let after = cli_after.to_vec();
+    let any_exit = cli_any_exit;
+
     EffectiveOptions {
         namespace,
         timeout,
@@ -268,5 +282,7 @@ fn merge_directives_with_cli(
         cwd,
         env_vars,
         on_exit,
+        after,
+        any_exit,
     }
 }

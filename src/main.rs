@@ -40,6 +40,12 @@ enum Commands {
         /// Command to run after the child exits (repeatable)
         #[arg(long = "on-exit", value_name = "COMMAND")]
         on_exit: Vec<String>,
+        /// Wait for session(s) to exit before starting (repeatable)
+        #[arg(long = "after", value_name = "SESSION")]
+        after: Vec<String>,
+        /// Proceed even if dependency exits non-zero
+        #[arg(long = "any-exit")]
+        any_exit: bool,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
@@ -78,6 +84,12 @@ enum Commands {
         /// Command to run after the child exits (repeatable)
         #[arg(long = "on-exit", value_name = "COMMAND")]
         on_exit: Vec<String>,
+        /// Wait for session(s) to exit before starting (repeatable)
+        #[arg(long = "after", value_name = "SESSION")]
+        after: Vec<String>,
+        /// Proceed even if dependency exits non-zero
+        #[arg(long = "any-exit")]
+        any_exit: bool,
         /// Arguments to pass to the script
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -246,6 +258,8 @@ fn main() {
             cwd,
             env_vars,
             on_exit,
+            after,
+            any_exit,
         } => resolve_namespace(namespace).and_then(|ns| {
             commands::cmd_start(
                 &name,
@@ -256,6 +270,8 @@ fn main() {
                 cwd.as_deref(),
                 &env_vars,
                 &on_exit,
+                &after,
+                any_exit,
                 &ns,
             )
         }),
@@ -271,6 +287,8 @@ fn main() {
             cwd,
             env_vars,
             on_exit,
+            after,
+            any_exit,
             args,
         } => parse_optional_namespace(namespace).and_then(|ns| {
             commands::cmd_run(
@@ -286,6 +304,8 @@ fn main() {
                 cwd.as_deref(),
                 &env_vars,
                 &on_exit,
+                &after,
+                any_exit,
             )
         }),
         Commands::Push { name, namespace } => {
