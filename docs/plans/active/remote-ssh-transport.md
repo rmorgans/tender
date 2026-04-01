@@ -6,6 +6,10 @@ links: []
 
 # Remote Backend And SSH Transport
 
+> **Slice one scope:** POSIX remote hosts only. Windows remote hosts
+> (PowerShell, cmd.exe) are deferred — the POSIX shell quoting strategy
+> used in this slice does not apply to Windows remote shells.
+
 Add remote execution without introducing a second lifecycle model.
 
 ## Goal
