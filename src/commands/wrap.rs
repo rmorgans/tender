@@ -236,12 +236,7 @@ fn write_annotation_line(log_path: &std::path::Path, line: &str) -> io::Result<(
 }
 
 fn timestamp_micros() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let micros = duration.subsec_micros();
-    format!("{secs}.{micros:06}")
+    tender::annotation::timestamp_micros()
 }
 
 #[cfg(unix)]

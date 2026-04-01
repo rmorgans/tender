@@ -1,3 +1,4 @@
+pub mod annotation;
 pub mod directive;
 pub mod exec_frame;
 pub mod log;

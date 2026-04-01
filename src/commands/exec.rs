@@ -121,21 +121,24 @@ pub fn cmd_exec(
     // Write annotation event to output.log
     {
         let run_id = meta.run_id().to_string();
+        let hook_stdin = shell_words::join(&cmd);
         let annotation = serde_json::json!({
             "source": "agent.exec",
             "event": "exec",
             "run_id": run_id,
             "data": {
+                "hook_stdin": hook_stdin,
                 "command": &cmd,
                 "hook_stdout": &result.stdout,
                 "hook_stderr": &result.stderr,
                 "hook_exit_code": result.exit_code,
                 "cwd_after": &result.cwd_after,
+                "sentinel": format!("TENDER_EXEC_{token}"),
                 "timed_out": result.timed_out,
                 "truncated": result.truncated,
             }
         });
-        let ts = timestamp_micros();
+        let ts = tender::annotation::timestamp_micros();
         let json_str = serde_json::to_string(&annotation)?;
         let line = format!("{ts} A {json_str}\n");
         let log_path = session.path().join("output.log");
@@ -143,7 +146,6 @@ pub fn cmd_exec(
             .create(true)
             .append(true)
             .open(&log_path)?;
-        use std::io::Write as _;
         file.write_all(line.as_bytes())?;
     }
 
@@ -289,14 +291,4 @@ fn run_exec(
             }
         }
     }
-}
-
-fn timestamp_micros() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let micros = duration.subsec_micros();
-    format!("{secs}.{micros:06}")
 }
