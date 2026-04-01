@@ -1,6 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::Context;
@@ -102,18 +100,23 @@ pub fn cmd_run(
     foreground_wait(&session)
 }
 
-/// Foreground mode: spawn a log-follow thread, poll for terminal state,
-/// then propagate the child's actual exit code.
+/// Foreground mode: follow log until terminal, then propagate exit code.
+///
+/// The follow thread checks meta.json for terminal state on each poll cycle.
+/// When it sees terminal state, it drains remaining output and exits. The main
+/// thread then reads the final meta.json to extract the exit code.
+///
+/// This avoids the race where a separate terminal-state detector signals stop
+/// before the sidecar has flushed its last log lines.
 fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
     let log_path = session.path().join("output.log");
     let meta_path = session.path().join("meta.json");
+    let meta_path_clone = meta_path.clone();
 
-    // Shared stop flag: main thread sets it when terminal state is detected,
-    // follow thread checks it on each poll.
-    let stopped = Arc::new(AtomicBool::new(false));
-    let stopped_clone = Arc::clone(&stopped);
-
-    // Spawn log-follow thread.
+    // The follow thread handles both output streaming and terminal detection.
+    // Its should_stop closure reads meta.json directly — same as cmd_log --follow.
+    // This means the follow thread exits only after it has drained all output
+    // written before the terminal state, avoiding the flush race.
     let follow_handle = thread::spawn(move || {
         let query = LogQuery {
             tail: None,
@@ -121,35 +124,32 @@ fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
             since_us: Some(0), // Show all output from the beginning, don't seek to EOF.
             raw: true,
         };
-        let should_stop = || stopped_clone.load(Ordering::Relaxed);
+        let should_stop = || {
+            std::fs::read_to_string(&meta_path_clone)
+                .ok()
+                .and_then(|c| serde_json::from_str::<tender::model::meta::Meta>(&c).ok())
+                .map(|m| m.status().is_terminal())
+                .unwrap_or(false)
+        };
         let mut stdout = std::io::stdout().lock();
         let _ = follow_log(&log_path, &query, &mut stdout, should_stop);
     });
 
-    // Main thread: poll meta.json for terminal state.
-    let meta = loop {
-        if let Ok(content) = std::fs::read_to_string(&meta_path) {
-            if let Ok(mut meta) = serde_json::from_str::<tender::model::meta::Meta>(&content) {
-                // Reconciliation: non-terminal + lock not held -> sidecar crashed
-                if !meta.status().is_terminal()
-                    && !session::is_locked(session).unwrap_or(true)
-                    && meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_ok()
-                {
-                    let _ = session::write_meta_atomic(session, &meta);
-                }
-
-                if meta.status().is_terminal() {
-                    break meta;
-                }
-            }
-        }
-
-        thread::sleep(std::time::Duration::from_millis(200));
-    };
-
-    // Signal the follow thread to stop, then wait for it to drain.
-    stopped.store(true, Ordering::Relaxed);
+    // Wait for the follow thread to finish (it exits when terminal + no more data).
     let _ = follow_handle.join();
+
+    // Now read the final meta.json for exit code. The follow thread already
+    // confirmed terminal state, so this read should succeed.
+    let content = std::fs::read_to_string(&meta_path)?;
+    let mut meta: tender::model::meta::Meta = serde_json::from_str(&content)?;
+
+    // Reconciliation: if the sidecar crashed between the follow thread's last
+    // check and now (unlikely but possible).
+    if !meta.status().is_terminal() && !session::is_locked(session).unwrap_or(true) {
+        if meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_ok() {
+            let _ = session::write_meta_atomic(session, &meta);
+        }
+    }
 
     // Propagate exit code.
     match meta.status() {

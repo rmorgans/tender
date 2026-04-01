@@ -215,9 +215,13 @@ pub fn derive_session_name(script_path: &Path) -> Result<String, String> {
     // Strip leading underscores and hyphens (from dot-prefixed files like .hidden.sh).
     name = name.trim_start_matches(['_', '-']).to_string();
 
-    // Truncate to 255 chars.
+    // Truncate to 255 bytes at a char boundary (avoids panic on multi-byte UTF-8).
     if name.len() > 255 {
-        name.truncate(255);
+        let mut end = 255;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
     }
 
     if name.is_empty() {
@@ -416,6 +420,16 @@ echo hi
         let long_name = format!("{}.sh", "a".repeat(300));
         let result = derive_session_name(Path::new(&long_name)).unwrap();
         assert!(result.len() <= 255);
+    }
+
+    #[test]
+    fn derive_name_utf8_truncation_safe() {
+        // 'é' is 2 bytes in UTF-8. Create a name that would truncate mid-char.
+        let name = format!("{}.sh", "a".repeat(254) + "é"); // 254 + 2 = 256 bytes stem
+        let result = derive_session_name(Path::new(&name));
+        // Should truncate to 254 bytes (before the 'é') without panicking.
+        assert!(result.is_ok());
+        assert!(result.unwrap().len() <= 255);
     }
 
     #[test]

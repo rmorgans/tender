@@ -37,10 +37,11 @@ pub fn cmd_start(
 
 /// Launch a session: create directory, spawn sidecar, wait for readiness.
 ///
-/// Returns the Meta snapshot from the sidecar's ready signal and the SessionDir.
-/// Does not print to stdout or call process::exit — callers decide what to do.
+/// Returns the Meta snapshot and SessionDir. For new sessions, the Meta comes
+/// from the sidecar's ready signal. For idempotent starts (already running with
+/// the same spec), it re-reads the existing meta from disk.
 ///
-/// Returns `Ok(None)` for idempotent starts (session already running with same spec).
+/// Does not print to stdout or call process::exit — callers decide what to do.
 pub(crate) fn launch_session(
     name: &str,
     cmd: Vec<String>,
