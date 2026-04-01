@@ -6,6 +6,12 @@
 
 **Architecture:** The sidecar gains a second execution lane: when `io_mode: "pty"`, it allocates a PTY pair instead of pipes, captures merged transcript, forwards FIFO push input to the PTY master, and listens on a Unix domain socket for human attach. A control state model (AgentControl/HumanControl/Detached) governs who can send input.
 
+**Key design decisions:**
+
+- **PTY fits the existing Platform trait** — `spawn_child_pty` returns a `SupervisedChild` where `child_stdout()` returns the PTY master read half and `child_stdin()` returns the PTY master write half. The sidecar does not reach inside `SupervisedChild` — it uses the same trait accessors as pipe mode.
+- **Sidecar owns a `PtyBroker`** — The PTY master write side is shared between FIFO forwarding (push), attach relay (human input), and resize. The sidecar wraps it in `Arc<Mutex<File>>` and owns the broker. Transcript capture reads from the read half (taken via `child_stdout()`). This avoids the problem of a single `Option<OwnedFd>` being taken multiple times.
+- **No agent lease in slice one** — Human detach always returns to `AgentControl`. The `Detached` state only applies at startup if the session has no push channel (`--stdin` not set). Lease/heartbeat is deferred.
+
 **Tech Stack:** Rust, `libc` for `openpty`/`setsid`/`ioctl`, `rustix` with `termios` feature for terminal control, Unix domain sockets via `std::os::unix::net`.
 
 ---
@@ -125,13 +131,19 @@ Create `src/model/pty.rs`:
 use serde::{Deserialize, Serialize};
 
 /// Who currently controls input to a PTY session.
+///
+/// Slice one rules (no agent lease):
+/// - start --pty → AgentControl
+/// - attach → HumanControl (steals from AgentControl)
+/// - human detach → AgentControl (always, no lease check)
+/// - Detached only used if session started without --stdin
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PtyControl {
     /// Agent owns input — push is accepted.
     AgentControl,
     /// Human is attached — push is rejected, terminal relay is active.
     HumanControl,
-    /// No one is connected.
+    /// No one is connected (no push channel).
     Detached,
 }
 
@@ -395,10 +407,18 @@ In `src/platform/unix.rs`, modify `SupervisedChild`:
 pub struct SupervisedChild {
     child: std::process::Child,
     identity: ProcessIdentity,
-    /// PTY master fd, present only for PTY-mode sessions.
-    pty_master: Option<OwnedFd>,
+    /// PTY master read half (returned by child_stdout). None for pipe sessions.
+    pty_master_read: Option<File>,
+    /// PTY master write half (returned by child_stdin). None for pipe sessions.
+    pty_master_write: Option<File>,
 }
 ```
+
+The PTY master fd is dup'd into two `File` handles: one for reading
+(transcript capture, via `child_stdout`), one for writing (push/attach
+input, via `child_stdin`). This fits the existing Platform trait —
+the sidecar calls `child_stdout()` and `child_stdin()` the same way
+it does for pipe sessions.
 
 **Step 3: Add `spawn_child_pty` to Platform trait**
 
@@ -407,7 +427,10 @@ In `src/platform/mod.rs`, add to the trait:
 ```rust
     /// Spawn a child process under a pseudo-terminal.
     /// The child's stdin/stdout/stderr are all connected to the slave
-    /// side of the PTY. The master fd is retained in SupervisedChild.
+    /// side of the PTY. The master is exposed through child_stdout()
+    /// (read half) and child_stdin() (write half).
+    ///
+    /// child_stderr() returns None for PTY sessions (merged output).
     ///
     /// Unix only in slice one. Windows returns `Err`.
     fn spawn_child_pty(
@@ -453,12 +476,11 @@ fn spawn_child_pty(
         cmd.args(&argv[1..]);
     }
 
-    // Set slave as stdin/stdout/stderr
+    // Set slave as stdin/stdout/stderr via pre_exec
     let slave_raw = slave.as_raw_fd();
     unsafe {
         cmd.pre_exec(move || {
             // New session — makes this process the session leader
-            // and the slave becomes the controlling terminal
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
@@ -470,11 +492,10 @@ fn spawn_child_pty(
             if libc::dup2(slave_raw, 0) == -1 { return Err(io::Error::last_os_error()); }
             if libc::dup2(slave_raw, 1) == -1 { return Err(io::Error::last_os_error()); }
             if libc::dup2(slave_raw, 2) == -1 { return Err(io::Error::last_os_error()); }
-            // Close original slave fd if it's not 0/1/2
             if slave_raw > 2 {
                 libc::close(slave_raw);
             }
-            // Also set process group (like non-PTY path)
+            // Process group (like non-PTY path)
             if libc::setpgid(0, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
@@ -499,32 +520,66 @@ fn spawn_child_pty(
     // Close slave in parent — child owns it now
     drop(slave);
 
+    // Dup master fd into two File handles: read half and write half.
+    // Both reference the same underlying PTY master.
+    let master_read = File::from(master.try_clone()?);
+    let master_write = File::from(master);
+
     let pid = child.id();
     let identity = process_identity(pid)?;
 
     Ok(SupervisedChild {
         child,
         identity,
-        pty_master: Some(master),
+        pty_master_read: Some(master_read),
+        pty_master_write: Some(master_write),
     })
 }
 ```
 
-**Step 5: Update existing spawn_child to set pty_master: None**
+**Step 5: Update existing spawn_child**
 
-In the existing `spawn_child`, add `pty_master: None` to the return.
+Add `pty_master_read: None, pty_master_write: None` to the return.
 
-**Step 6: Add PTY accessor**
+**Step 6: Update child_stdout / child_stdin / child_stderr for PTY**
+
+In `child_stdout`: return `pty_master_read` if present, else pipe stdout.
+In `child_stdin`: return `pty_master_write` if present, else pipe stdin.
+In `child_stderr`: return `None` if PTY (merged output), else pipe stderr.
 
 ```rust
-/// Take the PTY master fd for I/O. Returns None if not a PTY session.
-fn child_pty_master(child: &mut SupervisedChild) -> Option<OwnedFd> {
-    child.pty_master.take()
+fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+    // PTY: return master read half. Pipe: return child stdout.
+    if let Some(f) = child.pty_master_read.take() {
+        return Some(Box::new(f));
+    }
+    child.child.stdout.take()
+        .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+}
+
+fn child_stderr(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
+    // PTY: no stderr (merged). Pipe: return child stderr.
+    if child.pty_master_read.is_none() && child.child.stdout.is_none() {
+        // PTY session — stdout was already taken, stderr is merged
+        return None;
+    }
+    child.child.stderr.take()
+        .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+}
+
+fn child_stdin(child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
+    // PTY: return master write half. Pipe: return child stdin.
+    if let Some(f) = child.pty_master_write.take() {
+        return Some(Box::new(f));
+    }
+    child.child.stdin.take()
+        .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
 }
 ```
 
-Note: this doesn't go on the Platform trait yet — it's Unix-specific.
-The sidecar can access it through `Current` (which is `UnixPlatform`).
+This means the sidecar's `supervise()` function works unchanged for PTY —
+`child_stdout()` returns the PTY master read, `child_stderr()` returns
+`None`, so the sidecar spawns one capture thread instead of two.
 
 **Step 7: Add stub for Windows**
 
@@ -602,85 +657,52 @@ In `src/sidecar.rs`, around line 466-484, replace the spawn block:
 
 **Step 2: Modify stdin forwarding**
 
-Around line 513-519, the FIFO setup. For PTY sessions, the FIFO
-still gets created (push needs it), but the forwarding target changes:
+Around line 513-519, the FIFO setup. For both pipe and PTY sessions,
+`child_stdin()` returns the write side — the sidecar doesn't need to
+know whether it's a pipe or PTY master:
 
 ```rust
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        let child_stdin: Box<dyn Write + Send> = if is_pty {
-            // For PTY: forward FIFO input to PTY master
-            // Need a Write handle to the PTY master fd
-            let master_fd = child.pty_master.as_ref()
-                .expect("PTY child should have master fd");
-            // Clone the fd for the forwarding thread
-            let write_fd = master_fd.try_clone()?;
-            Box::new(std::fs::File::from(write_fd))
-        } else {
-            Current::child_stdin(&mut child)
-                .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?
-        };
+        let child_stdin = Current::child_stdin(&mut child)
+            .ok_or_else(|| anyhow::anyhow!("child stdin not available"))?;
         setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
     }
 ```
 
-**Step 3: Modify supervision path**
+This is unchanged from the current code. The Platform trait handles
+the PTY vs pipe distinction internally.
 
-Around line 547, add PTY-specific supervision:
+**Step 3: Supervision — existing `supervise()` works for PTY**
+
+The existing `supervise()` function calls `child_stdout()` and
+`child_stderr()`. For PTY sessions:
+
+- `child_stdout()` returns the PTY master read half → single capture thread with tag `O`
+- `child_stderr()` returns `None` → no stderr capture thread
+
+The only change needed is to handle `child_stderr()` returning `None`
+gracefully instead of panicking:
 
 ```rust
-    let exit_reason = if is_pty {
-        supervise_pty(&session, &mut child)?
-    } else {
-        supervise(&session, &mut child)?
-    };
-```
+    let stdout = Current::child_stdout(child).expect("stdout was piped");
+    let stderr = Current::child_stderr(child); // May be None for PTY
 
-**Step 4: Implement `supervise_pty`**
-
-```rust
-fn supervise_pty(
-    session: &SessionDir,
-    child: &mut <Current as Platform>::SupervisedChild,
-) -> anyhow::Result<ExitReason> {
-    let log_path = session.path().join("output.log");
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log = Mutex::new(log_file);
-
-    // Take PTY master for reading
-    let master_fd = child.pty_master.take()
-        .ok_or_else(|| anyhow::anyhow!("PTY master fd missing"))?;
-    let master_read: Box<dyn std::io::Read + Send> =
-        Box::new(std::fs::File::from(master_fd));
-
-    // Single capture thread — merged output, tag 'O'
     let log_ref = &log;
-    let capture_result = std::thread::scope(|scope| {
-        let handle = scope.spawn(move || capture_stream(master_read, 'O', log_ref));
-        handle.join().unwrap_or_else(|_| Err("PTY capture thread panicked".into()))
+    let (stdout_result, stderr_result) = std::thread::scope(|scope| {
+        let stdout_handle = scope.spawn(move || capture_stream(stdout, 'O', log_ref));
+        let stderr_handle = stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
+
+        let stdout_r = stdout_handle.join()
+            .unwrap_or_else(|_| Err("stdout capture thread panicked".into()));
+        let stderr_r = stderr_handle
+            .map(|h| h.join().unwrap_or_else(|_| Err("stderr capture thread panicked".into())))
+            .unwrap_or(Ok(()));
+        (stdout_r, stderr_r)
     });
-
-    if let Err(e) = capture_result {
-        let err_path = session.path().join("capture_errors.log");
-        let _ = std::fs::write(&err_path, format!("pty capture: {e}"));
-    }
-
-    let status = Current::child_wait(child)?;
-
-    let reason = match status.code() {
-        Some(0) => ExitReason::ExitedOk,
-        Some(code) => {
-            let code = NonZeroI32::new(code).expect("already excluded zero");
-            ExitReason::ExitedError { code }
-        }
-        None => ExitReason::Killed,
-    };
-
-    Ok(reason)
-}
 ```
+
+No separate `supervise_pty()` function needed — the existing one handles
+both modes through the trait abstraction.
 
 **Step 5: Set PTY metadata on Meta**
 
@@ -810,22 +832,53 @@ Add `pub mod attach_proto;` to `src/lib.rs`.
 
 **Step 2: Add socket listener to sidecar**
 
-In `src/sidecar.rs`, after setting up stdin forwarding for PTY sessions,
-start the attach socket listener:
+The attach listener needs to write to the PTY master (relay human
+input) and read from it (relay output to the human). But the
+transcript capture thread already owns the read half.
+
+Design: the attach listener does NOT read from the PTY master
+directly. Instead:
+
+- **Human → PTY:** The listener writes to a shared PTY write handle
+  (`Arc<Mutex<dyn Write + Send>>`). This is the same handle that
+  FIFO forwarding writes to — both go to the PTY master write side.
+  The sidecar takes `child_stdin()` once, wraps it in
+  `Arc<Mutex<...>>`, and shares it between FIFO forwarding and the
+  attach listener.
+
+- **PTY → Human:** The transcript capture thread reads from the PTY
+  master and writes to `output.log`. The attach listener separately
+  reads from `output.log` using the same `follow_log` mechanism that
+  `tender log -f` uses. This avoids splitting the PTY master read
+  stream between two consumers.
+
+  Alternative: the capture thread could also tee output to the
+  attached socket. But using log follow is simpler for slice one
+  and avoids complex multiplexing.
+
+In `src/sidecar.rs`, after setting up stdin forwarding:
 
 ```rust
     if is_pty {
         let sock_path = session_dir.join("attach.sock");
-        // Start attach listener in background thread
-        // Shares PTY master fd (cloned) for relay
-        setup_attach_listener(&sock_path, pty_master_clone, &meta_arc, &session)?;
+        let pty_write = pty_write_handle.clone(); // Arc<Mutex<dyn Write + Send>>
+        let session_clone = session.clone();
+        std::thread::spawn(move || {
+            run_attach_listener(&sock_path, pty_write, &session_clone);
+        });
     }
 ```
 
+The FIFO forwarding thread also uses `pty_write_handle.clone()`.
+
 The listener thread:
+- Binds a Unix domain socket at `attach.sock`
 - Accepts one connection at a time
 - On connect: update meta `pty.control = HumanControl`, write to disk
-- Relay: socket ↔ PTY master (bidirectional, handle Resize/Detach messages)
+- Relay input: read framed messages from socket, write Data payloads
+  to PTY via `pty_write`, handle Resize messages via ioctl
+- Relay output: follow `output.log` and send new lines to socket as
+  Data messages
 - On disconnect: update meta `pty.control = AgentControl`, write to disk
 - Clean up socket on session exit
 
@@ -1129,6 +1182,7 @@ All tasks
 - Windows ConPTY support
 - PTY-backed exec
 - Observe-only attach
-- Agent lease expiry / heartbeat
+- Agent lease / heartbeat / lease expiry (slice one: detach always → AgentControl)
 - Terminal recording / replay
 - Attach from `watch` events
+- Direct PTY master read multiplexing for attach (slice one: attach reads via log follow)

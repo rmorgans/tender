@@ -50,14 +50,14 @@ start --pty → AgentControl ←→ HumanControl
                 Detached
 ```
 
-Rules:
+Rules (slice one — no agent lease):
 
 - `start --pty` → `AgentControl`
 - `push` allowed in `AgentControl`
 - `push` rejected in `HumanControl`
 - `attach` steals control → `HumanControl` (single human controller)
-- human detach → `AgentControl` if agent lease is still valid, else `Detached`
-- agent lease loss → `Detached`
+- human detach → `AgentControl` (always — no lease check in slice one)
+- `Detached` only at startup if session has no push channel (`--stdin` not set)
 
 ## CLI Surface
 
