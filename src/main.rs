@@ -161,6 +161,20 @@ enum Commands {
         #[arg(short, long)]
         timeout: Option<u64>,
     },
+    /// Execute a command in a running shell session
+    Exec {
+        /// Session name
+        name: String,
+        /// Namespace for session grouping
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Timeout in seconds (client-side only)
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true, required = true)]
+        cmd: Vec<String>,
+    },
     /// Watch session events as an NDJSON stream
     Watch {
         /// Namespace to filter (watches all namespaces if omitted)
@@ -337,6 +351,13 @@ fn main() {
             namespace,
             timeout,
         } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&name, timeout, &ns)),
+        Commands::Exec {
+            name,
+            namespace,
+            timeout,
+            cmd,
+        } => resolve_namespace(namespace)
+            .and_then(|ns| commands::cmd_exec(&name, cmd, timeout, &ns)),
         Commands::Watch {
             namespace,
             events,

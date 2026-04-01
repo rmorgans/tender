@@ -1,3 +1,4 @@
+mod exec;
 mod kill;
 mod list;
 mod log;
@@ -11,6 +12,7 @@ mod wait;
 mod watch;
 mod wrap;
 
+pub use exec::cmd_exec;
 pub use kill::cmd_kill;
 pub use list::cmd_list;
 pub use log::cmd_log;
