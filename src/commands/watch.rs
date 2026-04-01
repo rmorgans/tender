@@ -74,6 +74,7 @@ fn run_event_data(status: &RunStatus) -> serde_json::Value {
                 DepFailReason::Failed => "Failed",
                 DepFailReason::TimedOut => "TimedOut",
                 DepFailReason::Killed => "Killed",
+                DepFailReason::KilledForced => "KilledForced",
             };
             serde_json::json!({"status": "DependencyFailed", "reason": reason_str})
         }

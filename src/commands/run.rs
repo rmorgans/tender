@@ -172,7 +172,9 @@ fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
             match reason {
                 DepFailReason::Failed => std::process::exit(4),
                 DepFailReason::TimedOut => std::process::exit(124),
-                DepFailReason::Killed => std::process::exit(137),
+                DepFailReason::Killed | DepFailReason::KilledForced => {
+                    std::process::exit(137)
+                }
             }
         }
         _ => Ok(()),

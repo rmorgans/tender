@@ -9,6 +9,8 @@ pub enum DepFailReason {
     Failed,
     /// Timeout expired during dependency wait (before child spawn).
     TimedOut,
-    /// User-initiated kill during dependency wait (before child spawn).
+    /// User-initiated graceful kill during dependency wait (before child spawn).
     Killed,
+    /// User-initiated force kill during dependency wait (before child spawn).
+    KilledForced,
 }

@@ -38,7 +38,9 @@ pub fn cmd_wait(name: &str, timeout: Option<u64>, namespace: &Namespace) -> anyh
                     match reason {
                         DepFailReason::Failed => std::process::exit(4),
                         DepFailReason::TimedOut => std::process::exit(124),
-                        DepFailReason::Killed => std::process::exit(137),
+                        DepFailReason::Killed | DepFailReason::KilledForced => {
+                            std::process::exit(137)
+                        }
                     }
                 }
                 _ => return Ok(()),

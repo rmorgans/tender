@@ -198,11 +198,16 @@ enum DepWaitOutcome {
     Failed(String),
     /// Timeout expired during the wait.
     TimedOut(String),
-    /// Kill request received during the wait.
+    /// Graceful kill request received during the wait.
     Killed(String),
+    /// Force kill request received during the wait.
+    KilledForced(String),
 }
 
 /// Poll dependency meta.json files until all reach terminal state.
+/// Satisfied deps are latched — once a dep reaches a satisfying terminal state,
+/// it is not re-polled. This prevents a later replace or prune from
+/// retroactively un-satisfying an already-observed success.
 fn wait_for_dependencies(
     session_root: &SessionRoot,
     namespace: &Namespace,
@@ -216,6 +221,9 @@ fn wait_for_dependencies(
     let kill_request_path = session_dir.join("kill_request");
     let run_id_str = run_id.to_string();
 
+    // Latch: once a dep is satisfied, skip it on subsequent polls.
+    let mut satisfied = vec![false; spec.after.len()];
+
     loop {
         // Check kill request first
         if kill_request_path.exists() {
@@ -223,9 +231,16 @@ fn wait_for_dependencies(
                 if let Ok(req) = serde_json::from_str::<serde_json::Value>(&content) {
                     if req["run_id"].as_str() == Some(run_id_str.as_str()) {
                         let _ = std::fs::remove_file(&kill_request_path);
-                        return DepWaitOutcome::Killed(
-                            "killed during dependency wait".into(),
-                        );
+                        let force = req["force"].as_bool().unwrap_or(false);
+                        return if force {
+                            DepWaitOutcome::KilledForced(
+                                "force-killed during dependency wait".into(),
+                            )
+                        } else {
+                            DepWaitOutcome::Killed(
+                                "killed during dependency wait".into(),
+                            )
+                        };
                     }
                 }
             }
@@ -242,9 +257,13 @@ fn wait_for_dependencies(
             }
         }
 
-        // Poll all dependencies
+        // Poll unsatisfied dependencies
         let mut all_satisfied = true;
-        for dep in &spec.after {
+        for (i, dep) in spec.after.iter().enumerate() {
+            if satisfied[i] {
+                continue; // Already latched as satisfied
+            }
+
             let dep_session = match session::open(session_root, namespace, &dep.session) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
@@ -296,7 +315,7 @@ fn wait_for_dependencies(
                         }
                     }
                 }
-                // satisfied (or --any-exit)
+                satisfied[i] = true; // Latch: don't re-poll this dep
             } else {
                 all_satisfied = false;
             }
@@ -429,6 +448,15 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             DepWaitOutcome::Killed(msg) => {
                 meta.add_warning(msg);
                 meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::Killed)?;
+                session::write_meta_atomic(&session, &meta)?;
+                return Ok(());
+            }
+            DepWaitOutcome::KilledForced(msg) => {
+                meta.add_warning(msg);
+                meta.transition_dependency_failed(
+                    EpochTimestamp::now(),
+                    DepFailReason::KilledForced,
+                )?;
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
