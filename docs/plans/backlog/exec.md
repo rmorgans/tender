@@ -5,93 +5,152 @@ depends_on:
 links: []
 ---
 
-# tender exec — Sentinel-Framed Command Execution
+# tender exec — Structured Commands In A Persistent Shell
 
-> **Status: Design phase.** The sentinel framing protocol needs design before implementation.
+Run commands inside an already-running shell session and get structured results back: stdout, stderr, exit code, and final cwd.
 
-Run framed commands inside a persistent supervised shell. Each command produces a structured annotation with stdin, stdout, stderr, exit code, and provenance.
+`exec` is the missing layer between:
+
+- `start --stdin`, which gives you a persistent shell
+- `push`, which only writes raw bytes into that shell
+
+## First Slice Goal
+
+Land a safe, serialized `exec` for non-PTY shell sessions that were started with `--stdin`.
+
+First-slice contract:
+
+- exactly one `exec` runs against a session at a time
+- the target session must already exist and be `running`
+- the command is framed and sent through the existing stdin transport
+- completion is detected from `output.log` via a unique sentinel line
+- the caller gets stdout, stderr, exit code, and final cwd
+- an annotation event is written with the structured result
+
+This slice is for agent workflows, not arbitrary terminal emulation.
 
 ## CLI
 
 ```bash
 tender exec <session> [--namespace <ns>] -- <command> [args...]
+tender exec <session> [--namespace <ns>] [--timeout 30] -- <command> [args...]
 ```
 
-## Concept
-
-A supervised shell is started once and kept alive:
+Examples:
 
 ```bash
-tender start myshell --stdin --namespace ws-1 -- /bin/bash
+tender start shell --stdin -- /bin/bash
+tender exec shell -- pwd
+tender exec shell -- cd repo
+tender exec shell -- cargo test
 ```
 
-Then `exec` sends framed commands through it:
+The shell stays alive between calls, so cwd and exported env persist.
 
-```bash
-tender exec myshell --namespace ws-1 -- ls -la /tmp
-tender exec myshell --namespace ws-1 -- make -j8
-tender exec myshell --namespace ws-1 -- cd /foo && cargo test
+## Required Session Properties
+
+The target session must satisfy all of these:
+
+- session exists
+- session status is `Running`
+- stdin transport is enabled (`--stdin`)
+- session is a line-oriented shell session
+- session is not PTY-backed
+
+If these are not true, `exec` fails before pushing anything.
+
+## Protocol
+
+`exec` is implemented as:
+
+1. capture a log cursor from the session's `output.log`
+2. serialize the requested argv into one shell command string
+3. wrap it with a unique sentinel trailer
+4. send the framed command through the existing stdin transport
+5. tail `output.log` from the captured cursor until the sentinel appears
+6. parse stdout/stderr from the tagged log lines
+7. extract exit code and final cwd from the sentinel line
+8. emit an annotation event
+9. return the structured result to the caller
+
+## First-Cut Sentinel Format
+
+The sentinel line must carry:
+
+- random token
+- exit code
+- final cwd
+
+Unix shell framing:
+
+```sh
+<user command>; status=$?; cwd_now="$(pwd)"; printf '__TENDER_EXEC__ %s %s %s\n' "$token" "$status" "$cwd_now"
 ```
 
-The shell stays alive between calls. CWD and env persist across invocations. If the agent dies, another agent can reconnect via `tender exec`.
+PowerShell framing:
 
-## Under the Hood
+```powershell
+<user command>; $status=$LASTEXITCODE; $cwd=(Get-Location).Path; Write-Output "__TENDER_EXEC__ $token $status $cwd"
+```
 
-`exec` = `push` (framed with sentinel) + annotation capture (observed with provenance).
+This is enough for the first slice because:
 
-1. Generate a unique sentinel: `TENDER_SENTINEL_<uuid>`
-2. Frame the command: `<cmd>; echo "TENDER_SENTINEL_<uuid>_$?"`
-3. Push framed command to the shell's stdin transport
-4. Read `output.log` until sentinel line appears
-5. Extract exit code from sentinel line
-6. Write annotation event with command, captured output, and exit code
-7. Return output + exit code to caller
+- it preserves shell state
+- it makes final cwd observable
+- it uses only text output, which matches current `output.log` handling
 
-## Design Questions (must resolve before implementation)
+## Concurrency Model
 
-### Sentinel collision
+`exec` is single-flight per session in the first slice.
 
-UUID-based sentinels are collision-resistant for normal output, but:
-- What if the command itself echoes the sentinel string? (Pathological but possible.)
-- Proposal: use a sentinel format that includes non-printable bytes or a sufficiently long random token that false matches are astronomically unlikely.
+Implementation rule:
 
-### Binary output
+- create an advisory lock such as `exec.lock` in the session dir
+- if another `exec` is active, fail immediately with a busy error
+- do not attempt to queue or interleave commands
 
-Commands that produce binary output (e.g. `cat image.png`) will corrupt the sentinel scanning. Options:
-- Require text-mode output for exec'd commands (document limitation)
-- Use a separate channel (sidecar could expose a "command complete" side-signal)
-- Base64-encode the sentinel line to make it scannable in binary streams
+This avoids one caller consuming another caller's sentinel and keeps log parsing tractable.
 
-### Timeout
+## Output Model
 
-What happens when a command never returns?
-- `exec --timeout 30` kills the command but keeps the shell alive
-- How to kill just the command inside the shell without killing the shell itself? `kill %1` or process group tricks inside bash?
-- This interacts with the shell's job control capabilities
+`exec` reads from the current end of `output.log`, not from the beginning of the session.
 
-### Output parsing
+Returned result:
 
-`output.log` lines are tagged with `O`/`E`/`A` prefixes by the sidecar. `exec` must:
-- Parse tagged lines to extract raw content
-- Distinguish stdout vs stderr in the captured output
-- Handle interleaved output from concurrent commands (if allowed — probably disallow)
+- `stdout`: concatenated `O` lines after the log cursor
+- `stderr`: concatenated `E` lines after the log cursor
+- `exit_code`
+- `cwd_after`
+- `truncated`
 
-### Error handling
+The sentinel line itself is not included in stdout/stderr.
 
-- `push` fails (stdin transport broken): error, shell may be dead
-- Shell already exited: error, suggest `tender start` to restart
-- Two concurrent `exec` calls on the same shell: undefined behavior? Serialize? Error?
-  - Proposal: advisory lock or single-caller enforcement. Concurrent exec is a footgun.
+## Timeout Model
 
-### CWD tracking
+First-slice timeout is client-side only.
 
-"CWD and env persist" is a feature for agents, but there is no mechanism to report the current CWD back to the caller. Options:
-- Include `pwd` in the sentinel protocol: `<cmd>; echo "TENDER_SENTINEL_<uuid>_$?_$(pwd)"`
-- Accept that CWD is opaque (agents track it themselves)
+Meaning:
+
+- `tender exec --timeout 30` stops waiting after 30 seconds
+- the shell session remains alive
+- the in-shell command may still be running
+- the user gets an explicit timeout error that says execution may still be in progress
+
+This is a deliberate first-slice tradeoff. Killing only the currently running in-shell command without killing the shell is follow-on work.
+
+## Binary Output
+
+First slice is text-oriented.
+
+That means:
+
+- binary-heavy commands are unsupported
+- sentinel scanning assumes text output
+- if binary-safe command execution becomes important later, it should be a protocol revision, not complexity added to slice one
 
 ## Annotation Payload
 
-Same envelope as `wrap`, but with the framing metadata:
+`exec` should write the same top-level envelope shape used by `wrap`, with `event: "exec"` and structured command metadata:
 
 ```json
 {
@@ -99,12 +158,14 @@ Same envelope as `wrap`, but with the framing metadata:
   "event": "exec",
   "run_id": "...",
   "data": {
-    "hook_stdin": "ls -la /tmp",
+    "hook_stdin": "cargo test",
     "hook_stdout": "...",
     "hook_stderr": "...",
     "hook_exit_code": 0,
-    "command": ["ls", "-la", "/tmp"],
-    "sentinel": "TENDER_SENTINEL_<uuid>",
+    "command": ["cargo", "test"],
+    "cwd_after": "/work/repo",
+    "sentinel": "TENDER_EXEC_<uuid>",
+    "timed_out": false,
     "truncated": false
   }
 }
@@ -112,16 +173,57 @@ Same envelope as `wrap`, but with the framing metadata:
 
 ## Watch Integration
 
-Watch stream gets both layers:
-- Raw output lines as `log` events (from sidecar, continuous)
-- Framed command results as `annotation` events (from exec, per-command)
+Watch should continue to expose both layers:
+
+- raw output lines as `log` events from the sidecar
+- structured `exec` results as `annotation` events
+
+`exec` should not invent a second event transport.
+
+## Implementation Tasks
+
+1. Add `Exec` command to the CLI with `--namespace` and `--timeout`
+2. Add session preflight checks: running, stdin enabled, non-PTY shell session
+3. Add per-session `exec.lock` handling
+4. Capture a log cursor before writing to stdin
+5. Implement framing builders for Unix shell and PowerShell
+6. Reuse the existing stdin transport from `push`
+7. Tail `output.log` until sentinel match
+8. Parse tagged log lines into stdout/stderr buckets
+9. Emit annotation event with the structured result
+10. Return command exit code and text output to the caller
+11. Add timeout handling with explicit "command may still be running" semantics
+12. Add integration tests on Unix and Windows
+
+## Testing
+
+- `exec` against a running bash shell returns stdout and exit code 0
+- `exec` propagates non-zero exit code without killing the shell session
+- shell state persists across calls (`cd`, exported env)
+- `exec` fails if the target session lacks `--stdin`
+- `exec` fails if the target session is not running
+- second concurrent `exec` on the same session fails with busy error
+- timeout returns error while the session remains running
+- annotation event contains stdout, stderr, exit code, command, and final cwd
+- Windows PowerShell path satisfies the same high-level contract
+
+## Acceptance Criteria
+
+- agents can use `exec` instead of blind `push` for structured shell commands
+- cwd persistence is observable and testable
+- the feature reuses the existing session, log, and annotation model
+- no second caller can corrupt the active `exec` result for a session
+- the first slice works on both Unix and Windows
 
 ## Depends On
 
-`wrap-annotation-ingestion` (complete) — `exec` uses the same annotation payload format and the `output.log` infrastructure.
+`wrap-annotation-ingestion` is the only real dependency. `exec` reuses the annotation envelope and the existing `output.log` infrastructure.
 
-## Not in Scope
+## Not In Scope
 
-- Persistent shell lifecycle management (use `tender start` / `tender kill`)
-- Multi-shell orchestration (use separate sessions)
-- PTY attachment (separate plan: `pty-attach`)
+- starting a shell automatically if the session is missing
+- killing only the current in-shell command while preserving the shell
+- binary-safe framing
+- concurrent queued `exec` calls
+- PTY-backed shells
+- remote execution over SSH

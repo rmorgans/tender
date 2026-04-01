@@ -19,22 +19,56 @@ Keep Tender's core promise unchanged across hosts:
 
 Remote must be an access path to Tender, not a fork of Tender's lifecycle logic.
 
-## Core Model
+## First Slice Decision
 
-The right abstraction boundary is **semantic backend**, not raw packet transport.
+The first implementation should be a thin SSH transport over the existing Tender CLI contract.
 
-Conceptually:
+That means:
 
-- `TenderCore`
-  local sidecar, session store, log store, state machine
-- `TenderBackend`
-  semantic operations over Tender concepts
-- backend implementations
-  - local
-  - SSH
-  - later, possibly brokered
+- local execution continues to use the current direct code paths
+- remote execution shells out to the system `ssh` client
+- the remote side runs the existing `tender` binary
+- JSON and NDJSON contracts stay unchanged
 
-The semantic backend surface is:
+Do not introduce a general backend refactor in the same slice unless the code forces it. The first slice should prefer a narrow adapter over a wide local architecture rewrite.
+
+## CLI Surface
+
+First-slice CLI:
+
+```bash
+tender --host user@box start job -- cmd
+tender --host user@box status job
+tender --host user@box list
+tender --host user@box log -f job
+tender --host user@box push job
+tender --host user@box kill job
+tender --host user@box wait job
+tender --host user@box watch --events
+```
+
+Rules:
+
+- `--host` is a global flag
+- host is an SSH destination string resolved by the system `ssh` client
+- namespace semantics are unchanged
+- JSON and NDJSON output is passed through without inventing a second schema
+
+## Architecture
+
+Remote invocation in the first slice may be as simple as:
+
+```bash
+ssh host tender ...
+```
+
+That is acceptable.
+
+The remote transport is not a second lifecycle model. It is a transport wrapper around the existing Tender command contract.
+
+## First Slice Scope
+
+Commands supported remotely in slice one:
 
 - `start`
 - `status`
@@ -45,104 +79,117 @@ The semantic backend surface is:
 - `wait`
 - `watch`
 
-The CLI may expose this as `--host`, but `--host` is a user-facing affordance, not the architectural boundary.
+Expected behavior:
 
-## First Remote Backend
+- remote `start` returns the same JSON metadata contract as local
+- remote `watch` preserves NDJSON framing
+- remote `log -f` streams incrementally rather than buffering whole output
+- remote command exit codes are preserved when `tender` is reached successfully
 
-The first remote backend should be:
+## Error Model
 
-- `SshBackend`
+Classify failures into three buckets:
 
-Behavior:
+1. SSH transport failure
+   - DNS / host resolution failure
+   - authentication failure
+   - connection timeout
+   - transport disconnect mid-stream
+2. Remote Tender invocation failure
+   - `tender` missing on remote host
+   - incompatible remote version
+   - malformed JSON / NDJSON from remote process
+3. Remote supervised process failure
+   - same contract as local: child exit, timeout, killed, sidecar lost
 
-- execute remote `tender` commands over SSH
-- parse the same JSON / NDJSON contract
-- preserve Tender exit code semantics
+The CLI should preserve remote Tender exit codes when invocation succeeds, and reserve a distinct local error path for SSH transport failure.
 
-This means remote Tender may invoke:
+## Streaming Commands
 
-`ssh host tender ...`
+Commands with streaming output need explicit first-slice behavior:
 
-That is acceptable for remote execution. It is not the local architecture.
+- `log -f`
+- `watch`
+- long-running `wait`
 
-## What This Phase Includes
+Requirements:
 
-- `tender --host user@box start ...`
-- `tender --host user@box status ...`
-- `tender --host user@box log ...`
-- `tender --host user@box push ...`
-- `tender --host user@box kill ...`
-- `tender --host user@box wait ...`
-- `tender --host user@box watch ...`
-- `host:session` addressing where useful
-- host resolution from SSH config
-- error classification:
-  - SSH failure
-  - remote Tender failure
-  - supervised process failure
+- stream SSH stdout directly to the local stdout
+- do not buffer the full stream before parsing
+- preserve NDJSON framing for `watch`
+- if SSH disconnects mid-stream, return a transport error immediately
 
-## What This Phase Does Not Include
+## Remote Bootstrap Assumption
 
-- a second remote lifecycle model
-- a custom remote daemon by default
-- browser/session relay semantics
-- proxy tunneling
-- making fanout part of transport internals
+First slice assumes `tender` is already installed remotely and discoverable on `PATH`.
 
-## Fanout
+If the remote binary is missing, return a clear operator-facing error. Automatic binary copy, version install, or refresh is follow-on work.
 
-Fanout is **not** transport.
+## Fanout Boundary
+
+Fanout is not transport.
 
 Fanout is orchestration over many backends.
 
 So:
 
-- `tender fanout` belongs above `SshBackend`
-- fanout should work over any backend that satisfies the semantic interface
+- `tender fanout` belongs above SSH transport
+- fanout should work over any backend that satisfies the semantic command contract
+- SSH transport should not hide multi-host orchestration inside itself
 
-Examples:
-
-- local fanout
-- SSH fanout
-- mixed backend fanout later if ever needed
-
-## Broker / Relay
+## Future Broker / Relay Work
 
 Broker or relay work is explicitly deferred.
 
-If added later, a broker/relay is better understood as a lower-level helper for remote backends, not as Tender's primary remote abstraction.
-
-Possible future broker responsibilities:
+If added later, it should be understood as infrastructure beneath the remote transport, for concerns like:
 
 - connection reuse
-- remote binary bootstrap
 - persistent streaming sessions
-- authentication/session caching
-- multiplexing many requests over one long-lived channel
+- authentication caching
+- multiplexing
+- remote binary bootstrap
 
-That is infrastructure below the semantic backend boundary.
+It must not create a second run model or second event model.
 
-It should not be allowed to create a second run model or second event model.
+## Implementation Tasks
 
-## Bootstrap
+1. Add a global `--host` CLI flag
+2. Define which commands are remote-backed in slice one
+3. Implement a small SSH invocation helper around the system `ssh` client
+4. Pass remote stdout and stderr through without reformatting human output
+5. Preserve JSON and NDJSON parsing expectations for commands like `status`, `list`, and `watch`
+6. Map SSH invocation failures to distinct local errors
+7. Add integration tests against a local SSH test target or fake `ssh` shim
+8. Document remote install assumptions and version expectations
 
-Remote bootstrap is a separate concern from lifecycle semantics.
+## Testing
 
-Possible future options:
+- remote `status` returns the same JSON shape as local
+- remote `start` launches a session and returns metadata
+- remote `list` returns the same JSON array shape as local
+- remote `log -f` streams continuously
+- remote `watch` preserves NDJSON framing
+- remote `push` works against a session started over SSH
+- invalid SSH target returns transport error, not child-process error
+- missing remote `tender` returns a clear operator-facing error
+- Windows remote host works if `ssh host tender.exe ...` is configured appropriately
 
-- require `tender` preinstalled remotely
-- copy the binary on first use
-- version-check and refresh as needed
+## Acceptance Criteria
 
-This can be added to the SSH backend later without changing Tender core semantics.
+- the user can operate a remote Tender instance with the same CLI and output contracts
+- transport errors are distinguishable from remote process failures
+- streaming commands stay streaming
+- no second lifecycle model is introduced to support remote access
 
 ## Depends On
 
-No technical blockers — the local backend is stable and tested (237/237 Windows, 234/234 macOS). The previous `depends_on: [run-shebang, wrap-annotation-ingestion]` was sequencing preference, not a real dependency.
+No technical blockers. The local backend is stable and Windows hosts are now valid remote targets.
 
-## Notes
+## Not In Scope
 
-- Windows hosts are now valid remote targets (Windows backend complete as of 2026-04-01).
-- This remains the likely path for any future overlap with `cmuxd-remote`, but only for supervised-run semantics. It is not an attempt to replace all remote relay behavior in `cmux`.
-
-> **Needs full design expansion before promotion to active.** Key decisions: whether to introduce a `Backend` trait (refactoring local code) or use pure SSH-shelling (simpler, no local refactor). Add a concrete task list, error classification spec, and integration test plan.
+- a custom remote daemon by default
+- automatic binary copy or upgrade
+- proxy tunneling
+- browser relay semantics
+- connection pooling or multiplexed SSH sessions
+- fanout orchestration
