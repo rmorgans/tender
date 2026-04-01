@@ -31,7 +31,30 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
     let child = match meta.status().child() {
         Some(c) => *c,
         None => {
-            // Starting state with no child -- nothing to kill
+            // Starting state with no child — sidecar may be in dependency wait.
+            // If sidecar is alive, signal it via kill_request (same as Running path).
+            let sidecar_alive = session::is_locked(&session).unwrap_or(false);
+            if sidecar_alive {
+                let run_id = meta.run_id().to_string();
+                let request = serde_json::json!({ "force": force, "run_id": run_id });
+                let kill_request_path = session.path().join("kill_request");
+                let kill_request_tmp = session.path().join("kill_request.tmp");
+                std::fs::write(&kill_request_tmp, request.to_string())?;
+                std::fs::rename(&kill_request_tmp, &kill_request_path)?;
+
+                // Wait for sidecar to write terminal state
+                for _ in 0..80 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if let Ok(m) = session::read_meta(&session) {
+                        if m.status().is_terminal() {
+                            let json = serde_json::to_string_pretty(&m)?;
+                            println!("{json}");
+                            return Ok(());
+                        }
+                    }
+                }
+                // Sidecar didn't act — fall through to report
+            }
             println!(
                 "{}",
                 serde_json::json!({"session": name, "result": "no_child"})
