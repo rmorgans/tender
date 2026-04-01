@@ -214,12 +214,13 @@ fn run_exec(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    // 2. Frame the command (shell-specific)
-    let framed = if is_powershell_session(meta) {
-        exec_frame::powershell_frame(cmd, token)
-    } else {
-        exec_frame::unix_frame(cmd, token)
-    };
+    // 2. Frame the command (Unix shell only in this slice)
+    if is_powershell_session(meta) {
+        anyhow::bail!(
+            "exec does not yet support PowerShell sessions (argv[0] contains powershell/pwsh)"
+        );
+    }
+    let framed = exec_frame::unix_frame(cmd, token);
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
     let mut writer = loop {
