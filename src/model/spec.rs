@@ -18,6 +18,16 @@ pub enum StdinMode {
     None,
 }
 
+/// How the session's child I/O is wired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IoMode {
+    /// Pipes: stdout/stderr captured separately, stdin via FIFO if enabled.
+    #[default]
+    Pipe,
+    /// Pseudo-terminal: merged I/O, interactive terminal.
+    Pty,
+}
+
 /// A dependency on another session's specific execution.
 /// Binds to run_id, not session name — safe against --replace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +56,8 @@ pub struct LaunchSpec {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub on_exit: Vec<String>,
     pub stdin_mode: StdinMode,
+    #[serde(default)]
+    pub io_mode: IoMode,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +79,7 @@ impl LaunchSpec {
             namespace: None,
             on_exit: vec![],
             stdin_mode: StdinMode::None,
+            io_mode: IoMode::Pipe,
         })
     }
 
@@ -102,6 +115,8 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             #[serde(default)]
             on_exit: Vec<String>,
             stdin_mode: StdinMode,
+            #[serde(default)]
+            io_mode: IoMode,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -118,6 +133,7 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             namespace: raw.namespace,
             on_exit: raw.on_exit,
             stdin_mode: raw.stdin_mode,
+            io_mode: raw.io_mode,
         })
     }
 }

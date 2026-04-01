@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
+use super::pty::{PtyControl, PtyMeta};
 use super::spec::LaunchSpec;
 use super::state::RunStatus;
 
@@ -23,6 +24,8 @@ pub struct Meta {
     restart_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pty: Option<PtyMeta>,
 }
 
 impl Meta {
@@ -48,6 +51,7 @@ impl Meta {
             started_at,
             restart_count: 0,
             warnings: vec![],
+            pty: None,
         }
     }
 
@@ -113,6 +117,21 @@ impl Meta {
         self.warnings.push(msg);
     }
 
+    #[must_use]
+    pub fn pty(&self) -> Option<&PtyMeta> {
+        self.pty.as_ref()
+    }
+
+    pub fn set_pty(&mut self, pty_meta: PtyMeta) {
+        self.pty = Some(pty_meta);
+    }
+
+    pub fn set_pty_control(&mut self, control: PtyControl) {
+        if let Some(ref mut p) = self.pty {
+            p.control = control;
+        }
+    }
+
     // --- Mutable access for transition module only ---
 
     pub(super) fn status_mut(&mut self) -> &mut RunStatus {
@@ -136,6 +155,8 @@ impl<'de> Deserialize<'de> for Meta {
             restart_count: u32,
             #[serde(default)]
             warnings: Vec<String>,
+            #[serde(default)]
+            pty: Option<PtyMeta>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -157,6 +178,7 @@ impl<'de> Deserialize<'de> for Meta {
             started_at: raw.started_at,
             restart_count: raw.restart_count,
             warnings: raw.warnings,
+            pty: raw.pty,
         })
     }
 }
