@@ -338,7 +338,12 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
 
     // Watch for CLI kill requests (kill_request file in session dir).
     // Uses the live ChildKillHandle for tree-aware kill on Windows.
-    setup_kill_watcher(session_dir, kill_handle, run_id, Arc::clone(&timeout_cancel));
+    setup_kill_watcher(
+        session_dir,
+        kill_handle,
+        run_id,
+        Arc::clone(&timeout_cancel),
+    );
 
     // --- Supervise ---
     let exit_reason = supervise(&session, &mut child)?;

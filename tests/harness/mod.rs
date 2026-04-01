@@ -27,7 +27,9 @@ pub fn tender(root: &TempDir) -> Command {
 #[allow(dead_code)]
 pub fn test_callback_bin() -> String {
     let bin = assert_cmd::cargo::cargo_bin("test_callback");
-    bin.to_str().expect("test_callback path is valid UTF-8").to_owned()
+    bin.to_str()
+        .expect("test_callback path is valid UTF-8")
+        .to_owned()
 }
 
 /// `test_callback_bin()` quoted for embedding in on-exit command strings

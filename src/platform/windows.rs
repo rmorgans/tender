@@ -38,12 +38,20 @@ pub struct ChildKillHandle {
 }
 
 /// Stdin transport for Windows.
-/// Will hold: server-side named pipe HANDLE.
+/// Holds the server-side named pipe HANDLE for stdin forwarding.
+///
+/// `has_connected` tracks whether any client has ever connected. This prevents
+/// a race where `DisconnectNamedPipe` on the first `accept_stdin_connection`
+/// call would sever a client that connected between `CreateNamedPipeW` and
+/// `ConnectNamedPipe` (the `ERROR_PIPE_CONNECTED` case).
 pub struct StdinTransport {
-    _private: (), // placeholder — real fields added in 2A.5
+    pipe_handle: OwnedHandle,
+    #[allow(dead_code)] // name used conceptually; cleanup is via handle drop
+    pipe_name: String,
+    has_connected: std::sync::atomic::AtomicBool,
 }
 
-// SAFETY: StdinTransport will hold HANDLEs which are Send on Windows.
+// SAFETY: StdinTransport holds an OwnedHandle (kernel object) and an AtomicBool, safe to send.
 unsafe impl Send for StdinTransport {}
 
 fn unsupported(what: &str) -> io::Error {
@@ -274,23 +282,95 @@ impl Platform for WindowsPlatform {
         process_status(id)
     }
 
-    fn create_stdin_transport(_session_dir: &Path) -> io::Result<StdinTransport> {
-        Err(unsupported("create_stdin_transport"))
+    fn create_stdin_transport(session_dir: &Path) -> io::Result<StdinTransport> {
+        let pipe_name = stdin_pipe_name(session_dir);
+        let pipe_handle = create_named_pipe_server(&pipe_name)?;
+        Ok(StdinTransport {
+            pipe_handle,
+            pipe_name,
+            has_connected: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     fn accept_stdin_connection(
-        _transport: &StdinTransport,
+        transport: &StdinTransport,
         _session_dir: &Path,
     ) -> Option<Box<dyn io::Read + Send>> {
-        None
+        use std::sync::atomic::Ordering;
+        use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
+
+        let handle = transport.pipe_handle.as_raw_handle() as *mut _;
+
+        // Only disconnect after the first successful connection. On the first
+        // call, a client may have already connected between CreateNamedPipeW
+        // and this ConnectNamedPipe — DisconnectNamedPipe would sever that
+        // connection and lose input.
+        if transport.has_connected.load(Ordering::Relaxed) {
+            unsafe { DisconnectNamedPipe(handle) };
+        }
+
+        // Block until a new client connects.
+        let ret = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+        if ret == 0 {
+            let err = io::Error::last_os_error();
+            // ERROR_PIPE_CONNECTED = client connected before ConnectNamedPipe
+            // was called — that's fine, proceed with the read.
+            if err.raw_os_error()
+                != Some(windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED as i32)
+            {
+                return None; // pipe broken or closed
+            }
+        }
+
+        transport.has_connected.store(true, Ordering::Relaxed);
+        Some(Box::new(PipeReader { handle }))
     }
 
-    fn open_stdin_writer(_session_dir: &Path) -> io::Result<File> {
-        Err(unsupported("open_stdin_writer"))
+    fn open_stdin_writer(session_dir: &Path) -> io::Result<File> {
+        use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+        };
+
+        let pipe_name = stdin_pipe_name(session_dir);
+        let wide_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        let handle = unsafe {
+            CreateFileW(
+                wide_name.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                || err.kind() == io::ErrorKind::NotFound
+            {
+                return Err(io::Error::new(io::ErrorKind::ConnectionRefused, err));
+            }
+            return Err(err);
+        }
+
+        Ok(unsafe { File::from_raw_handle(handle as *mut _) })
     }
 
     fn remove_stdin_transport(_session_dir: &Path) {
-        // no-op until transport is implemented
+        // Named pipes are kernel objects cleaned up when all handles close.
+        // StdinTransport's OwnedHandle drop handles this automatically.
+        //
+        // Platform divergence: on Unix, removing the FIFO file unblocks
+        // accept_stdin_connection (File::open returns Err). On Windows, a
+        // thread blocked in ConnectNamedPipe cannot be woken by this no-op;
+        // it unblocks only when the process exits (dropping the pipe handle)
+        // or a client connects. This is acceptable because the sidecar's
+        // forwarding thread is the only caller, and sidecar shutdown drops
+        // the StdinTransport which closes the pipe handle.
     }
 
     fn ready_writer_from_env() -> io::Result<File> {
@@ -311,7 +391,7 @@ impl Platform for WindowsPlatform {
         // Replace the inheritable HANDLE with a non-inheritable duplicate.
         // Takes ownership of the old File (closing the inheritable handle)
         // and returns a new File wrapping a non-inheritable copy.
-        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
         let old_handle = writer.into_raw_handle() as *mut _;
@@ -324,8 +404,8 @@ impl Platform for WindowsPlatform {
                 old_handle,
                 current_process,
                 &mut new_handle,
-                0,    // ignored with DUPLICATE_SAME_ACCESS
-                0,    // bInheritHandle = FALSE
+                0, // ignored with DUPLICATE_SAME_ACCESS
+                0, // bInheritHandle = FALSE
                 DUPLICATE_SAME_ACCESS,
             )
         };
@@ -403,10 +483,10 @@ fn spawn_sidecar_raw(
 ) -> io::Result<u32> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-        UpdateProcThreadAttribute, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
-        DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+        CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
+        STARTUPINFOEXW, UpdateProcThreadAttribute,
     };
 
     let ready_handle: HANDLE = ready_writer.as_raw_handle() as *mut _;
@@ -490,16 +570,16 @@ fn spawn_sidecar_raw(
 
     let ret = unsafe {
         CreateProcessW(
-            std::ptr::null(),                      // lpApplicationName (use cmdline)
-            cmdline_wide.as_mut_ptr(),             // lpCommandLine
-            std::ptr::null(),                      // lpProcessAttributes
-            std::ptr::null(),                      // lpThreadAttributes
-            1,                                     // bInheritHandles = TRUE
-            creation_flags,                        // dwCreationFlags
-            env_block.as_ptr().cast(),             // lpEnvironment
-            std::ptr::null(),                      // lpCurrentDirectory (inherit)
-            &si_ex.StartupInfo,                    // lpStartupInfo
-            &mut pi,                               // lpProcessInformation
+            std::ptr::null(),          // lpApplicationName (use cmdline)
+            cmdline_wide.as_mut_ptr(), // lpCommandLine
+            std::ptr::null(),          // lpProcessAttributes
+            std::ptr::null(),          // lpThreadAttributes
+            1,                         // bInheritHandles = TRUE
+            creation_flags,            // dwCreationFlags
+            env_block.as_ptr().cast(), // lpEnvironment
+            std::ptr::null(),          // lpCurrentDirectory (inherit)
+            &si_ex.StartupInfo,        // lpStartupInfo
+            &mut pi,                   // lpProcessInformation
         )
     };
 
@@ -623,12 +703,85 @@ fn send_ctrl_break(pid: u32) {
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
 }
 
+// --- Stdin transport helpers ---
+
+/// Derive a named pipe path from the session directory.
+/// Uses first 16 hex chars of SHA256 to stay under the 256-char pipe name limit.
+fn stdin_pipe_name(session_dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(session_dir.as_os_str().as_encoded_bytes());
+    let hex: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!(r"\\.\pipe\tender-stdin-{hex}")
+}
+
+/// Create a named pipe server for inbound byte-mode reads.
+fn create_named_pipe_server(name: &str) -> io::Result<OwnedHandle> {
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            1,    // max instances
+            0,    // out buffer
+            8192, // in buffer
+            0,    // default timeout
+            std::ptr::null(),
+        )
+    };
+
+    if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle as *mut _) })
+}
+
+/// Non-owning reader for a named pipe handle.
+/// Maps ERROR_BROKEN_PIPE to EOF (Ok(0)) so the forwarding loop
+/// treats client disconnect as a clean end-of-input.
+struct PipeReader {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: The handle is a kernel object, safe to send.
+unsafe impl Send for PipeReader {}
+
+impl io::Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use windows_sys::Win32::Storage::FileSystem::ReadFile;
+
+        let mut bytes_read: u32 = 0;
+        let ret = unsafe {
+            ReadFile(
+                self.handle,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ret == 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32)
+            {
+                return Ok(0); // EOF — client disconnected
+            }
+            return Err(err);
+        }
+        Ok(bytes_read as usize)
+    }
+}
+
 /// Terminate a single process by PID. No tree kill — use only for orphans.
 fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if handle.is_null() {
@@ -643,9 +796,7 @@ fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
         let err = io::Error::last_os_error();
         // Access denied may mean the process already exited between
         // OpenProcess and TerminateProcess — treat as success.
-        if err.raw_os_error()
-            != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
-        {
+        if err.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32) {
             return Err(err);
         }
     }
