@@ -54,13 +54,6 @@ pub struct StdinTransport {
 // SAFETY: StdinTransport holds an OwnedHandle (kernel object) and an AtomicBool, safe to send.
 unsafe impl Send for StdinTransport {}
 
-fn unsupported(what: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("windows: {what} not yet implemented"),
-    )
-}
-
 impl Platform for WindowsPlatform {
     type SupervisedChild = SupervisedChild;
     type ChildKillHandle = ChildKillHandle;
