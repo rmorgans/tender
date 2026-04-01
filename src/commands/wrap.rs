@@ -8,12 +8,9 @@ use tender::model::ids::{Namespace, SessionName, Source};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
-/// Maximum annotation line length (timestamp + tag + json + newline).
-/// Sized to stay within common local-FS single-write atomicity assumptions.
-const MAX_ANNOTATION_LINE: usize = 4096;
-
-/// Maximum size for individual payload fields before truncation.
-const MAX_FIELD_BYTES: usize = 3000;
+/// Re-export shared constants for local use.
+const MAX_ANNOTATION_LINE: usize = tender::annotation::MAX_LINE;
+const MAX_FIELD_BYTES: usize = tender::annotation::MAX_FIELD_BYTES;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 

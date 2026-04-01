@@ -118,11 +118,17 @@ pub fn cmd_exec(
     let token = exec_frame::generate_token();
     let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
 
-    // Write annotation event to output.log
+    // Write annotation event to output.log (bounded by MAX_LINE)
     {
+        use tender::annotation;
+
         let run_id = meta.run_id().to_string();
         let hook_stdin = shell_words::join(&cmd);
-        let annotation = serde_json::json!({
+        let log_path = session.path().join("output.log");
+        let ts = annotation::timestamp_micros();
+
+        // Try full payload first
+        let payload = serde_json::json!({
             "source": "agent.exec",
             "event": "exec",
             "run_id": run_id,
@@ -138,15 +144,37 @@ pub fn cmd_exec(
                 "truncated": result.truncated,
             }
         });
-        let ts = tender::annotation::timestamp_micros();
-        let json_str = serde_json::to_string(&annotation)?;
+        let json_str = serde_json::to_string(&payload)?;
         let line = format!("{ts} A {json_str}\n");
-        let log_path = session.path().join("output.log");
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        file.write_all(line.as_bytes())?;
+
+        if !annotation::write_annotation_line(&log_path, &line)? {
+            // Truncate and retry
+            let trunc_stdout =
+                annotation::truncate_string(&result.stdout, annotation::MAX_FIELD_BYTES);
+            let trunc_stderr =
+                annotation::truncate_string(&result.stderr, annotation::MAX_FIELD_BYTES);
+            let payload = serde_json::json!({
+                "source": "agent.exec",
+                "event": "exec",
+                "run_id": run_id,
+                "data": {
+                    "hook_stdin": hook_stdin,
+                    "command": &cmd,
+                    "hook_stdout": trunc_stdout,
+                    "hook_stderr": trunc_stderr,
+                    "hook_exit_code": result.exit_code,
+                    "cwd_after": &result.cwd_after,
+                    "sentinel": format!("TENDER_EXEC_{token}"),
+                    "timed_out": result.timed_out,
+                    "truncated": true,
+                }
+            });
+            let json_str = serde_json::to_string(&payload)?;
+            let line = format!("{ts} A {json_str}\n");
+            if !annotation::write_annotation_line(&log_path, &line)? {
+                eprintln!("tender exec: annotation too large even after truncation, dropping");
+            }
+        }
     }
 
     let json = serde_json::to_string_pretty(&result)?;
@@ -179,8 +207,12 @@ fn run_exec(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    // 2. Frame the command
-    let framed = exec_frame::unix_frame(cmd, token);
+    // 2. Frame the command (shell-specific)
+    let framed = if is_powershell_session(meta) {
+        exec_frame::powershell_frame(cmd, token)
+    } else {
+        exec_frame::unix_frame(cmd, token)
+    };
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
     let mut writer = loop {
@@ -291,4 +323,16 @@ fn run_exec(
             }
         }
     }
+}
+
+/// Detect if the session's shell is PowerShell based on argv[0].
+fn is_powershell_session(meta: &tender::model::meta::Meta) -> bool {
+    meta.launch_spec()
+        .argv()
+        .first()
+        .map(|s| {
+            let lower = s.to_lowercase();
+            lower.contains("powershell") || lower.contains("pwsh")
+        })
+        .unwrap_or(false)
 }
