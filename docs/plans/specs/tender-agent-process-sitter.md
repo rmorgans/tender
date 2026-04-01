@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** A cross-platform Rust CLI that lets AI agents start, observe, chain, and kill supervised runs — locally or over SSH — without ever needing an interactive terminal.
+**Goal:** A cross-platform Rust CLI that lets AI agents start, observe, chain, and kill supervised runs — locally or over SSH — without ever needing an interactive terminal. Tender is the execution substrate under agent workflows, hook wrappers, and future frontends — not a frontend itself.
 
-**Tech Stack:** Rust, tokio (async for follow/wait), serde_json, clap, cross-compiled to static binaries (musl on Linux, native on macOS/Windows).
+**Tech Stack:** Rust, serde_json, clap, cross-compiled to static binaries (musl on Linux, native on macOS/Windows).
 
 **Lineage:** Successor to `atch` (C, Unix-only, PTY-first). Keeps the agent workflow (`start → log → push → kill`) but redesigns for agents-first, cross-platform, structured output, and composition primitives.
 
@@ -45,6 +45,8 @@ Tender has one lifecycle model and multiple access paths.
 | **Helper infrastructure** | Bootstrap, auth, connection reuse, optional broker/relay |
 | **Orchestration** | Fanout over one or more backends |
 | **Human mode** | PTY attach/detach, explicitly secondary |
+
+Tender is substrate, not frontend. Agent frameworks, hook wrappers, CI systems, and interactive tools are consumers of the semantic backend API. Tender itself never decides what to run or when — it provides the supervised execution, structured output, and composition primitives that callers build on.
 
 The important boundary is the **semantic backend API**, not raw packet transport.
 
