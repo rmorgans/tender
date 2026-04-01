@@ -236,9 +236,29 @@ fn try_idempotent_start(
         anyhow::bail!(
             "session already exists in terminal state: {name} (use --replace to restart)"
         );
+    } else if matches!(
+        existing_meta.status(),
+        tender::model::state::RunStatus::Starting
+    ) {
+        // Starting state: sidecar may be in dependency wait or still initializing.
+        if session::is_locked(&existing).unwrap_or(false) {
+            // Sidecar alive — check spec match for idempotent return
+            if existing_meta.launch_spec_hash() == launch_spec.canonical_hash() {
+                Ok(None) // Idempotent
+            } else {
+                anyhow::bail!(
+                    "session conflict: {name} is starting with a different launch spec (use --replace to override)"
+                );
+            }
+        } else {
+            // Starting + unlocked = orphan
+            super::status::cleanup_orphan_dir(&session_path);
+            let session = session::create(root, namespace, session_name)?;
+            Ok(Some(session))
+        }
     } else {
-        // Starting -- sidecar is still initializing
-        anyhow::bail!("session {name} is still starting (sidecar has not reached Running yet)");
+        // Unreachable — all RunStatus variants covered above
+        anyhow::bail!("session {name} is in unexpected state")
     }
 }
 
