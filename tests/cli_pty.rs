@@ -157,3 +157,38 @@ fn attach_socket_exists_for_pty_session() {
 
     tender(&root).args(["kill", "pty-attach"]).output().ok();
 }
+
+#[test]
+fn push_to_pty_session_delivers_input() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    // Start a PTY cat session with stdin
+    tender(&root)
+        .args(["start", "pty-push", "--pty", "--stdin", "--", "cat"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-push");
+
+    // Push some input
+    tender(&root)
+        .args(["push", "pty-push"])
+        .write_stdin(b"hello-from-push\n")
+        .output()
+        .unwrap();
+
+    // Give cat time to echo through PTY
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Check log for the pushed content
+    let output = tender(&root)
+        .args(["log", "pty-push", "--raw"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello-from-push"),
+        "push input should appear in PTY log: {stdout}");
+
+    tender(&root).args(["kill", "pty-push"]).output().ok();
+}

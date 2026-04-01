@@ -385,7 +385,8 @@ fn main() {
             std::process::exit(1);
         }
         let args = cli.command.remote_args();
-        match tender::ssh::exec_ssh(host, &args) {
+        let allocate_tty = cmd_name == "attach";
+        match tender::ssh::exec_ssh(host, &args, allocate_tty) {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("{e}");

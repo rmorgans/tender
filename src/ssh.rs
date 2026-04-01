@@ -47,9 +47,10 @@ pub fn is_remote_supported(subcommand: &str) -> bool {
 /// **Scope:** POSIX remote login shells only (bash, zsh, sh, etc.).
 /// Windows remote hosts (PowerShell, cmd.exe) need a different quoting
 /// strategy and are deferred to a follow-on slice.
-pub fn build_ssh_command(host: &str, tender_args: &[String]) -> Command {
+pub fn build_ssh_command(host: &str, tender_args: &[String], allocate_tty: bool) -> Command {
     let mut cmd = Command::new("ssh");
-    cmd.args(["-T", "-o", "ConnectTimeout=10", host]);
+    let tty_flag = if allocate_tty { "-t" } else { "-T" };
+    cmd.args([tty_flag, "-o", "ConnectTimeout=10", host]);
 
     // Each tender arg becomes a separate ssh argv entry, individually
     // quoted for the remote shell. SSH concatenates all args after the
@@ -70,8 +71,8 @@ pub fn build_ssh_command(host: &str, tender_args: &[String]) -> Command {
 ///
 /// Returns the remote tender exit code on success.
 /// Returns `SshError::TransportFailed` for SSH connection failures (exit 255).
-pub fn exec_ssh(host: &str, tender_args: &[String]) -> Result<i32, SshError> {
-    let mut child = build_ssh_command(host, tender_args)
+pub fn exec_ssh(host: &str, tender_args: &[String], allocate_tty: bool) -> Result<i32, SshError> {
+    let mut child = build_ssh_command(host, tender_args, allocate_tty)
         .spawn()
         .map_err(SshError::SpawnFailed)?;
 
@@ -91,7 +92,7 @@ mod tests {
     /// Helper: extract the args that `build_ssh_command` would pass to the ssh binary.
     fn ssh_argv(host: &str, tender_args: &[&str]) -> Vec<String> {
         let args: Vec<String> = tender_args.iter().map(|s| s.to_string()).collect();
-        let cmd = build_ssh_command(host, &args);
+        let cmd = build_ssh_command(host, &args, false);
         cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
@@ -117,7 +118,7 @@ mod tests {
             "echo".to_string(),
             "hello world".to_string(),
         ];
-        let cmd = build_ssh_command("user@box", &args);
+        let cmd = build_ssh_command("user@box", &args, false);
         let argv: Vec<String> = cmd.get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -137,7 +138,7 @@ mod tests {
             "-c".to_string(),
             "echo $HOME && ls".to_string(),
         ];
-        let cmd = build_ssh_command("user@box", &args);
+        let cmd = build_ssh_command("user@box", &args, false);
         let argv: Vec<String> = cmd.get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();

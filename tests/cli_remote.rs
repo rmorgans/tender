@@ -356,6 +356,27 @@ fn host_flag_does_not_eat_child_host_arg() {
     panic!("child's --host other-host must be preserved: {parsed:?}");
 }
 
+// -- Task 9 (PTY): SSH -t for attach --
+
+#[test]
+fn host_flag_attach_uses_tty_allocation() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = fake_ssh_echo();
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args(["--host", "user@box", "attach", "my-session"])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let args: Vec<&str> = stdout.lines()
+        .filter_map(|l| l.strip_prefix("ARG:"))
+        .collect();
+    assert!(args.contains(&"-t"), "attach should use -t for TTY: {args:?}");
+    assert!(!args.contains(&"-T"), "attach should not use -T: {args:?}");
+}
+
 // -- Task 11: Allowlist rejection --
 
 #[test]
