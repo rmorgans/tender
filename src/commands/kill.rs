@@ -58,12 +58,19 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
 
     if sidecar_alive {
         // Write kill request for the sidecar to pick up.
-        let request = serde_json::json!({ "force": force });
+        // Scoped to run_id so a stale request can't kill a replacement run.
+        // Written atomically (tmp + rename) to prevent partial reads.
+        let run_id = meta.run_id().to_string();
+        let request = serde_json::json!({ "force": force, "run_id": run_id });
         let kill_request_path = session.path().join("kill_request");
-        std::fs::write(&kill_request_path, request.to_string())?;
+        let kill_request_tmp = session.path().join("kill_request.tmp");
+        std::fs::write(&kill_request_tmp, request.to_string())?;
+        std::fs::rename(&kill_request_tmp, &kill_request_path)?;
 
-        // Give the sidecar time to act (up to 3 seconds).
-        for _ in 0..30 {
+        // Wait for sidecar to act. The platform kill_child contract allows
+        // up to 5s for graceful stop before escalation, plus time for the
+        // sidecar to write terminal state. 8s total (5s grace + 3s buffer).
+        for _ in 0..80 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if let Ok(m) = session::read_meta(&session) {
                 if m.status().is_terminal() {

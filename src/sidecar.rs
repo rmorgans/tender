@@ -106,31 +106,44 @@ fn setup_timeout(
 }
 
 /// Spawn a thread that watches for a `kill_request` file from the CLI.
-/// When found, calls kill_child with the live ChildKillHandle (Job Object on
-/// Windows, process group on Unix) for tree-aware kill. The CLI writes this
-/// file instead of calling kill_orphan directly when the sidecar is alive.
+/// When found, validates the run_id matches (preventing stale requests from
+/// killing a replacement run), then calls kill_child with the live
+/// ChildKillHandle for tree-aware kill.
 fn setup_kill_watcher(
     session_dir: &Path,
     kill_handle: <Current as Platform>::ChildKillHandle,
+    run_id: RunId,
     cancel: Arc<AtomicBool>,
 ) {
     let kill_request_path = session_dir.join("kill_request");
     let kill_acted_path = session_dir.join("kill_acted");
+    let run_id_str = run_id.to_string();
     std::thread::spawn(move || {
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
             if kill_request_path.exists() {
-                // Read force flag from request file.
-                let force = std::fs::read_to_string(&kill_request_path)
+                // Parse the request. If unreadable or malformed, discard it
+                // rather than defaulting to force (avoids partial-read upgrades).
+                let parsed = std::fs::read_to_string(&kill_request_path)
                     .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| v["force"].as_bool())
-                    .unwrap_or(true);
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
-                // Clean up the request file.
+                // Always clean up the request file.
                 let _ = std::fs::remove_file(&kill_request_path);
+
+                let request = match parsed {
+                    Some(v) => v,
+                    None => continue, // Malformed — ignore, CLI will retry or fall back
+                };
+
+                // Validate run_id — reject stale requests from a previous run.
+                if request["run_id"].as_str() != Some(&run_id_str) {
+                    continue; // Wrong run — ignore
+                }
+
+                let force = request["force"].as_bool().unwrap_or(false);
 
                 // Leave a breadcrumb so exit classification knows this was
                 // a sidecar-mediated kill (not a spontaneous child exit).
@@ -325,7 +338,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
 
     // Watch for CLI kill requests (kill_request file in session dir).
     // Uses the live ChildKillHandle for tree-aware kill on Windows.
-    setup_kill_watcher(session_dir, kill_handle, Arc::clone(&timeout_cancel));
+    setup_kill_watcher(session_dir, kill_handle, run_id, Arc::clone(&timeout_cancel));
 
     // --- Supervise ---
     let exit_reason = supervise(&session, &mut child)?;
