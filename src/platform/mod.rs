@@ -96,6 +96,18 @@ pub trait Platform {
         env: &BTreeMap<String, String>,
     ) -> io::Result<Self::SupervisedChild>;
 
+    /// Spawn a child process under a pseudo-terminal.
+    /// child_stdout() returns PTY master read half.
+    /// child_stdin() returns PTY master write half.
+    /// child_stderr() returns None (merged output).
+    ///
+    /// Unix only in slice one. Windows returns Err.
+    fn spawn_child_pty(
+        argv: &[String],
+        cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<Self::SupervisedChild>;
+
     /// Get the ProcessIdentity of the supervised child.
     /// Cheap, callable any time -- borrows only.
     fn child_identity(child: &Self::SupervisedChild) -> io::Result<ProcessIdentity>;

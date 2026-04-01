@@ -20,6 +20,12 @@ pub struct UnixPlatform;
 pub struct SupervisedChild {
     child: std::process::Child,
     identity: ProcessIdentity,
+    /// Whether this child was spawned under a PTY.
+    is_pty: bool,
+    /// PTY master read half. None for pipe sessions.
+    pty_master_read: Option<File>,
+    /// PTY master write half. None for pipe sessions.
+    pty_master_write: Option<File>,
 }
 
 /// Lightweight kill handle for Unix. Carries the ProcessIdentity
@@ -99,7 +105,120 @@ impl Platform for UnixPlatform {
         let pid = child.id();
         let identity = process_identity(pid)?;
 
-        Ok(SupervisedChild { child, identity })
+        Ok(SupervisedChild {
+            child,
+            identity,
+            is_pty: false,
+            pty_master_read: None,
+            pty_master_write: None,
+        })
+    }
+
+    fn spawn_child_pty(
+        argv: &[String],
+        cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
+    ) -> io::Result<SupervisedChild> {
+        // 1. Create PTY pair
+        let mut master_fd: libc::c_int = 0;
+        let mut slave_fd: libc::c_int = 0;
+        // SAFETY: openpty writes valid fds into master_fd/slave_fd on success.
+        // Null pointers for name/termios/winsize are explicitly allowed.
+        let ret = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: openpty returned 0, so master_fd and slave_fd are valid open fds.
+        let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave_fd) };
+
+        let mut cmd = Command::new(&argv[0]);
+        if argv.len() > 1 {
+            cmd.args(&argv[1..]);
+        }
+
+        let slave_raw = slave.as_raw_fd();
+        // SAFETY: pre_exec runs after fork() in the child process, before exec().
+        // All called functions (setsid, ioctl, dup2, close, setpgid) are
+        // async-signal-safe. slave_raw is a Copy integer captured by value.
+        unsafe {
+            cmd.pre_exec(move || {
+                // Create new session so child becomes session leader
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                // Set the slave as the controlling terminal
+                #[cfg(target_os = "macos")]
+                {
+                    if libc::ioctl(slave_raw, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if libc::ioctl(slave_raw, libc::TIOCSCTTY, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                // Wire slave to stdin/stdout/stderr
+                if libc::dup2(slave_raw, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::dup2(slave_raw, 1) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::dup2(slave_raw, 2) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if slave_raw > 2 {
+                    libc::close(slave_raw);
+                }
+                // Own process group for tree kill
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        // Child inherits slave via pre_exec. Rust's side gets null stdio.
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        if !env.is_empty() {
+            cmd.envs(env);
+        }
+
+        let child = cmd.spawn()?;
+        drop(slave); // Close slave in parent
+
+        // Dup master into read and write halves
+        let master_read = File::from(master.try_clone()?);
+        let master_write = File::from(master);
+
+        let pid = child.id();
+        let identity = process_identity(pid)?;
+
+        Ok(SupervisedChild {
+            child,
+            identity,
+            is_pty: true,
+            pty_master_read: Some(master_read),
+            pty_master_write: Some(master_write),
+        })
     }
 
     fn child_identity(child: &SupervisedChild) -> io::Result<ProcessIdentity> {
@@ -115,27 +234,45 @@ impl Platform for UnixPlatform {
     }
 
     fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
-        child
-            .child
-            .stdout
-            .take()
-            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+        if child.is_pty {
+            child
+                .pty_master_read
+                .take()
+                .map(|f| Box::new(f) as Box<dyn io::Read + Send>)
+        } else {
+            child
+                .child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+        }
     }
 
     fn child_stderr(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
-        child
-            .child
-            .stderr
-            .take()
-            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+        if child.is_pty {
+            None // Merged into PTY master
+        } else {
+            child
+                .child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
+        }
     }
 
     fn child_stdin(child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
-        child
-            .child
-            .stdin
-            .take()
-            .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
+        if child.is_pty {
+            child
+                .pty_master_write
+                .take()
+                .map(|f| Box::new(f) as Box<dyn io::Write + Send>)
+        } else {
+            child
+                .child
+                .stdin
+                .take()
+                .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
+        }
     }
 
     fn child_kill_handle(child: &SupervisedChild) -> ChildKillHandle {

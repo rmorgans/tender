@@ -174,6 +174,17 @@ impl Platform for WindowsPlatform {
         })
     }
 
+    fn spawn_child_pty(
+        _argv: &[String],
+        _cwd: Option<&Path>,
+        _env: &BTreeMap<String, String>,
+    ) -> io::Result<SupervisedChild> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "PTY not supported on Windows yet",
+        ))
+    }
+
     fn child_identity(child: &SupervisedChild) -> io::Result<ProcessIdentity> {
         Ok(child.identity)
     }
