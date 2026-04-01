@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
+use crate::model::dep_fail::DepFailReason;
 use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName};
 use crate::model::meta::Meta;
 use crate::model::spec::{LaunchSpec, StdinMode};
@@ -54,6 +55,9 @@ fn setup_stdin_forwarding(
     child_stdin: Box<dyn Write + Send>,
     stdin_errors: &Arc<Mutex<Vec<String>>>,
 ) -> anyhow::Result<()> {
+    // StdinTransport is () on Unix — clippy flags the let-binding but
+    // forward_stdin needs the value on Windows where the type is non-unit.
+    #[allow(clippy::let_unit_value)]
     let transport = Current::create_stdin_transport(session_dir)?;
 
     // Spawn forwarding thread (detached -- not joined).
@@ -186,6 +190,125 @@ fn collect_warnings(session_dir: &Path, stdin_errors: &Arc<Mutex<Vec<String>>>) 
     warnings
 }
 
+/// Outcome of the dependency wait phase.
+enum DepWaitOutcome {
+    /// All dependencies satisfied — proceed to spawn.
+    Satisfied,
+    /// A dependency failed (non-zero exit, not found, replaced).
+    Failed(String),
+    /// Timeout expired during the wait.
+    TimedOut(String),
+    /// Kill request received during the wait.
+    Killed(String),
+}
+
+/// Poll dependency meta.json files until all reach terminal state.
+fn wait_for_dependencies(
+    session_root: &SessionRoot,
+    namespace: &Namespace,
+    spec: &LaunchSpec,
+    timeout_s: Option<u64>,
+    session_dir: &Path,
+    run_id: &RunId,
+) -> DepWaitOutcome {
+    let deadline =
+        timeout_s.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
+    let kill_request_path = session_dir.join("kill_request");
+
+    loop {
+        // Check kill request first
+        if kill_request_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&kill_request_path) {
+                if let Ok(req) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if req["run_id"].as_str() == Some(&run_id.to_string()) {
+                        let _ = std::fs::remove_file(&kill_request_path);
+                        return DepWaitOutcome::Killed(
+                            "killed during dependency wait".into(),
+                        );
+                    }
+                }
+            }
+            // Wrong run_id or malformed — remove and ignore
+            let _ = std::fs::remove_file(&kill_request_path);
+        }
+
+        // Check timeout
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                return DepWaitOutcome::TimedOut(
+                    "timeout expired during dependency wait".into(),
+                );
+            }
+        }
+
+        // Poll all dependencies
+        let mut all_satisfied = true;
+        for dep in &spec.after {
+            let dep_session = match session::open(session_root, namespace, &dep.session) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    return DepWaitOutcome::Failed(format!(
+                        "dependency session not found: {}",
+                        dep.session
+                    ));
+                }
+                Err(e) => {
+                    return DepWaitOutcome::Failed(format!(
+                        "failed to open dependency {}: {e}",
+                        dep.session
+                    ));
+                }
+            };
+
+            let dep_meta = match session::read_meta(&dep_session) {
+                Ok(m) => m,
+                Err(e) => {
+                    return DepWaitOutcome::Failed(format!(
+                        "failed to read dependency {}: {e}",
+                        dep.session
+                    ));
+                }
+            };
+
+            // Check run_id — reject if dependency was replaced
+            if dep_meta.run_id() != dep.run_id {
+                return DepWaitOutcome::Failed(format!(
+                    "dependency {} was replaced (bound run_id {}, found {})",
+                    dep.session,
+                    dep.run_id,
+                    dep_meta.run_id()
+                ));
+            }
+
+            if dep_meta.status().is_terminal() {
+                if !spec.after_any_exit {
+                    use crate::model::state::{ExitReason as ER, RunStatus};
+                    match dep_meta.status() {
+                        RunStatus::Exited {
+                            how: ER::ExitedOk, ..
+                        } => {} // satisfied
+                        _ => {
+                            return DepWaitOutcome::Failed(format!(
+                                "dependency {} exited with non-success state",
+                                dep.session
+                            ));
+                        }
+                    }
+                }
+                // satisfied (or --any-exit)
+            } else {
+                all_satisfied = false;
+            }
+        }
+
+        if all_satisfied {
+            return DepWaitOutcome::Satisfied;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Result<()> {
     // --- Setup: lock, read spec, create meta ---
     let sidecar_identity = Current::self_identity()?;
@@ -271,6 +394,46 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         session_dir.to_str().unwrap_or("").to_owned(),
     );
 
+    // --- Wait for --after dependencies ---
+    let has_deps = !meta.launch_spec().after.is_empty();
+    if has_deps {
+        // Signal readiness BEFORE waiting — CLI unblocks, status shows Starting.
+        session::write_meta_atomic(&session, &meta)?;
+        signal_meta_snapshot(ready, &meta)?;
+
+        match wait_for_dependencies(
+            &session_root,
+            &namespace,
+            meta.launch_spec(),
+            meta.launch_spec().timeout_s,
+            session_dir,
+            &run_id,
+        ) {
+            DepWaitOutcome::Satisfied => {} // proceed to spawn
+            DepWaitOutcome::Failed(msg) => {
+                meta.add_warning(msg);
+                meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::Failed)?;
+                session::write_meta_atomic(&session, &meta)?;
+                return Ok(());
+            }
+            DepWaitOutcome::TimedOut(msg) => {
+                meta.add_warning(msg);
+                meta.transition_dependency_failed(
+                    EpochTimestamp::now(),
+                    DepFailReason::TimedOut,
+                )?;
+                session::write_meta_atomic(&session, &meta)?;
+                return Ok(());
+            }
+            DepWaitOutcome::Killed(msg) => {
+                meta.add_warning(msg);
+                meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::Killed)?;
+                session::write_meta_atomic(&session, &meta)?;
+                return Ok(());
+            }
+        }
+    }
+
     // --- Spawn child (with SpawnFailed handling inline) ---
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
     let mut child = match Current::spawn_child(
@@ -284,7 +447,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             meta.add_warning(format!("spawn failed: {e}"));
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
-            signal_meta_snapshot(ready, &meta)?;
+            if !has_deps {
+                signal_meta_snapshot(ready, &meta)?;
+            }
             return Ok(()); // Not an error -- SpawnFailed is a valid terminal state
         }
     };
@@ -301,7 +466,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             let _ = Current::child_wait(&mut child);
             meta.transition_spawn_failed(EpochTimestamp::now())?;
             session::write_meta_atomic(&session, &meta)?;
-            signal_meta_snapshot(ready, &meta)?;
+            if !has_deps {
+                signal_meta_snapshot(ready, &meta)?;
+            }
             return Ok(());
         }
     };
@@ -325,7 +492,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     // --- Transition to Running + readiness signal ---
     meta.transition_running(child_identity)?;
     session::write_meta_atomic(&session, &meta)?;
-    signal_meta_snapshot(ready, &meta)?;
+    if !has_deps {
+        signal_meta_snapshot(ready, &meta)?;
+    }
 
     // --- Timeout + kill watcher setup ---
     let kill_handle = Current::child_kill_handle(&child);

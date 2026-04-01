@@ -61,10 +61,9 @@ fn after_nonexistent_session_fails_at_bind() {
         .stderr(predicates::str::contains("session not found"));
 }
 
-/// Idempotent start on a Running session with --after: same spec -> return existing.
-/// Without the sidecar wait loop (Task 5), --after sessions transition immediately
-/// to Running, so we exercise the Running-state idempotent path. This still validates
-/// that the after bindings are part of the spec hash.
+/// Idempotent start on a Starting session with --after: same spec -> return existing.
+/// With the sidecar wait loop, --after sessions stay in Starting while waiting.
+/// This validates that the after bindings are part of the spec hash for idempotent matching.
 #[test]
 fn after_idempotent_on_running() {
     let _lock = lock();
@@ -77,12 +76,14 @@ fn after_idempotent_on_running() {
         .success();
     harness::wait_running(&root, "job1");
 
-    // Start job2 --after job1 (long-running child so it stays Running)
+    // Start job2 --after job1 (stays in Starting, waiting for job1)
     harness::tender(&root)
         .args(["start", "job2", "--after", "job1", "--", "sleep", "30"])
         .assert()
         .success();
-    harness::wait_running(&root, "job2");
+
+    // Give sidecar time to enter wait loop
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Second start with identical args: should succeed (idempotent)
     harness::tender(&root)
@@ -95,15 +96,12 @@ fn after_idempotent_on_running() {
         .args(["kill", "job1", "--force"])
         .assert();
     let _ = harness::tender(&root)
-        .args(["kill", "job2", "--force"])
+        .args(["kill", "job2"])
         .assert();
 }
 
 /// Idempotent start on Starting session (waiting for deps): same spec -> return existing.
-/// TODO: This test requires the sidecar wait loop (Task 5) to keep sessions in Starting
-/// state. Without it, the sidecar transitions immediately past Starting. Enable after Task 5.
 #[test]
-#[ignore]
 fn after_idempotent_on_starting() {
     let _lock = lock();
     let root = tempfile::TempDir::new().unwrap();
@@ -137,4 +135,38 @@ fn after_idempotent_on_starting() {
     let _ = harness::tender(&root)
         .args(["kill", "job2"])
         .assert();
+}
+
+/// job2 waits while job1 is still running, then runs after job1 exits.
+#[test]
+fn after_waits_for_running_dependency() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // Start job1 (runs for 2s)
+    harness::tender(&root)
+        .args(["start", "job1", "--", "sleep", "2"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "job1");
+
+    // Start job2 --after job1
+    harness::tender(&root)
+        .args(["start", "job2", "--after", "job1", "--", "true"])
+        .assert()
+        .success();
+
+    // job2 should be Starting (waiting)
+    let meta_path = root
+        .path()
+        .join(".tender/sessions/default/job2/meta.json");
+    let content = std::fs::read_to_string(&meta_path).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(meta["status"].as_str(), Some("Starting"));
+
+    // Wait for both to finish
+    harness::wait_terminal(&root, "job1");
+    let meta2 = harness::wait_terminal(&root, "job2");
+    assert_eq!(meta2["status"].as_str(), Some("Exited"));
+    assert_eq!(meta2["reason"].as_str(), Some("ExitedOk"));
 }
