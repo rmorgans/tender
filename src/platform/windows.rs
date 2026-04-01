@@ -236,10 +236,29 @@ impl Platform for WindowsPlatform {
     }
 
     fn kill_orphan(id: &ProcessIdentity, _force: bool) -> io::Result<()> {
-        // Orphan kill with force=false degrades to force on Windows
-        // (no stop event available for orphans). For now, return Unsupported.
-        let _ = id;
-        Err(unsupported("kill_orphan"))
+        // Without a Job Object handle (sidecar crashed or CLI-initiated kill),
+        // we can only kill the individual process by PID — no descendant tree
+        // kill. This is a known degradation on Windows; orphan kill is a
+        // recovery path, not the normal lifecycle.
+        //
+        // force=false degrades to force on Windows because there is no
+        // reliable way to send a graceful stop signal to an orphaned process
+        // without a shared console (which we don't have for orphans).
+        match process_status(id) {
+            ProcessStatus::Missing => return Ok(()),
+            ProcessStatus::IdentityMismatch => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "PID was recycled — refusing to kill wrong process",
+                ));
+            }
+            ProcessStatus::OsError(kind) => {
+                return Err(io::Error::new(kind, "failed to probe process status"));
+            }
+            ProcessStatus::AliveVerified | ProcessStatus::Inaccessible => {}
+        }
+
+        terminate_process_by_pid(id.pid.get())
     }
 
     fn self_identity() -> io::Result<ProcessIdentity> {
@@ -602,6 +621,35 @@ fn send_ctrl_break(pid: u32) {
     // The child was created with CREATE_NEW_PROCESS_GROUP, so pid == group id.
     // Failure is silently ignored — this is a best-effort graceful stop.
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+}
+
+/// Terminate a single process by PID. No tree kill — use only for orphans.
+fn terminate_process_by_pid(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        // Can't open — process likely already exited.
+        return Ok(());
+    }
+
+    let ret = unsafe { TerminateProcess(handle, 1) };
+    unsafe { CloseHandle(handle) };
+
+    if ret == 0 {
+        let err = io::Error::last_os_error();
+        // Access denied may mean the process already exited between
+        // OpenProcess and TerminateProcess — treat as success.
+        if err.raw_os_error()
+            != Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+        {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 // --- Process identity implementation ---

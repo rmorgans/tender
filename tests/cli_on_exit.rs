@@ -48,7 +48,7 @@ fn read_callback_record(root: &TempDir, session: &str) -> Option<serde_json::Val
 
 #[test]
 fn on_exit_callback_runs_after_normal_exit() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker = root.path().join("normal_exit_marker");
@@ -81,7 +81,7 @@ fn on_exit_callback_runs_after_normal_exit() {
 
 #[test]
 fn on_exit_callback_runs_after_forced_kill() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker = root.path().join("kill_exit_marker");
@@ -121,7 +121,7 @@ fn on_exit_callback_runs_after_forced_kill() {
 
 #[test]
 fn on_exit_callback_sees_env_vars() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output_file = root.path().join("env_output.txt");
@@ -175,7 +175,7 @@ fn on_exit_callback_sees_env_vars() {
 
 #[test]
 fn on_exit_callback_failure_recorded_without_state_change() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -215,7 +215,7 @@ fn on_exit_callback_failure_recorded_without_state_change() {
 
 #[test]
 fn on_exit_multiple_callbacks_both_run() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker_a = root.path().join("marker_a");

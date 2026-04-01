@@ -18,7 +18,7 @@ fn read_log(root: &TempDir, session: &str) -> String {
 
 #[test]
 fn start_returns_running_with_child() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output = tender(&root)
@@ -35,7 +35,7 @@ fn start_returns_running_with_child() {
 
 #[test]
 fn child_exit_ok_produces_exited_ok() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -52,7 +52,7 @@ fn child_exit_ok_produces_exited_ok() {
 
 #[test]
 fn child_exit_error_produces_exited_error() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -68,7 +68,7 @@ fn child_exit_error_produces_exited_error() {
 
 #[test]
 fn stdout_captured_to_output_log() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -89,7 +89,7 @@ fn stdout_captured_to_output_log() {
 
 #[test]
 fn stderr_captured_to_output_log() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -103,7 +103,7 @@ fn stderr_captured_to_output_log() {
 
 #[test]
 fn interleaved_stdout_stderr() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -125,7 +125,7 @@ fn interleaved_stdout_stderr() {
 
 #[test]
 fn spawn_failure_produces_spawn_failed() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output = tender(&root)
@@ -140,7 +140,7 @@ fn spawn_failure_produces_spawn_failed() {
 
 #[test]
 fn child_identity_preserved_in_terminal_state() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output = tender(&root)
@@ -159,7 +159,7 @@ fn child_identity_preserved_in_terminal_state() {
 
 #[test]
 fn lock_released_after_child_exits() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -183,7 +183,7 @@ fn lock_released_after_child_exits() {
 
 #[test]
 fn status_shows_terminal_after_child_exits() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

@@ -51,7 +51,7 @@ fn wait_terminal_ns(root: &TempDir, namespace: &str, session: &str) -> serde_jso
 
 #[test]
 fn start_in_explicit_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -83,7 +83,7 @@ fn start_in_explicit_namespace() {
 
 #[test]
 fn same_name_different_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start "job" in ns-a
@@ -138,7 +138,7 @@ fn same_name_different_namespace() {
 
 #[test]
 fn list_with_namespace_filters() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Create sessions in two namespaces
@@ -183,7 +183,7 @@ fn list_with_namespace_filters() {
 
 #[test]
 fn list_without_namespace_returns_all() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Create sessions in two namespaces
@@ -249,7 +249,7 @@ fn list_without_namespace_returns_all() {
 
 #[test]
 fn start_with_namespace_idempotent() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out1 = tender(&root)
@@ -315,7 +315,7 @@ fn start_with_namespace_idempotent() {
 
 #[test]
 fn default_namespace_used_when_omitted() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -341,7 +341,7 @@ fn default_namespace_used_when_omitted() {
 
 #[test]
 fn push_resolves_session_in_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start a session with stdin in a non-default namespace
@@ -391,7 +391,7 @@ fn push_resolves_session_in_namespace() {
 
 #[test]
 fn log_resolves_session_in_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -426,7 +426,7 @@ fn log_resolves_session_in_namespace() {
 
 #[test]
 fn wait_resolves_session_in_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

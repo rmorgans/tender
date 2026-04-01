@@ -8,7 +8,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn replace_running_session() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out1 = tender(&root)
@@ -40,7 +40,7 @@ fn replace_running_session() {
 
 #[test]
 fn replace_terminal_session() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -66,7 +66,7 @@ fn replace_terminal_session() {
 
 #[test]
 fn replace_nonexistent_is_noop() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -81,7 +81,7 @@ fn replace_nonexistent_is_noop() {
 
 #[test]
 fn replace_increments_generation() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out1 = tender(&root)

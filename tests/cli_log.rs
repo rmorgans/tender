@@ -9,7 +9,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn log_shows_child_output() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -27,7 +27,7 @@ fn log_shows_child_output() {
 
 #[test]
 fn log_tail() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -52,7 +52,7 @@ fn log_tail() {
 
 #[test]
 fn log_grep() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -78,7 +78,7 @@ fn log_grep() {
 
 #[test]
 fn log_raw_strips_prefix() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -107,7 +107,7 @@ fn log_raw_strips_prefix() {
 
 #[test]
 fn log_nonexistent_session_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root).args(["log", "nope"]).assert().failure();
@@ -115,7 +115,7 @@ fn log_nonexistent_session_fails() {
 
 #[test]
 fn log_no_output_file_returns_empty() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -134,7 +134,7 @@ fn log_no_output_file_returns_empty() {
 
 #[test]
 fn log_stderr_captured() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -153,7 +153,7 @@ fn log_stderr_captured() {
 
 #[test]
 fn log_since_filters_by_time() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -186,7 +186,7 @@ fn log_since_filters_by_time() {
 
 #[test]
 fn log_follow_stops_on_terminal_session() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

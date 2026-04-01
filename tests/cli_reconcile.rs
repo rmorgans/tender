@@ -42,7 +42,7 @@ fn wait_pid_dead(pid: i32) {
 
 #[test]
 fn status_reconciles_crashed_sidecar() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -72,7 +72,7 @@ fn status_reconciles_crashed_sidecar() {
 
 #[test]
 fn status_does_not_reconcile_running_session() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -95,7 +95,7 @@ fn status_does_not_reconcile_running_session() {
 
 #[test]
 fn wait_reconciles_crashed_sidecar() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

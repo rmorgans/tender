@@ -9,7 +9,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn kill_running_process() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -28,7 +28,7 @@ fn kill_running_process() {
 
 #[test]
 fn kill_force() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -48,7 +48,7 @@ fn kill_force() {
 
 #[test]
 fn kill_already_dead_is_idempotent() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -67,7 +67,7 @@ fn kill_already_dead_is_idempotent() {
 
 #[test]
 fn kill_nonexistent_session_is_idempotent() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -79,7 +79,7 @@ fn kill_nonexistent_session_is_idempotent() {
 
 #[test]
 fn kill_preserves_child_identity() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let start_out = tender(&root)
@@ -103,7 +103,7 @@ fn kill_preserves_child_identity() {
 
 #[test]
 fn status_shows_killed_after_kill() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

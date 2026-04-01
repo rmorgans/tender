@@ -9,7 +9,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn start_returns_promptly_not_blocked_by_child() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let start = std::time::Instant::now();
@@ -30,7 +30,7 @@ fn start_returns_promptly_not_blocked_by_child() {
 
 #[test]
 fn start_creates_session_and_returns_json() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output = tender(&root)
@@ -52,7 +52,7 @@ fn start_creates_session_and_returns_json() {
 
 #[test]
 fn start_writes_durable_meta_json() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -72,7 +72,7 @@ fn start_writes_durable_meta_json() {
 
 #[test]
 fn start_same_name_after_completed_fails_already_exists() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -92,7 +92,7 @@ fn start_same_name_after_completed_fails_already_exists() {
 
 #[test]
 fn status_reads_session() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -109,7 +109,7 @@ fn status_reads_session() {
 
 #[test]
 fn status_nonexistent_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root).args(["status", "nope"]).assert().failure();
@@ -117,7 +117,7 @@ fn status_nonexistent_fails() {
 
 #[test]
 fn list_shows_sessions() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Empty list
@@ -146,7 +146,7 @@ fn list_shows_sessions() {
 
 #[test]
 fn launch_spec_json_cleaned_up() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -164,7 +164,7 @@ fn launch_spec_json_cleaned_up() {
 
 #[test]
 fn lock_released_after_sidecar_exits() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
