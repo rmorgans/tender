@@ -9,8 +9,8 @@ pub enum SshError {
     SpawnFailed(io::Error),
 
     /// SSH process exited with a connection-level failure (exit code 255).
-    #[error("ssh transport failed (exit 255): {detail}")]
-    TransportFailed { detail: String },
+    #[error("ssh transport failed: connection or authentication failure (exit 255)")]
+    TransportFailed,
 
     /// SSH process was killed by a signal or returned an unexpected OS error.
     #[error("ssh process terminated abnormally")]
@@ -78,9 +78,7 @@ pub fn exec_ssh(host: &str, tender_args: &[String]) -> Result<i32, SshError> {
     let status = child.wait().map_err(SshError::SpawnFailed)?;
 
     match status.code() {
-        Some(255) => Err(SshError::TransportFailed {
-            detail: "ssh exited with code 255 (connection or auth failure)".to_string(),
-        }),
+        Some(255) => Err(SshError::TransportFailed),
         Some(code) => Ok(code),
         None => Err(SshError::Abnormal),
     }
