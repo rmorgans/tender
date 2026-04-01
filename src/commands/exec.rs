@@ -118,6 +118,13 @@ pub fn cmd_exec(
     let token = exec_frame::generate_token();
     let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
 
+    // If timed out, the in-shell command may still be running.
+    // Hold the exec lock and drain until the sentinel arrives (or session dies)
+    // to prevent a second exec from injecting into a busy shell.
+    if result.timed_out {
+        drain_until_sentinel(&session, &token);
+    }
+
     // Write annotation event to output.log (bounded by MAX_LINE)
     {
         use tender::annotation;
@@ -321,6 +328,49 @@ fn run_exec(
             _ => {
                 // Skip annotations and other tags
             }
+        }
+    }
+}
+
+/// After a timeout, drain output.log until the sentinel arrives or the session dies.
+/// This holds the exec lock open to prevent a second exec from injecting into a
+/// shell that is still busy with the timed-out command.
+fn drain_until_sentinel(session: &SessionDir, token: &str) {
+    let log_path = session.path().join("output.log");
+    let Ok(file) = std::fs::File::open(&log_path) else {
+        return;
+    };
+    let mut reader = BufReader::new(file);
+    // Seek to near the end — the sentinel is recent. Leave 64KB margin
+    // in case the command produced output between the timeout and now.
+    let len = reader.seek(SeekFrom::End(0)).unwrap_or(0);
+    let start = len.saturating_sub(65536);
+    let _ = reader.seek(SeekFrom::Start(start));
+
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                // Check if session is still alive
+                if let Ok(current) = session::read_meta(session) {
+                    if !matches!(current.status(), RunStatus::Running { .. }) {
+                        return; // Session died — nothing more to drain
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Ok(_) => {
+                let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+                if let Some(parsed) = LogLine::parse(trimmed) {
+                    if parsed.tag == 'O'
+                        && exec_frame::parse_sentinel(&parsed.content, token).is_some()
+                    {
+                        return; // Sentinel found — command finished
+                    }
+                }
+            }
+            Err(_) => return, // IO error — give up
         }
     }
 }

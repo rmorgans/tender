@@ -220,7 +220,7 @@ fn exec_timeout() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let output = harness::tender(&root)
-        .args(["exec", "shell", "--timeout", "2", "--", "sleep", "60"])
+        .args(["exec", "shell", "--timeout", "1", "--", "sleep", "4"])
         .output()
         .unwrap();
 

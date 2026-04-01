@@ -17,7 +17,11 @@ pub fn unix_frame(argv: &[String], token: &str) -> String {
 
 /// Build a framed command string for PowerShell.
 ///
-/// Note: argument escaping is minimal (space-joined). Sufficient for first slice.
+/// **WARNING**: Argument escaping is minimal (space-joined). Arguments containing
+/// spaces, quotes, `$`, `;`, or other PowerShell-significant characters will be
+/// misinterpreted. This is a known first-slice limitation. Full PowerShell escaping
+/// (with proper quoting of each argument) is follow-on work.
+///
 /// Token must be hex-only (as produced by `generate_token`).
 pub fn powershell_frame(argv: &[String], token: &str) -> String {
     debug_assert!(
