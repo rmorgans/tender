@@ -10,20 +10,22 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 | File | ID | Summary |
 |------|----|---------|
-| `10_run-shebang.md` | run-shebang | Supervised scripts via shebang |
-| `20_wrap-annotation-ingestion.md` | wrap-annotation-ingestion | Streaming stdin tee, exec framing |
+| `10_run-shebang.md` | run-shebang | Supervised scripts via shebang and CLI |
 
 ## backlog/ — Future Work
 
 | ID | File | Depends On |
 |----|------|------------|
-| skill-and-migration | `skill-and-migration.md` | — |
-| remote-ssh-transport | `remote-ssh-transport.md` | run-shebang, wrap-annotation-ingestion |
-| pty-attach | `pty-attach.md` | run-shebang, wrap-annotation-ingestion |
+| after-composition | `after-composition.md` | — |
+| exec | `exec.md` | wrap-annotation-ingestion (complete) |
+| skill-claude-code | `skill-claude-code.md` | wrap-annotation-ingestion (complete) |
+| fleet-migration | `fleet-migration.md` | remote-ssh-transport |
+| remote-ssh-transport | `remote-ssh-transport.md` | — |
+| pty-attach | `pty-attach.md` | — |
 
 ## completed/
 
-19 completed plans. See `completed/` directory.
+20 completed plans. See `completed/` directory.
 
 ## specs/
 

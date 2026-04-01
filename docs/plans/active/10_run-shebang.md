@@ -4,16 +4,103 @@ depends_on: []
 links: []
 ---
 
-# tender run — Supervised Script Shebang
+# tender run — Supervised Script Execution
 
-Turn any script into a supervised run by changing the shebang.
+Turn any script into a supervised run. Shebang usage is one entry point, not the only one.
 
 ## CLI
 
 ```bash
 tender run <script> [args...]
 tender run --shell python3 <script> [args...]
+tender run --detach <script> [args...]
 ```
+
+## Behavior
+
+### Default (foreground, synchronous)
+
+1. Parse `#tender:` directives from the script header (see Directive Parsing)
+2. Derive session name from script filename (see Name Derivation)
+3. Build `cmd_start()` arguments from directives + CLI flags
+4. Call `cmd_start()` internally (Rust function call, not re-exec)
+5. Immediately call `cmd_wait()` to block until exit
+6. Stream output to caller's terminal via `cmd_log --follow`
+7. Exit with the child's exit code
+
+This makes `tender run build.sh` behave like running `build.sh` directly — output visible, blocks until done, returns the exit code. The session is still supervised (crash recovery, output logging, event stream).
+
+### Detached mode (`--detach`)
+
+Same as steps 1-4 above, then return immediately with session JSON (same as `tender start`). For background jobs where the caller does not want to wait.
+
+## Invocation: Internal, Not Re-exec
+
+`tender run` calls `cmd_start()` as a Rust function. It does NOT shell out to `tender start`. This means:
+
+- The argv stored in `LaunchSpec` is the child command (`["bash", "build.sh"]`), not the tender invocation
+- No binary-finding or quoting issues
+- Error handling is direct (no subprocess exit code parsing)
+- `canonical_hash` is deterministic and matches what `tender start -- bash build.sh` would produce
+
+## Name Derivation
+
+Session name is derived from the script's basename with these steps:
+
+1. Take basename: `/home/user/scripts/build.sh` -> `build.sh`
+2. Strip the last extension: `build.sh` -> `build`
+3. Replace dots with hyphens: `my.build.sh` -> `my-build`
+4. Replace leading underscores: `_private.sh` -> `private`
+5. Truncate to 128 chars
+6. Validate against `SessionName` rules
+
+If the derived name is still invalid after sanitization, error with a clear message suggesting the `session=NAME` directive.
+
+Examples:
+
+| Script | Derived Name |
+|--------|-------------|
+| `build.sh` | `build` |
+| `my.build.sh` | `my-build` |
+| `_private.sh` | `private` |
+| `Makefile` | `Makefile` |
+| `.hidden.sh` | `hidden` |
+
+## Directive Parsing
+
+Parse `#tender:` lines from the script header. Rules:
+
+- **Start:** first line after the shebang (line 1 if no shebang, line 2 if shebang present)
+- **Stop:** at the first line that is not blank and not a `#` comment. Do not scan the entire file.
+- **Syntax:** `#tender: key=value` — space after colon required, split on first `=` for the value
+- **Whitespace:** leading/trailing whitespace in value is trimmed
+- **Unknown directives:** error, not silently ignored. Catches typos like `timout=3600`.
+- **Duplicate non-repeatable keys:** error (last-wins would hide mistakes)
+- **Comment prefix:** always `#`. This limits polyglot support to `#`-comment languages (bash, python, ruby, perl, R, etc.). Languages using `//` or `--` are not supported via directives — use CLI flags instead.
+
+| Directive | Maps to | Repeatable |
+|-----------|---------|------------|
+| `namespace=X` | `--namespace X` | No |
+| `timeout=N` | `--timeout N` | No |
+| `on-exit=CMD` | `--on-exit CMD` | Yes |
+| `stdin=pipe` | `--stdin` | No |
+| `cwd=/path` | `--cwd /path` | No |
+| `env=KEY=VALUE` | `--env KEY=VALUE` (split on first `=`) | Yes |
+| `replace` | `--replace` (no value needed) | No |
+| `session=NAME` | Override auto-derived session name | No |
+| `detach` | `--detach` (no value needed) | No |
+
+CLI flags override directives. Directives override defaults.
+
+## Shell Resolution
+
+- If `--shell` is specified: argv is `[shell, script_path, args...]`
+- If not specified and script is executable (`+x`): argv is `[script_path, args...]`
+- If not specified and script is not executable: argv is `["bash", script_path, args...]`
+
+This avoids the redundancy of `--shell python3` on a script that already has `#!/usr/bin/env python3`.
+
+On Windows, `+x` is not meaningful. If `--shell` is not specified, always use `["bash", script_path, args...]` as default (or error if bash is not available).
 
 ## Shebang Usage
 
@@ -26,7 +113,7 @@ tender run --shell python3 <script> [args...]
 make -j8 && cargo test
 ```
 
-Polyglot:
+Polyglot (`#`-comment languages only):
 
 ```python
 #!/usr/bin/env -S tender run --shell python3
@@ -37,43 +124,72 @@ import pandas as pd
 df = pd.read_csv("big.csv")
 ```
 
-## Behavior
-
-1. Parse `#tender:` directives from the script (key=value, one per line)
-2. Derive session name from script filename (e.g. `build.sh` → `build`)
-3. Build LaunchSpec from directives + CLI flags
-4. Call `tender start <session> [--namespace ...] [--timeout ...] [--on-exit ...] -- <shell> <script> [args...]`
-5. Default shell is `bash` if `--shell` not specified
-
-`tender run` is sugar over `tender start`. No new primitives.
-
-## Directives
-
-| Directive | Maps to |
-|-----------|---------|
-| `namespace=X` | `--namespace X` |
-| `timeout=N` | `--timeout N` |
-| `on-exit=CMD` | `--on-exit CMD` (repeatable) |
-| `stdin=pipe` | `--stdin` |
-| `cwd=/path` | `--cwd /path` |
-| `env=KEY=VALUE` | `--env KEY=VALUE` (repeatable) |
-| `replace` | `--replace` |
-| `session=NAME` | Override auto-derived session name |
-
-CLI flags override directives. Directives override defaults.
-
 ## Portability
 
-`#!/usr/bin/env -S` requires GNU coreutils ≥8.30 (2018) or macOS. Universal on any modern system. Same pattern as `#!/usr/bin/env -S uv run --script` (PEP 723).
+`#!/usr/bin/env -S` support:
 
-## Depends On
+| Platform | Support |
+|----------|---------|
+| GNU coreutils >= 8.30 (2018) | Yes |
+| macOS | Yes (all supported versions) |
+| FreeBSD >= 6.0 | Yes |
+| Alpine/BusyBox >= 1.30 (2019) | Yes |
+| Windows | N/A — shebangs are meaningless. Use `tender run <script>` directly. |
 
-All dependencies are satisfied.
+## File Validation
 
-## Why Frontlog
+`tender run` validates before spawning:
 
-Lowest-friction entry point to Tender. No config files, no wrapper scripts, no manual `tender start`. Change the shebang, get supervision. Good for:
-- Build scripts
-- Data pipelines
-- CI jobs
-- Anything you'd currently run with `nohup` or `screen`
+1. Script file exists and is readable
+2. Script path resolves to a file (not directory, symlink-to-directory, etc.)
+3. Directive parsing succeeds (no unknown keys, no duplicates on non-repeatable keys)
+4. Session name derivation succeeds (or `session=` directive provides a valid name)
+
+Fail fast with clear errors before any sidecar is spawned.
+
+## Testing
+
+### Unit tests (directive parsing)
+
+- Parse valid directives from script content
+- Error on unknown directive
+- Error on duplicate non-repeatable key
+- Handle repeatable keys (on-exit, env)
+- Stop scanning at first non-comment line
+- Handle shebang + directives
+- Handle no shebang + directives
+- `env=KEY=VALUE` with multiple `=` signs (split on first)
+
+### Unit tests (name derivation)
+
+- `build.sh` -> `build`
+- `my.build.sh` -> `my-build`
+- `_private.sh` -> `private`
+- `.hidden.sh` -> `hidden`
+- `Makefile` -> `Makefile`
+- Very long filename -> truncated
+- Unsanitizable name -> error with suggestion
+
+### Integration tests
+
+- `tender run <script>` blocks until exit, returns child exit code
+- `tender run <script>` output visible on stdout/stderr
+- `tender run --detach <script>` returns immediately with JSON
+- Directives map to correct LaunchSpec fields (check meta.json)
+- CLI flags override directives
+- `session=NAME` directive overrides auto-derived name
+- `--shell python3` uses python3 as interpreter
+- Executable script without `--shell` runs directly
+- Non-existent script errors cleanly
+
+Test infrastructure: create temp script files in test harness. No new test binaries needed — existing `harness::tender()` + `wait_terminal()` pattern works.
+
+## Scope
+
+`tender run` is sugar over `tender start` + `tender wait` + `tender log --follow`. No new primitives. No new sidecar behavior.
+
+## Not in Scope
+
+- `exec` (sentinel-framed persistent shell) — separate plan
+- `--after` dependency chaining — separate plan
+- Non-`#` comment directive parsing (use CLI flags for those languages)

@@ -6,6 +6,8 @@ links: []
 
 # Wrap — Transparent Annotation Ingestion
 
+> **Status: Complete.** Core `wrap` command is implemented and tested (11 integration tests). The `exec` concept (sentinel-framed command execution over persistent shells) has been split into its own plan at `backlog/exec.md`.
+
 Tap agent hook events without modifying agents or hook scripts.
 
 `wrap` is the public annotation primitive. There is no public `emit`.

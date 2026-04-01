@@ -1,8 +1,6 @@
 ---
 id: remote-ssh-transport
-depends_on:
-  - run-shebang
-  - wrap-annotation-ingestion
+depends_on: []
 links: []
 ---
 
@@ -140,10 +138,11 @@ This can be added to the SSH backend later without changing Tender core semantic
 
 ## Depends On
 
-See frontmatter `depends_on`. Windows full backend (`windows-full-backend`) is NOT a hard dependency — SSH client runs from macOS, target hosts need `tender` installed.
+No technical blockers — the local backend is stable and tested (237/237 Windows, 234/234 macOS). The previous `depends_on: [run-shebang, wrap-annotation-ingestion]` was sequencing preference, not a real dependency.
 
 ## Notes
 
-This remains the likely path for any future overlap with `cmuxd-remote`, but only for supervised-run semantics.
+- Windows hosts are now valid remote targets (Windows backend complete as of 2026-04-01).
+- This remains the likely path for any future overlap with `cmuxd-remote`, but only for supervised-run semantics. It is not an attempt to replace all remote relay behavior in `cmux`.
 
-It is not an attempt to replace all remote relay behavior in `cmux`.
+> **Needs full design expansion before promotion to active.** Key decisions: whether to introduce a `Backend` trait (refactoring local code) or use pure SSH-shelling (simpler, no local refactor). Add a concrete task list, error classification spec, and integration test plan.
