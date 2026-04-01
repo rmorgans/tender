@@ -69,7 +69,13 @@ fn run_event_data(status: &RunStatus) -> serde_json::Value {
             serde_json::json!({"status": "SidecarLost"})
         }
         RunStatus::DependencyFailed { reason, .. } => {
-            serde_json::json!({"status": "DependencyFailed", "reason": reason})
+            use tender::model::dep_fail::DepFailReason;
+            let reason_str = match reason {
+                DepFailReason::Failed => "Failed",
+                DepFailReason::TimedOut => "TimedOut",
+                DepFailReason::Killed => "Killed",
+            };
+            serde_json::json!({"status": "DependencyFailed", "reason": reason_str})
         }
     }
 }
