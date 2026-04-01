@@ -238,6 +238,98 @@ enum Commands {
     },
 }
 
+impl Commands {
+    /// Reconstruct CLI args for this command, suitable for remote invocation.
+    fn remote_args(&self) -> Vec<String> {
+        match self {
+            Commands::Start {
+                name, namespace, stdin, replace, timeout, cwd, env_vars,
+                on_exit, after, any_exit, cmd,
+            } => {
+                let mut args = vec!["start".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if *stdin { args.push("--stdin".to_string()); }
+                if *replace { args.push("--replace".to_string()); }
+                if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
+                if let Some(c) = cwd { args.extend(["--cwd".to_string(), c.display().to_string()]); }
+                for e in env_vars { args.extend(["--env".to_string(), e.clone()]); }
+                for o in on_exit { args.extend(["--on-exit".to_string(), o.clone()]); }
+                for a in after { args.extend(["--after".to_string(), a.clone()]); }
+                if *any_exit { args.push("--any-exit".to_string()); }
+                args.push("--".to_string());
+                args.extend(cmd.iter().cloned());
+                args
+            }
+            Commands::Status { name, namespace } => {
+                let mut args = vec!["status".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                args
+            }
+            Commands::List { namespace } => {
+                let mut args = vec!["list".to_string()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                args
+            }
+            Commands::Log { name, namespace, tail, follow, grep, since, raw } => {
+                let mut args = vec!["log".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if let Some(n) = tail { args.extend(["--tail".to_string(), n.to_string()]); }
+                if *follow { args.push("--follow".to_string()); }
+                if let Some(g) = grep { args.extend(["--grep".to_string(), g.clone()]); }
+                if let Some(s) = since { args.extend(["--since".to_string(), s.clone()]); }
+                if *raw { args.push("--raw".to_string()); }
+                args
+            }
+            Commands::Push { name, namespace } => {
+                let mut args = vec!["push".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                args
+            }
+            Commands::Kill { name, namespace, force } => {
+                let mut args = vec!["kill".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if *force { args.push("--force".to_string()); }
+                args
+            }
+            Commands::Wait { name, namespace, timeout } => {
+                let mut args = vec!["wait".to_string(), name.clone()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
+                args
+            }
+            Commands::Watch { namespace, events, logs, annotations, from_now } => {
+                let mut args = vec!["watch".to_string()];
+                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if *events { args.push("--events".to_string()); }
+                if *logs { args.push("--logs".to_string()); }
+                if *annotations { args.push("--annotations".to_string()); }
+                if *from_now { args.push("--from-now".to_string()); }
+                args
+            }
+            _ => unreachable!("remote_args called on unsupported command"),
+        }
+    }
+
+    /// Return the subcommand name string for allowlist checking.
+    fn name(&self) -> &'static str {
+        match self {
+            Commands::Start { .. } => "start",
+            Commands::Status { .. } => "status",
+            Commands::List { .. } => "list",
+            Commands::Log { .. } => "log",
+            Commands::Push { .. } => "push",
+            Commands::Kill { .. } => "kill",
+            Commands::Wait { .. } => "wait",
+            Commands::Watch { .. } => "watch",
+            Commands::Run { .. } => "run",
+            Commands::Exec { .. } => "exec",
+            Commands::Wrap { .. } => "wrap",
+            Commands::Prune { .. } => "prune",
+            Commands::Sidecar { .. } => "_sidecar",
+        }
+    }
+}
+
 /// Parse a human-readable duration string (e.g. "7d", "24h", "30m").
 fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
     humantime::parse_duration(s)
@@ -264,6 +356,23 @@ fn parse_optional_namespace(namespace: Option<String>) -> anyhow::Result<Option<
 
 fn main() {
     let cli = Cli::parse();
+
+    // If --host is set, dispatch to SSH transport.
+    if let Some(ref host) = cli.host {
+        let cmd_name = cli.command.name();
+        if !tender::ssh::is_remote_supported(cmd_name) {
+            eprintln!("command '{cmd_name}' is not supported over SSH (--host)");
+            std::process::exit(1);
+        }
+        let args = cli.command.remote_args();
+        match tender::ssh::exec_ssh(host, &args) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let result = match cli.command {
         Commands::Start {
