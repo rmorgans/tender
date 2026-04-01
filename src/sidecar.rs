@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,8 @@ use anyhow::Context;
 use crate::model::dep_fail::DepFailReason;
 use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName};
 use crate::model::meta::Meta;
-use crate::model::spec::{LaunchSpec, StdinMode};
+use crate::model::pty::PtyMeta;
+use crate::model::spec::{IoMode, LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
 use crate::platform::{Current, Platform};
 use crate::session::{self, LockGuard, SessionDir, SessionRoot};
@@ -329,6 +331,26 @@ fn wait_for_dependencies(
     }
 }
 
+/// A Write wrapper around Arc<Mutex<Box<dyn Write + Send>>>.
+/// Allows multiple owners to write to the same underlying sink.
+struct SharedWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "write mutex poisoned"))?
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "write mutex poisoned"))?
+            .flush()
+    }
+}
+
 fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Result<()> {
     // --- Setup: lock, read spec, create meta ---
     let sidecar_identity = Current::self_identity()?;
@@ -464,22 +486,43 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     }
 
     // --- Spawn child (with SpawnFailed handling inline) ---
+    let is_pty = meta.launch_spec().io_mode == IoMode::Pty;
     let stdin_piped = meta.launch_spec().stdin_mode == StdinMode::Pipe;
-    let mut child = match Current::spawn_child(
-        meta.launch_spec().argv(),
-        stdin_piped,
-        meta.launch_spec().cwd.as_deref(),
-        &effective_env,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            meta.add_warning(format!("spawn failed: {e}"));
-            meta.transition_spawn_failed(EpochTimestamp::now())?;
-            session::write_meta_atomic(&session, &meta)?;
-            if !has_deps {
-                signal_meta_snapshot(ready, &meta)?;
+
+    let mut child = if is_pty {
+        match Current::spawn_child_pty(
+            meta.launch_spec().argv(),
+            meta.launch_spec().cwd.as_deref(),
+            &effective_env,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                meta.add_warning(format!("spawn failed: {e}"));
+                meta.transition_spawn_failed(EpochTimestamp::now())?;
+                session::write_meta_atomic(&session, &meta)?;
+                if !has_deps {
+                    signal_meta_snapshot(ready, &meta)?;
+                }
+                return Ok(());
             }
-            return Ok(()); // Not an error -- SpawnFailed is a valid terminal state
+        }
+    } else {
+        match Current::spawn_child(
+            meta.launch_spec().argv(),
+            stdin_piped,
+            meta.launch_spec().cwd.as_deref(),
+            &effective_env,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                meta.add_warning(format!("spawn failed: {e}"));
+                meta.transition_spawn_failed(EpochTimestamp::now())?;
+                session::write_meta_atomic(&session, &meta)?;
+                if !has_deps {
+                    signal_meta_snapshot(ready, &meta)?;
+                }
+                return Ok(());
+            }
         }
     };
 
@@ -512,14 +555,34 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
 
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // For PTY sessions: wrap the write side in Arc<Mutex> for shared access.
+    // Both the FIFO forwarding thread and the future attach listener need to
+    // write to the PTY master.
+    let _pty_write_handle: Option<Arc<Mutex<Box<dyn Write + Send>>>> = if is_pty {
+        Current::child_stdin(&mut child).map(|w| Arc::new(Mutex::new(w)))
+    } else {
+        None
+    };
+
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        let child_stdin = Current::child_stdin(&mut child)
-            .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?;
+        let child_stdin: Box<dyn Write + Send> = if let Some(ref shared) = _pty_write_handle {
+            // PTY: forwarding thread writes through a clone of the shared handle
+            let shared_clone = Arc::clone(shared);
+            Box::new(SharedWriter(shared_clone))
+        } else {
+            // Pipe: forwarding thread owns the write side directly
+            Current::child_stdin(&mut child)
+                .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?
+        };
         setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
     }
 
     // --- Transition to Running + readiness signal ---
     meta.transition_running(child_identity)?;
+    if is_pty {
+        meta.set_pty(PtyMeta::new());
+    }
     session::write_meta_atomic(&session, &meta)?;
     if !has_deps {
         signal_meta_snapshot(ready, &meta)?;
@@ -747,21 +810,25 @@ fn supervise(
         .open(&log_path)?;
     let log = Mutex::new(log_file);
 
-    let stdout = Current::child_stdout(child).expect("stdout was piped");
-    let stderr = Current::child_stderr(child).expect("stderr was piped");
+    let stdout = Current::child_stdout(child).expect("stdout/pty was available");
+    let stderr = Current::child_stderr(child); // None for PTY sessions
 
     // Spawn reader threads. Capture errors rather than silently discarding.
     let log_ref = &log;
     let (stdout_result, stderr_result) = std::thread::scope(|scope| {
         let stdout_handle = scope.spawn(move || capture_stream(stdout, 'O', log_ref));
-        let stderr_handle = scope.spawn(move || capture_stream(stderr, 'E', log_ref));
+        let stderr_handle =
+            stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
 
         let stdout_r = stdout_handle
             .join()
             .unwrap_or_else(|_| Err("stdout capture thread panicked".into()));
         let stderr_r = stderr_handle
-            .join()
-            .unwrap_or_else(|_| Err("stderr capture thread panicked".into()));
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("stderr capture thread panicked".into()))
+            })
+            .unwrap_or(Ok(()));
         (stdout_r, stderr_r)
     });
 

@@ -182,10 +182,9 @@ impl Platform for UnixPlatform {
                 if slave_raw > 2 {
                     libc::close(slave_raw);
                 }
-                // Own process group for tree kill
-                if libc::setpgid(0, 0) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
+                // setsid() already created a new process group (PGID == PID).
+                // Calling setpgid(0, 0) on a session leader returns EPERM,
+                // so we skip it — tree kill via kill(-pgid) still works.
                 Ok(())
             });
         }

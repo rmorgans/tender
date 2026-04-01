@@ -25,6 +25,54 @@ fn start_pty_flag_sets_io_mode() {
 }
 
 #[test]
+fn start_pty_session_captures_output() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-echo", "--pty", "--", "echo", "pty-hello"])
+        .output()
+        .unwrap();
+
+    harness::wait_terminal(&root, "pty-echo");
+
+    let output = tender(&root)
+        .args(["log", "pty-echo", "--raw"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("pty-hello"),
+        "PTY output should be captured in log: {stdout}"
+    );
+}
+
+#[test]
+fn start_pty_session_shows_pty_metadata() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-meta", "--pty", "--", "echo", "hi"])
+        .output()
+        .unwrap();
+
+    harness::wait_terminal(&root, "pty-meta");
+
+    let output = tender(&root)
+        .args(["status", "pty-meta"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let meta: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(meta["pty"]["enabled"], true);
+    assert_eq!(meta["pty"]["control"], "AgentControl");
+    assert_eq!(meta["launch_spec"]["io_mode"], "Pty");
+}
+
+#[test]
 fn exec_rejected_on_pty_session() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
