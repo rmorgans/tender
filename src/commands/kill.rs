@@ -1,6 +1,33 @@
 use tender::model::ids::{Namespace, SessionName};
+use tender::model::meta::Meta;
 use tender::platform::{Current, Platform};
-use tender::session::{self, SessionRoot};
+use tender::session::{self, SessionDir, SessionRoot};
+
+/// Write a kill_request file and wait for the sidecar to write terminal state.
+/// Returns `Some(meta)` if the sidecar responded, `None` if it didn't within the timeout.
+fn signal_kill_request(
+    session: &SessionDir,
+    meta: &Meta,
+    force: bool,
+    poll_iterations: u32,
+) -> anyhow::Result<Option<Meta>> {
+    let run_id = meta.run_id().to_string();
+    let request = serde_json::json!({ "force": force, "run_id": run_id });
+    let kill_request_path = session.path().join("kill_request");
+    let kill_request_tmp = session.path().join("kill_request.tmp");
+    std::fs::write(&kill_request_tmp, request.to_string())?;
+    std::fs::rename(&kill_request_tmp, &kill_request_path)?;
+
+    for _ in 0..poll_iterations {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(m) = session::read_meta(session) {
+            if m.status().is_terminal() {
+                return Ok(Some(m));
+            }
+        }
+    }
+    Ok(None)
+}
 
 pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
@@ -32,26 +59,13 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
         Some(c) => *c,
         None => {
             // Starting state with no child — sidecar may be in dependency wait.
-            // If sidecar is alive, signal it via kill_request (same as Running path).
+            // If sidecar is alive, signal it via kill_request.
             let sidecar_alive = session::is_locked(&session).unwrap_or(false);
             if sidecar_alive {
-                let run_id = meta.run_id().to_string();
-                let request = serde_json::json!({ "force": force, "run_id": run_id });
-                let kill_request_path = session.path().join("kill_request");
-                let kill_request_tmp = session.path().join("kill_request.tmp");
-                std::fs::write(&kill_request_tmp, request.to_string())?;
-                std::fs::rename(&kill_request_tmp, &kill_request_path)?;
-
-                // Wait for sidecar to write terminal state
-                for _ in 0..80 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if let Ok(m) = session::read_meta(&session) {
-                        if m.status().is_terminal() {
-                            let json = serde_json::to_string_pretty(&m)?;
-                            println!("{json}");
-                            return Ok(());
-                        }
-                    }
+                if let Some(m) = signal_kill_request(&session, &meta, force, 80)? {
+                    let json = serde_json::to_string_pretty(&m)?;
+                    println!("{json}");
+                    return Ok(());
                 }
                 // Sidecar didn't act — fall through to report
             }
@@ -80,30 +94,12 @@ pub fn cmd_kill(name: &str, force: bool, namespace: &Namespace) -> anyhow::Resul
     let sidecar_alive = session::is_locked(&session).unwrap_or(false);
 
     if sidecar_alive {
-        // Write kill request for the sidecar to pick up.
-        // Scoped to run_id so a stale request can't kill a replacement run.
-        // Written atomically (tmp + rename) to prevent partial reads.
-        let run_id = meta.run_id().to_string();
-        let request = serde_json::json!({ "force": force, "run_id": run_id });
-        let kill_request_path = session.path().join("kill_request");
-        let kill_request_tmp = session.path().join("kill_request.tmp");
-        std::fs::write(&kill_request_tmp, request.to_string())?;
-        std::fs::rename(&kill_request_tmp, &kill_request_path)?;
-
-        // Wait for sidecar to act. The platform kill_child contract allows
-        // up to 5s for graceful stop before escalation, plus time for the
-        // sidecar to write terminal state. 8s total (5s grace + 3s buffer).
-        for _ in 0..80 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if let Ok(m) = session::read_meta(&session) {
-                if m.status().is_terminal() {
-                    let json = serde_json::to_string_pretty(&m)?;
-                    println!("{json}");
-                    return Ok(());
-                }
-            }
+        // 8s total: 5s grace for graceful stop + 3s buffer for terminal state write.
+        if let Some(m) = signal_kill_request(&session, &meta, force, 80)? {
+            let json = serde_json::to_string_pretty(&m)?;
+            println!("{json}");
+            return Ok(());
         }
-
         // Sidecar didn't act in time -- fall through to direct kill.
     }
 
