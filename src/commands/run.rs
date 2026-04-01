@@ -87,6 +87,7 @@ pub fn cmd_run(
         &effective.after,
         effective.any_exit,
         &effective.namespace,
+        false, // pty not supported via `run`
     )?;
 
     // Check for spawn failure.

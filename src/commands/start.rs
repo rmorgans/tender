@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use tender::model::ids::{Namespace, SessionName};
-use tender::model::spec::{LaunchSpec, StdinMode};
+use tender::model::spec::{IoMode, LaunchSpec, StdinMode};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
@@ -18,9 +18,10 @@ pub fn cmd_start(
     after: &[String],
     any_exit: bool,
     namespace: &Namespace,
+    pty: bool,
 ) -> anyhow::Result<()> {
     let (meta, _session) = launch_session(
-        name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, after, any_exit, namespace,
+        name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, after, any_exit, namespace, pty,
     )?;
 
     let json = serde_json::to_string_pretty(&meta)?;
@@ -56,6 +57,7 @@ pub(crate) fn launch_session(
     after: &[String],
     any_exit: bool,
     namespace: &Namespace,
+    pty: bool,
 ) -> anyhow::Result<(tender::model::meta::Meta, session::SessionDir)> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
@@ -88,6 +90,9 @@ pub(crate) fn launch_session(
         launch_spec.env.insert(key.to_string(), value.to_string());
     }
     launch_spec.on_exit = on_exit.to_vec();
+    if pty {
+        launch_spec.io_mode = IoMode::Pty;
+    }
 
     // Resolve --after: capture each dependency's run_id at bind time
     if !after.is_empty() {

@@ -104,6 +104,10 @@ pub fn cmd_exec(
         anyhow::bail!("session is not running");
     }
 
+    if meta.launch_spec().io_mode == tender::model::spec::IoMode::Pty {
+        anyhow::bail!("exec is not supported on PTY sessions");
+    }
+
     if meta.launch_spec().stdin_mode != StdinMode::Pipe {
         anyhow::bail!("session was not started with --stdin");
     }

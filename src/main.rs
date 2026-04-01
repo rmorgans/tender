@@ -29,6 +29,9 @@ enum Commands {
         /// Enable stdin pipe for push command
         #[arg(long)]
         stdin: bool,
+        /// Interactive pseudo-terminal mode
+        #[arg(long)]
+        pty: bool,
         /// Replace existing session (kill + restart)
         #[arg(long)]
         replace: bool,
@@ -243,12 +246,13 @@ impl Commands {
     fn remote_args(&self) -> Vec<String> {
         match self {
             Commands::Start {
-                name, namespace, stdin, replace, timeout, cwd, env_vars,
+                name, namespace, stdin, pty, replace, timeout, cwd, env_vars,
                 on_exit, after, any_exit, cmd,
             } => {
                 let mut args = vec!["start".to_string(), name.clone()];
                 if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
                 if *stdin { args.push("--stdin".to_string()); }
+                if *pty { args.push("--pty".to_string()); }
                 if *replace { args.push("--replace".to_string()); }
                 if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
                 if let Some(c) = cwd { args.extend(["--cwd".to_string(), c.display().to_string()]); }
@@ -380,6 +384,7 @@ fn main() {
             namespace,
             cmd,
             stdin,
+            pty,
             replace,
             timeout,
             cwd,
@@ -400,6 +405,7 @@ fn main() {
                 &after,
                 any_exit,
                 &ns,
+                pty,
             )
         }),
         Commands::Run {
