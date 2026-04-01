@@ -44,7 +44,7 @@ enum Commands {
         #[arg(long = "after", value_name = "SESSION")]
         after: Vec<String>,
         /// Proceed even if dependency exits non-zero
-        #[arg(long = "any-exit")]
+        #[arg(long = "any-exit", requires = "after")]
         any_exit: bool,
         /// Command and arguments
         #[arg(trailing_var_arg = true, required = true)]
@@ -88,7 +88,7 @@ enum Commands {
         #[arg(long = "after", value_name = "SESSION")]
         after: Vec<String>,
         /// Proceed even if dependency exits non-zero
-        #[arg(long = "any-exit")]
+        #[arg(long = "any-exit", requires = "after")]
         any_exit: bool,
         /// Arguments to pass to the script
         #[arg(trailing_var_arg = true)]
