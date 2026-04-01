@@ -1,5 +1,10 @@
+// Remote SSH transport tests — POSIX only.
+// All tests rely on fake shell scripts as ssh shims.
+#![cfg(unix)]
+
 mod harness;
 
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -7,9 +12,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Helper: create a fake ssh script that dumps args to stdout.
 /// Returns the TempDir (must be kept alive for PATH to stay valid).
-#[cfg(unix)]
 fn fake_ssh_echo() -> TempDir {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
     std::fs::write(&fake_ssh, "#!/bin/sh\nfor arg in \"$@\"; do echo \"ARG:$arg\"; done\n").unwrap();
@@ -17,11 +20,25 @@ fn fake_ssh_echo() -> TempDir {
     tmp
 }
 
+/// Helper: create a fake ssh that exits 0 immediately (no-op).
+fn fake_ssh_noop() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let fake_ssh = tmp.path().join("ssh");
+    std::fs::write(&fake_ssh, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
+    tmp
+}
+
 #[test]
 fn host_flag_is_accepted_by_parser() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Use a fake ssh shim so we don't hit real SSH (ConnectTimeout).
+    let tmp = fake_ssh_noop();
+
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@example.com", "list"])
+        .env("PATH", tmp.path())
         .output()
         .unwrap();
 
@@ -84,12 +101,8 @@ fn host_flag_exit_255_is_transport_error() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&fake_ssh, "#!/bin/sh\nexit 255\n").unwrap();
-        std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
-    }
+    std::fs::write(&fake_ssh, "#!/bin/sh\nexit 255\n").unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@box", "list"])
@@ -111,12 +124,8 @@ fn host_flag_preserves_remote_exit_code() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&fake_ssh, "#!/bin/sh\nexit 42\n").unwrap();
-        std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
-    }
+    std::fs::write(&fake_ssh, "#!/bin/sh\nexit 42\n").unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@box", "wait", "my-session"])
@@ -135,13 +144,9 @@ fn host_flag_passes_through_json_stdout() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script = "#!/bin/sh\nprintf '{\"schema_version\":1,\"session\":\"remote-job\",\"status\":\"Running\"}\\n'\nexit 0\n";
-        std::fs::write(&fake_ssh, script).unwrap();
-        std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
-    }
+    let script = "#!/bin/sh\nprintf '{\"schema_version\":1,\"session\":\"remote-job\",\"status\":\"Running\"}\\n'\nexit 0\n";
+    std::fs::write(&fake_ssh, script).unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@box", "status", "remote-job"])
@@ -165,17 +170,13 @@ fn host_flag_passes_through_ndjson_stream() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script = r#"#!/bin/sh
+    let script = r#"#!/bin/sh
 echo '{"ts":1.0,"namespace":"default","session":"s1","run_id":"abc","source":"tender.sidecar","kind":"run","name":"run.started","data":{"status":"Running"}}'
 echo '{"ts":2.0,"namespace":"default","session":"s1","run_id":"abc","source":"tender.sidecar","kind":"run","name":"run.exited","data":{"status":"Exited","reason":"ExitedOk","exit_code":0}}'
 exit 0
 "#;
-        std::fs::write(&fake_ssh, script).unwrap();
-        std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
-    }
+    std::fs::write(&fake_ssh, script).unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@box", "watch", "--events"])
@@ -249,13 +250,9 @@ fn host_flag_passes_through_stderr() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script = "#!/bin/sh\necho 'session not found: oops' >&2\nexit 1\n";
-        std::fs::write(&fake_ssh, script).unwrap();
-        std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
-    }
+    let script = "#!/bin/sh\necho 'session not found: oops' >&2\nexit 1\n";
+    std::fs::write(&fake_ssh, script).unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args(["--host", "user@box", "status", "oops"])
