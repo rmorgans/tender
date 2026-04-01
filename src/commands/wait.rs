@@ -33,6 +33,14 @@ pub fn cmd_wait(name: &str, timeout: Option<u64>, namespace: &Namespace) -> anyh
                 },
                 RunStatus::SpawnFailed { .. } => std::process::exit(2),
                 RunStatus::SidecarLost { .. } => std::process::exit(3),
+                RunStatus::DependencyFailed { reason, .. } => {
+                    use tender::model::dep_fail::DepFailReason;
+                    match reason {
+                        DepFailReason::Failed => std::process::exit(4),
+                        DepFailReason::TimedOut => std::process::exit(124),
+                        DepFailReason::Killed => std::process::exit(137),
+                    }
+                }
                 _ => return Ok(()),
             }
         }

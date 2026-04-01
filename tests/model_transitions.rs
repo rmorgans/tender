@@ -347,6 +347,35 @@ fn meta_rejects_wrong_schema_version() {
     assert!(result.unwrap_err().to_string().contains("schema version"));
 }
 
+// === DependencyFailed transitions ===
+
+#[test]
+fn starting_to_dependency_failed() {
+    let mut meta = starting_meta();
+    assert!(!meta.status().is_terminal());
+    meta.transition_dependency_failed(
+        EpochTimestamp::now(),
+        tender::model::dep_fail::DepFailReason::Failed,
+    )
+    .unwrap();
+    assert!(meta.status().is_terminal());
+    assert!(matches!(
+        meta.status(),
+        RunStatus::DependencyFailed { .. }
+    ));
+}
+
+#[test]
+fn running_to_dependency_failed_is_illegal() {
+    let mut meta = starting_meta();
+    meta.transition_running(test_child()).unwrap();
+    let result = meta.transition_dependency_failed(
+        EpochTimestamp::now(),
+        tender::model::dep_fail::DepFailReason::Failed,
+    );
+    assert!(result.is_err());
+}
+
 // === Launch spec hash ===
 
 #[test]

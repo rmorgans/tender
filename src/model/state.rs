@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroI32;
 
+use super::dep_fail::DepFailReason;
 use super::ids::{EpochTimestamp, ProcessIdentity};
 
 /// Current status of a run. State-specific fields live inside the variants,
@@ -26,6 +27,12 @@ pub enum RunStatus {
     SidecarLost {
         child: Option<ProcessIdentity>,
         ended_at: EpochTimestamp,
+    },
+    /// Dependency wait phase failed before child was spawned.
+    DependencyFailed {
+        ended_at: EpochTimestamp,
+        #[serde(flatten)]
+        reason: DepFailReason,
     },
 }
 
@@ -58,7 +65,7 @@ impl RunStatus {
     #[must_use]
     pub fn child(&self) -> Option<&ProcessIdentity> {
         match self {
-            RunStatus::Starting | RunStatus::SpawnFailed { .. } => None,
+            RunStatus::Starting | RunStatus::SpawnFailed { .. } | RunStatus::DependencyFailed { .. } => None,
             RunStatus::Running { child } | RunStatus::Exited { child, .. } => Some(child),
             RunStatus::SidecarLost { child, .. } => child.as_ref(),
         }
@@ -71,7 +78,8 @@ impl RunStatus {
             RunStatus::Starting | RunStatus::Running { .. } => None,
             RunStatus::SpawnFailed { ended_at }
             | RunStatus::Exited { ended_at, .. }
-            | RunStatus::SidecarLost { ended_at, .. } => Some(ended_at),
+            | RunStatus::SidecarLost { ended_at, .. }
+            | RunStatus::DependencyFailed { ended_at, .. } => Some(ended_at),
         }
     }
 }

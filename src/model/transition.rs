@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use super::dep_fail::DepFailReason;
 use super::ids::{EpochTimestamp, ProcessIdentity};
 use super::meta::Meta;
 use super::state::{ExitReason, RunStatus};
@@ -28,6 +29,7 @@ fn status_name(status: &RunStatus) -> &'static str {
             ExitReason::TimedOut => "TimedOut",
         },
         RunStatus::SidecarLost { .. } => "SidecarLost",
+        RunStatus::DependencyFailed { .. } => "DependencyFailed",
     }
 }
 
@@ -91,6 +93,27 @@ impl Meta {
             RunStatus::Starting => Err(TransitionError::Illegal {
                 from: "Starting",
                 to: "Exited",
+            }),
+            _ => Err(TransitionError::AlreadyTerminal {
+                from: status_name(self.status()),
+            }),
+        }
+    }
+
+    /// Transition Starting → DependencyFailed.
+    pub fn transition_dependency_failed(
+        &mut self,
+        ended_at: EpochTimestamp,
+        reason: DepFailReason,
+    ) -> Result<(), TransitionError> {
+        match self.status() {
+            RunStatus::Starting => {
+                *self.status_mut() = RunStatus::DependencyFailed { ended_at, reason };
+                Ok(())
+            }
+            RunStatus::Running { .. } => Err(TransitionError::Illegal {
+                from: "Running",
+                to: "DependencyFailed",
             }),
             _ => Err(TransitionError::AlreadyTerminal {
                 from: status_name(self.status()),
