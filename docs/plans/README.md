@@ -8,13 +8,14 @@ Convention: see [CONVENTIONS.md](CONVENTIONS.md)
 
 Filename prefix sets priority. `ls active/` is the ordered queue.
 
-No active plans. See backlog for next candidates.
+| ID | File | Depends On |
+|----|------|------------|
+| after-composition | `01-after-composition.md` | — |
 
 ## backlog/ — Future Work
 
 | ID | File | Depends On |
 |----|------|------------|
-| after-composition | `after-composition.md` | — |
 | exec | `exec.md` | wrap-annotation-ingestion (complete) |
 | skill-claude-code | `skill-claude-code.md` | wrap-annotation-ingestion (complete) |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport |

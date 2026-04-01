@@ -5,6 +5,10 @@ use std::path::PathBuf;
 
 use super::ids::{RunId, SessionName};
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 /// How stdin is provided to the child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StdinMode {
@@ -35,6 +39,8 @@ pub struct LaunchSpec {
     pub timeout_s: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub after: Vec<DependencyBinding>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub after_any_exit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -57,6 +63,7 @@ impl LaunchSpec {
             env: BTreeMap::new(),
             timeout_s: None,
             after: vec![],
+            after_any_exit: false,
             namespace: None,
             on_exit: vec![],
             stdin_mode: StdinMode::None,
@@ -89,6 +96,8 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             timeout_s: Option<u64>,
             #[serde(default)]
             after: Vec<DependencyBinding>,
+            #[serde(default)]
+            after_any_exit: bool,
             namespace: Option<String>,
             #[serde(default)]
             on_exit: Vec<String>,
@@ -105,6 +114,7 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             env: raw.env,
             timeout_s: raw.timeout_s,
             after: raw.after,
+            after_any_exit: raw.after_any_exit,
             namespace: raw.namespace,
             on_exit: raw.on_exit,
             stdin_mode: raw.stdin_mode,

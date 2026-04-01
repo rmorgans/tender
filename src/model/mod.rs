@@ -1,3 +1,4 @@
+pub mod dep_fail;
 pub mod ids;
 pub mod meta;
 pub mod spec;
