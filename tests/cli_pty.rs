@@ -95,3 +95,65 @@ fn exec_rejected_on_pty_session() {
 
     tender(&root).args(["kill", "pty-shell"]).output().ok();
 }
+
+#[test]
+fn attach_to_non_pty_session_fails() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pipe-session", "--", "sleep", "60"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pipe-session");
+
+    let output = tender(&root)
+        .args(["attach", "pipe-session"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PTY") || stderr.contains("not PTY"),
+        "should reject attach on non-PTY: {stderr}"
+    );
+
+    tender(&root).args(["kill", "pipe-session"]).output().ok();
+}
+
+#[test]
+fn attach_socket_exists_for_pty_session() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-attach", "--pty", "--", "sleep", "60"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-attach");
+
+    let breadcrumb = root
+        .path()
+        .join(".tender/sessions/default/pty-attach/a.sock.path");
+
+    // The attach listener thread may not have written the breadcrumb yet.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !breadcrumb.exists() {
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for a.sock.path breadcrumb to appear");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(breadcrumb.exists(), "a.sock.path breadcrumb should exist for PTY session");
+
+    // The breadcrumb should point to an actual socket file
+    let sock_path = std::fs::read_to_string(&breadcrumb).unwrap();
+    let sock_path = sock_path.trim();
+    assert!(
+        std::path::Path::new(sock_path).exists(),
+        "socket file should exist at {sock_path}"
+    );
+
+    tender(&root).args(["kill", "pty-attach"]).output().ok();
+}

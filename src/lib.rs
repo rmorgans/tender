@@ -1,4 +1,5 @@
 pub mod annotation;
+pub mod attach_proto;
 pub mod directive;
 pub mod exec_frame;
 pub mod log;

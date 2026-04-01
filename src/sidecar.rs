@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -553,20 +553,23 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         serde_json::to_string(&child_identity).unwrap_or_default(),
     );
 
+    // --- Attach sink for PTY tee ---
+    let attach_sink: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
+
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     // For PTY sessions: wrap the write side in Arc<Mutex> for shared access.
     // Both the FIFO forwarding thread and the future attach listener need to
     // write to the PTY master.
-    let _pty_write_handle: Option<Arc<Mutex<Box<dyn Write + Send>>>> = if is_pty {
+    let pty_write_handle: Option<Arc<Mutex<Box<dyn Write + Send>>>> = if is_pty {
         Current::child_stdin(&mut child).map(|w| Arc::new(Mutex::new(w)))
     } else {
         None
     };
 
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        let child_stdin: Box<dyn Write + Send> = if let Some(ref shared) = _pty_write_handle {
+        let child_stdin: Box<dyn Write + Send> = if let Some(ref shared) = pty_write_handle {
             // PTY: forwarding thread writes through a clone of the shared handle
             let shared_clone = Arc::clone(shared);
             Box::new(SharedWriter(shared_clone))
@@ -576,6 +579,18 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
                 .ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?
         };
         setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
+    }
+
+    // --- Attach listener for PTY sessions ---
+    if is_pty {
+        let sock_path = crate::attach_proto::sock_path(session_dir);
+        crate::attach_proto::write_sock_breadcrumb(session_dir, &sock_path);
+        let pty_write_clone = pty_write_handle.as_ref().unwrap().clone();
+        let attach_sink_clone = Arc::clone(&attach_sink);
+        let session_path = session_dir.to_path_buf();
+        std::thread::spawn(move || {
+            run_attach_listener(&sock_path, pty_write_clone, attach_sink_clone, &session_path);
+        });
     }
 
     // --- Transition to Running + readiness signal ---
@@ -607,7 +622,11 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     );
 
     // --- Supervise ---
-    let exit_reason = supervise(&session, &mut child)?;
+    let exit_reason = if is_pty {
+        supervise(&session, &mut child, Some(&attach_sink))?
+    } else {
+        supervise(&session, &mut child, None)?
+    };
 
     // --- Cancel timeout + collect warnings + determine exit reason ---
     timeout_cancel.store(true, Ordering::Relaxed);
@@ -652,6 +671,13 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
 
     // Clean up breadcrumb -- no longer needed, meta has the child identity
     let _ = std::fs::remove_file(session_dir.join("child_pid"));
+
+    // Clean up attach socket and breadcrumb
+    if is_pty {
+        let sock = crate::attach_proto::sock_path(session_dir);
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_file(session_dir.join("a.sock.path"));
+    }
 
     for warning in collect_warnings(session_dir, &stdin_errors) {
         meta.add_warning(warning);
@@ -802,6 +828,7 @@ fn signal_meta_snapshot(ready: &mut Option<ReadyWriter>, meta: &Meta) -> anyhow:
 fn supervise(
     session: &SessionDir,
     child: &mut <Current as Platform>::SupervisedChild,
+    attach_sink: Option<&Arc<Mutex<Option<Box<dyn Write + Send>>>>>,
 ) -> anyhow::Result<ExitReason> {
     let log_path = session.path().join("output.log");
     let log_file = OpenOptions::new()
@@ -816,7 +843,11 @@ fn supervise(
     // Spawn reader threads. Capture errors rather than silently discarding.
     let log_ref = &log;
     let (stdout_result, stderr_result) = std::thread::scope(|scope| {
-        let stdout_handle = scope.spawn(move || capture_stream(stdout, 'O', log_ref));
+        let stdout_handle = if let Some(sink) = attach_sink {
+            scope.spawn(move || capture_stream_with_tee(stdout, 'O', log_ref, sink))
+        } else {
+            scope.spawn(move || capture_stream(stdout, 'O', log_ref))
+        };
         let stderr_handle =
             stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
 
@@ -883,6 +914,47 @@ fn capture_stream(
     Ok(())
 }
 
+/// Read raw bytes from a stream, write to log, and tee to the attach sink.
+/// Used for PTY sessions where a human may be attached.
+fn capture_stream_with_tee(
+    mut stream: Box<dyn std::io::Read + Send>,
+    tag: char,
+    log: &Mutex<File>,
+    attach_sink: &Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+) -> Result<(), String> {
+    use crate::attach_proto;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        // Write to log (best-effort chunk-based transcript)
+        {
+            let mut f = log.lock().map_err(|e| format!("log mutex: {e}"))?;
+            let text = String::from_utf8_lossy(&buf[..n]);
+            for line in text.lines() {
+                let ts = timestamp_micros();
+                let formatted = format!("{ts} {tag} {line}\n");
+                f.write_all(formatted.as_bytes())
+                    .map_err(|e| format!("log write failed: {e}"))?;
+            }
+        }
+
+        // Tee raw bytes to attached client (if any)
+        if let Ok(mut sink_guard) = attach_sink.lock() {
+            if let Some(ref mut writer) = *sink_guard {
+                if attach_proto::write_msg(writer, attach_proto::MSG_DATA, &buf[..n]).is_err() {
+                    *sink_guard = None; // Client disconnected
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn timestamp_micros() -> String {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -890,4 +962,88 @@ fn timestamp_micros() -> String {
     let secs = duration.as_secs();
     let micros = duration.subsec_micros();
     format!("{secs}.{micros:06}")
+}
+
+#[cfg(unix)]
+fn run_attach_listener(
+    sock_path: &Path,
+    pty_write: Arc<Mutex<Box<dyn Write + Send>>>,
+    attach_sink: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    session_dir: &Path,
+) {
+    use std::os::unix::net::UnixListener;
+    use crate::attach_proto;
+
+    // Remove stale socket if exists
+    let _ = std::fs::remove_file(sock_path);
+
+    let listener = match UnixListener::bind(sock_path) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    // Accept connections one at a time
+    for stream_result in listener.incoming() {
+        let mut read_half = match stream_result {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // try_clone for the write half (capture thread tees output here)
+        let write_half = match read_half.try_clone() {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+
+        // Set attach sink -- capture thread starts teeing output
+        *attach_sink.lock().unwrap() = Some(Box::new(write_half));
+
+        // Update meta to HumanControl
+        update_pty_control(session_dir, "HumanControl");
+
+        // Read input from human
+        loop {
+            match attach_proto::read_msg(&mut read_half) {
+                Ok((attach_proto::MSG_DATA, payload)) => {
+                    if let Ok(mut w) = pty_write.lock() {
+                        let _ = w.write_all(&payload);
+                        let _ = w.flush();
+                    }
+                }
+                Ok((attach_proto::MSG_RESIZE, payload)) => {
+                    if let Some((rows, cols)) = attach_proto::parse_resize(&payload) {
+                        // TODO: ioctl TIOCSWINSZ -- needs PTY master fd
+                        // For now, resize is noted but not applied in slice one
+                        let _ = (rows, cols);
+                    }
+                }
+                Ok((attach_proto::MSG_DETACH, _)) | Err(_) => break,
+                _ => {}
+            }
+        }
+
+        // Clear attach sink -- capture thread stops teeing
+        *attach_sink.lock().unwrap() = None;
+
+        // Update meta to AgentControl
+        update_pty_control(session_dir, "AgentControl");
+    }
+}
+
+fn update_pty_control(session_dir: &Path, control: &str) {
+    // Best-effort: read meta, update control, write back
+    let meta_path = session_dir.join("meta.json");
+    if let Ok(content) = std::fs::read_to_string(&meta_path) {
+        if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(pty) = meta.get_mut("pty") {
+                pty["control"] = serde_json::Value::String(control.to_string());
+                let tmp = session_dir.join("meta.json.tmp");
+                if std::fs::write(&tmp, serde_json::to_string_pretty(&meta).unwrap_or_default())
+                    .is_ok()
+                {
+                    let _ = std::fs::rename(&tmp, &meta_path);
+                }
+            }
+        }
+    }
 }

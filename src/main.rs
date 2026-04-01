@@ -233,6 +233,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Attach to a PTY session's terminal
+    Attach {
+        /// Session name
+        name: String,
+        /// Namespace
+        #[arg(long)]
+        namespace: Option<String>,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
@@ -310,6 +318,13 @@ impl Commands {
                 if *from_now { args.push("--from-now".to_string()); }
                 args
             }
+            Commands::Attach { name, namespace } => {
+                let mut args = vec!["attach".to_string(), name.clone()];
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                args
+            }
             _ => unreachable!("remote_args called on unsupported command"),
         }
     }
@@ -325,6 +340,7 @@ impl Commands {
             Commands::Kill { .. } => "kill",
             Commands::Wait { .. } => "wait",
             Commands::Watch { .. } => "watch",
+            Commands::Attach { .. } => "attach",
             Commands::Run { .. } => "run",
             Commands::Exec { .. } => "exec",
             Commands::Wrap { .. } => "wrap",
@@ -510,6 +526,9 @@ fn main() {
                 (Ok(s), Ok(ns), Ok(src)) => commands::cmd_wrap(&s, &ns, &src, &event, cmd),
                 (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
             }
+        }
+        Commands::Attach { name, namespace } => {
+            resolve_namespace(namespace).and_then(|ns| commands::cmd_attach(&name, &ns))
         }
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
     };

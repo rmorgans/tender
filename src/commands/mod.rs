@@ -1,3 +1,4 @@
+mod attach;
 mod exec;
 mod kill;
 mod list;
@@ -12,6 +13,7 @@ mod wait;
 mod watch;
 mod wrap;
 
+pub use attach::cmd_attach;
 pub use exec::cmd_exec;
 pub use kill::cmd_kill;
 pub use list::cmd_list;

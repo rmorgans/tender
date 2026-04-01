@@ -19,7 +19,7 @@ pub enum SshError {
 
 /// Commands that are supported over SSH transport in the first slice.
 const REMOTE_COMMANDS: &[&str] = &[
-    "start", "status", "list", "log", "push", "kill", "wait", "watch",
+    "start", "status", "list", "log", "push", "kill", "wait", "watch", "attach",
 ];
 
 /// Check whether a subcommand is supported for remote execution.
@@ -157,6 +157,7 @@ mod tests {
         assert!(is_remote_supported("kill"));
         assert!(is_remote_supported("wait"));
         assert!(is_remote_supported("watch"));
+        assert!(is_remote_supported("attach"));
 
         assert!(!is_remote_supported("run"));
         assert!(!is_remote_supported("exec"));
