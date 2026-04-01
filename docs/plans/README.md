@@ -8,9 +8,7 @@ Convention: see [CONVENTIONS.md](CONVENTIONS.md)
 
 Filename prefix sets priority. `ls active/` is the ordered queue.
 
-| File | ID | Summary |
-|------|----|---------|
-| `10_run-shebang.md` | run-shebang | Supervised scripts via shebang and CLI |
+No active plans. See backlog for next candidates.
 
 ## backlog/ — Future Work
 
@@ -25,7 +23,7 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 ## completed/
 
-20 completed plans. See `completed/` directory.
+21 completed plans. See `completed/` directory.
 
 ## specs/
 

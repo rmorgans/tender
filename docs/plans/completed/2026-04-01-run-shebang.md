@@ -6,6 +6,8 @@ links: []
 
 # tender run — Supervised Script Execution
 
+> **Status: Complete.** Implemented and tested (25 unit + 16 integration tests, 275/275 macOS). Commit `8fe6cd7`.
+
 Turn any script into a supervised run. Shebang usage is one entry point, not the only one.
 
 ## CLI
