@@ -1,12 +1,38 @@
-# PTY Session Mode — First Slice Design
+---
+id: pty-session-mode
+depends_on: []
+links: []
+---
 
-## Goal
+# PTY Session Mode — Interactive Terminal Sessions
 
-Add PTY-backed sessions so agents can drive terminal-sensitive programs
-(shells, REPLs, interactive prompts) without respawning, and humans can
-take over live sessions when needed.
+> **Slice one scope:** Unix only. Windows ConPTY support is deferred.
 
-## What this slice delivers
+Add a PTY-backed session mode to Tender so agents can drive
+terminal-sensitive programs without respawning, and humans can take over
+live sessions when needed.
+
+## Why This Exists
+
+Some programs need a real terminal:
+
+- shells used interactively
+- password prompts
+- REPLs
+- full-screen TUIs
+- `ssh`, `psql`, `python`, and other TTY-sensitive tools
+- later, expect-style agent automation
+
+Those programs do not fit cleanly into the current pipe-based session model.
+
+The primary use case is agent-driven: an agent starts a PTY session,
+drives it programmatically with `push` (send commands, answer prompts),
+and occasionally a human takes over via `attach` without killing the
+process.
+
+## First Slice Goal
+
+Land the smallest useful PTY-backed session mode:
 
 - `start --pty` launches a session with a real terminal
 - `push` sends raw bytes to the PTY (agent types `y\n`, sends ctrl-c, drives prompts)
@@ -32,6 +58,34 @@ Rules:
 - `attach` steals control → `HumanControl` (single human controller)
 - human detach → `AgentControl` if agent lease is still valid, else `Detached`
 - agent lease loss → `Detached`
+
+## CLI Surface
+
+```bash
+tender start shell --pty -- /bin/bash
+tender push shell              # send raw bytes (agent driving)
+tender attach shell             # human takes over terminal
+tender attach shell --namespace ws-1
+tender --host box attach shell  # remote attach via SSH
+```
+
+## Session Model
+
+Two execution lanes:
+
+- **pipe sessions** (existing, default)
+  - machine-friendly
+  - support `push`, `exec`
+  - preserve stdout/stderr separation
+  - `io_mode: "pipe"`
+
+- **PTY sessions** (new)
+  - interactive-terminal-friendly
+  - support `push` (raw bytes to PTY)
+  - support `attach` (human terminal control)
+  - merged transcript output (no stdout/stderr split)
+  - `exec` rejected
+  - `io_mode: "pty"`
 
 ## Architecture
 
@@ -62,7 +116,8 @@ lifecycle — PTY mode extends that to owning the terminal master.
 ### What does NOT change
 
 - The run lifecycle state machine (Starting → Running → terminal states)
-- `status`, `list`, `kill`, `wait` — work identically (status adds PTY metadata)
+- `list`, `kill`, `wait` — work identically
+- `status` — works identically but includes PTY metadata
 - `watch` events — same NDJSON contract
 - Session directory layout — adds `attach.sock`, everything else stays
 
@@ -150,8 +205,7 @@ Add `io_mode` field:
 
 `stdin_mode` refers to the push transport availability, not the child's
 literal stdin wiring. For PTY sessions, `stdin_mode: "Pipe"` means
-"the FIFO push channel exists." For pipe sessions, it means what it
-means today.
+"the FIFO push channel exists."
 
 ### Meta
 
@@ -172,9 +226,7 @@ Add PTY control state:
 `control` is one of: `"AgentControl"`, `"HumanControl"`, `"Detached"`.
 
 The sidecar writes control state transitions atomically to meta.json.
-`status` and `watch` can observe control state without any new mechanism.
-
-Non-PTY sessions omit the `pty` field entirely (or `pty.enabled: false`).
+Non-PTY sessions omit the `pty` field entirely.
 
 ### Log format
 
@@ -188,12 +240,58 @@ not separable through a PTY. Annotations (`A` tag) work normally.
 - `attach` on a non-PTY session → `"session is not PTY-enabled"`
 - `attach` when already attached → `"session is already under human control"`
 
+## Implementation Tasks
+
+1. Add `io_mode` field to LaunchSpec and `--pty` flag to `start`
+2. Add PTY control state to Meta
+3. Add platform PTY creation API (Unix: `openpty`/`forkpty`)
+4. Wire sidecar to use PTY when `io_mode: "pty"` — master/slave instead of pipes
+5. Implement merged transcript logging from PTY output
+6. Forward FIFO push input to PTY master in sidecar
+7. Add attach endpoint (Unix domain socket) creation and lifecycle in sidecar
+8. Add `tender attach` CLI command with raw terminal mode and resize
+9. Implement control state transitions (AgentControl/HumanControl/Detached)
+10. Reject `exec` on PTY sessions, `push` in HumanControl, `attach` on non-PTY
+11. Update `--host` dispatch: `attach` uses `ssh -t` instead of `ssh -T`
+12. Add integration tests
+
+## Testing
+
+- `start --pty` launches a PTY session, meta shows `pty.enabled: true`
+- `push` to a PTY session delivers bytes to the child
+- `attach` to a PTY session shows terminal output and accepts input
+- detach leaves the session running
+- second attach attempt gets a "already under human control" error
+- `attach` against a non-PTY session fails clearly
+- `exec` against a PTY session fails clearly
+- `push` while human is attached gets rejected
+- kill while attached terminates cleanly
+- resize events propagate to the child
+- `log` on PTY session shows merged transcript
+- `status` shows PTY control state
+- remote attach via `--host` works with TTY allocation
+
+## Acceptance Criteria
+
+- an agent can start a PTY session and drive it with `push`
+- a human can take over a live supervised session via `attach`
+- detach preserves the session and returns control to the agent
+- PTY mode is clearly separated from the default pipe session model
+- unsupported operations (`exec`, `push` during human control) fail clearly
+- `push` and `attach` work remotely via `--host`
+
 ## Platform Scope
 
-- Unix: first slice (PTY via `openpty`/`forkpty`, Unix domain socket)
+- Unix: first slice (`openpty`/`forkpty`, Unix domain socket)
 - Windows: deferred (ConPTY, named pipe)
 
-## Not In This Slice
+## Depends On
+
+No technical blockers. PTY session mode is useful locally without `exec`
+or remote SSH, though remote `attach` via `--host` is supported from
+the start.
+
+## Not In Scope
 
 - PTY-backed `exec` (structured command execution over PTY)
 - Observe-only attach mode
