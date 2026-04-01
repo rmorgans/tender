@@ -1,8 +1,5 @@
 ---
 id: wrap-annotation-ingestion
-title: "Wrap — Transparent Annotation Ingestion"
-created: 2026-03-17
-closed:
 depends_on: []
 links: []
 ---

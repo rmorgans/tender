@@ -1,25 +1,34 @@
 # Tender Plans
 
-Reference: [tender-agent-process-sitter.md](2026-03-16-tender-agent-process-sitter.md) — full design spec
+Spec: [tender-agent-process-sitter.md](specs/tender-agent-process-sitter.md)
 
-Convention: see `CONVENTIONS.md` (shared with edge-platform, machine-learning, starling-edr).
+Convention: see [CONVENTIONS.md](CONVENTIONS.md)
 
-## frontlog/ — Ordered Queue
+## active/ — Current Work
 
-| # | ID | Plan |
-|---|-----|------|
-| 01 | `windows-full-backend` | [2026-03-30-windows-full-backend.md](frontlog/2026-03-30-windows-full-backend.md) — sidecar, readiness, stdin, orphan kill |
-| 02 | `run-shebang` | [tender-run-shebang.md](frontlog/tender-run-shebang.md) — supervised scripts via shebang |
-| 03 | `wrap-annotation-ingestion` | [wrap-annotation-ingestion.md](frontlog/wrap-annotation-ingestion.md) — streaming stdin tee, exec framing |
+Filename prefix sets priority. `ls active/` is the ordered queue.
 
-## backlog/
+| File | ID | Summary |
+|------|----|---------|
+| `10_run-shebang.md` | run-shebang | Supervised scripts via shebang |
+| `20_wrap-annotation-ingestion.md` | wrap-annotation-ingestion | Streaming stdin tee, exec framing |
 
-| ID | Plan | Depends On |
+## backlog/ — Future Work
+
+| ID | File | Depends On |
 |----|------|------------|
-| `skill-and-migration` | [skill-and-migration.md](backlog/skill-and-migration.md) — Claude Code skill, atch migration | — |
-| `remote-ssh-transport` | [remote-ssh-transport.md](backlog/remote-ssh-transport.md) — SSH transport, remote backend | run-shebang, wrap-annotation-ingestion |
-| `pty-attach` | [pty-attach.md](backlog/pty-attach.md) — forkpty/ConPTY, attach/detach | run-shebang, wrap-annotation-ingestion |
+| skill-and-migration | `skill-and-migration.md` | — |
+| remote-ssh-transport | `remote-ssh-transport.md` | run-shebang, wrap-annotation-ingestion |
+| pty-attach | `pty-attach.md` | run-shebang, wrap-annotation-ingestion |
 
 ## completed/
 
-18 completed plans (Phase 1 through wrap platform refactor). See `completed/` directory.
+19 completed plans. See `completed/` directory.
+
+## specs/
+
+Long-lived design documents (not queue items).
+
+| File | Description |
+|------|-------------|
+| `tender-agent-process-sitter.md` | Full design spec |

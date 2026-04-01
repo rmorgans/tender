@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_running, wait_terminal};
+use harness::{echo_env_cmd, tender, touch_cmd, wait_running, wait_terminal};
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -48,7 +48,7 @@ fn read_callback_record(root: &TempDir, session: &str) -> Option<serde_json::Val
 
 #[test]
 fn on_exit_callback_runs_after_normal_exit() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker = root.path().join("normal_exit_marker");
@@ -58,7 +58,7 @@ fn on_exit_callback_runs_after_normal_exit() {
             "start",
             "on-exit-normal",
             "--on-exit",
-            &format!("touch {}", marker.display()),
+            &touch_cmd(&marker),
             "--",
             "echo",
             "done",
@@ -81,7 +81,7 @@ fn on_exit_callback_runs_after_normal_exit() {
 
 #[test]
 fn on_exit_callback_runs_after_forced_kill() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker = root.path().join("kill_exit_marker");
@@ -91,7 +91,7 @@ fn on_exit_callback_runs_after_forced_kill() {
             "start",
             "on-exit-kill",
             "--on-exit",
-            &format!("touch {}", marker.display()),
+            &touch_cmd(&marker),
             "--",
             "sleep",
             "60",
@@ -121,22 +121,17 @@ fn on_exit_callback_runs_after_forced_kill() {
 
 #[test]
 fn on_exit_callback_sees_env_vars() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let output_file = root.path().join("env_output.txt");
-
-    let on_exit_cmd = format!(
-        "sh -c \"echo $TENDER_SESSION $TENDER_NAMESPACE $TENDER_EXIT_REASON > {}\"",
-        output_file.display()
-    );
 
     let out = tender(&root)
         .args([
             "start",
             "on-exit-env",
             "--on-exit",
-            &on_exit_cmd,
+            &echo_env_cmd(&output_file),
             "--",
             "echo",
             "done",
@@ -175,7 +170,7 @@ fn on_exit_callback_sees_env_vars() {
 
 #[test]
 fn on_exit_callback_failure_recorded_without_state_change() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -215,7 +210,7 @@ fn on_exit_callback_failure_recorded_without_state_change() {
 
 #[test]
 fn on_exit_multiple_callbacks_both_run() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let marker_a = root.path().join("marker_a");
@@ -226,9 +221,9 @@ fn on_exit_multiple_callbacks_both_run() {
             "start",
             "on-exit-multi",
             "--on-exit",
-            &format!("touch {}", marker_a.display()),
+            &touch_cmd(&marker_a),
             "--on-exit",
-            &format!("touch {}", marker_b.display()),
+            &touch_cmd(&marker_b),
             "--",
             "echo",
             "done",

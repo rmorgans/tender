@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_running, wait_terminal};
+use harness::{tender, test_callback_bin, wait_running, wait_terminal};
 use predicates::prelude::*;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -9,7 +9,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn start_same_spec_is_idempotent() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out1 = tender(&root)
@@ -51,7 +51,7 @@ fn start_same_spec_is_idempotent() {
 
 #[test]
 fn start_different_spec_is_conflict() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -74,7 +74,7 @@ fn start_different_spec_is_conflict() {
 
 #[test]
 fn start_after_terminal_is_error() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -92,7 +92,7 @@ fn start_after_terminal_is_error() {
 
 #[test]
 fn start_with_cwd_child_runs_in_requested_directory() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
     let work_dir = root.path().join("myworkdir");
     std::fs::create_dir_all(&work_dir).unwrap();
@@ -104,7 +104,8 @@ fn start_with_cwd_child_runs_in_requested_directory() {
             "--cwd",
             work_dir.to_str().unwrap(),
             "--",
-            "pwd",
+            &test_callback_bin(),
+            "print-cwd",
         ])
         .output()
         .unwrap();
@@ -129,7 +130,7 @@ fn start_with_cwd_child_runs_in_requested_directory() {
 
 #[test]
 fn start_with_env_child_sees_overridden_vars() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -166,7 +167,7 @@ fn start_with_env_child_sees_overridden_vars() {
 
 #[test]
 fn start_with_different_cwd_is_spec_conflict() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
     let dir_a = root.path().join("dir_a");
     let dir_b = root.path().join("dir_b");
@@ -219,7 +220,7 @@ fn start_with_different_cwd_is_spec_conflict() {
 
 #[test]
 fn start_with_different_env_is_spec_conflict() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out1 = tender(&root)
@@ -268,7 +269,7 @@ fn start_with_different_env_is_spec_conflict() {
 
 #[test]
 fn start_with_invalid_env_format_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -285,7 +286,7 @@ fn start_with_invalid_env_format_fails() {
 
 #[test]
 fn start_with_empty_env_key_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -305,7 +306,7 @@ fn start_with_empty_env_key_fails() {
 
 #[test]
 fn start_with_env_preserves_inherited_environment() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let out = tender(&root)
@@ -346,7 +347,7 @@ fn start_with_env_preserves_inherited_environment() {
 
 #[test]
 fn start_with_same_cwd_and_env_is_idempotent() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
     let work_dir = root.path().join("samedir");
     std::fs::create_dir_all(&work_dir).unwrap();

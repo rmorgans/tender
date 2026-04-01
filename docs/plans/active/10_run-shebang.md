@@ -1,8 +1,5 @@
 ---
 id: run-shebang
-title: "tender run — Supervised Script Shebang"
-created: 2026-03-17
-closed:
 depends_on: []
 links: []
 ---

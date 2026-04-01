@@ -105,6 +105,63 @@ fn setup_timeout(
     timed_out
 }
 
+/// Spawn a thread that watches for a `kill_request` file from the CLI.
+/// When found, validates the run_id matches (preventing stale requests from
+/// killing a replacement run), then calls kill_child with the live
+/// ChildKillHandle for tree-aware kill.
+fn setup_kill_watcher(
+    session_dir: &Path,
+    kill_handle: <Current as Platform>::ChildKillHandle,
+    run_id: RunId,
+    cancel: Arc<AtomicBool>,
+) {
+    let kill_request_path = session_dir.join("kill_request");
+    let kill_acted_path = session_dir.join("kill_acted");
+    let run_id_str = run_id.to_string();
+    std::thread::spawn(move || {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            if kill_request_path.exists() {
+                // Parse the request. If unreadable or malformed, discard it
+                // rather than defaulting to force (avoids partial-read upgrades).
+                let parsed = std::fs::read_to_string(&kill_request_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+                // Always clean up the request file.
+                let _ = std::fs::remove_file(&kill_request_path);
+
+                let request = match parsed {
+                    Some(v) => v,
+                    None => continue, // Malformed — ignore, CLI will retry or fall back
+                };
+
+                // Validate run_id — reject stale requests from a previous run.
+                if request["run_id"].as_str() != Some(&run_id_str) {
+                    continue; // Wrong run — ignore
+                }
+
+                let force = request["force"].as_bool().unwrap_or(false);
+
+                // Leave a breadcrumb so exit classification knows this was
+                // a sidecar-mediated kill (not a spontaneous child exit).
+                // The kill_forced marker handles force=true classification;
+                // this breadcrumb handles force=false → Killed.
+                if !force {
+                    let _ = std::fs::write(&kill_acted_path, "");
+                }
+
+                // Use the live kill handle for tree-aware kill.
+                let _ = Current::kill_child(&kill_handle, force);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+}
+
 /// Collect capture errors and stdin forwarding errors into a warning list.
 fn collect_warnings(session_dir: &Path, stdin_errors: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -194,9 +251,10 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     // The sidecar inherited this fd with CLOEXEC cleared (so it survived the sidecar's exec),
     // but the child must NOT hold the pipe open -- otherwise the CLI's read_to_string blocks
     // until the child exits, defeating the readiness handshake.
-    if let Some(writer) = ready.as_ref() {
-        Current::seal_ready_fd(writer)
-            .map_err(|e| anyhow::anyhow!("failed to set CLOEXEC on ready fd: {e}"))?;
+    if let Some(writer) = ready.take() {
+        let sealed = Current::seal_ready_fd(writer)
+            .map_err(|e| anyhow::anyhow!("failed to seal ready fd: {e}"))?;
+        *ready = Some(sealed);
     }
 
     // Build effective env: user-supplied first, then TENDER_* overlay (authoritative).
@@ -269,14 +327,23 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     session::write_meta_atomic(&session, &meta)?;
     signal_meta_snapshot(ready, &meta)?;
 
-    // --- Timeout setup ---
+    // --- Timeout + kill watcher setup ---
     let kill_handle = Current::child_kill_handle(&child);
     let timeout_cancel = Arc::new(AtomicBool::new(false));
     let timed_out = if let Some(timeout_s) = meta.launch_spec().timeout_s {
-        setup_timeout(kill_handle, timeout_s, Arc::clone(&timeout_cancel))
+        setup_timeout(kill_handle.clone(), timeout_s, Arc::clone(&timeout_cancel))
     } else {
         Arc::new(AtomicBool::new(false))
     };
+
+    // Watch for CLI kill requests (kill_request file in session dir).
+    // Uses the live ChildKillHandle for tree-aware kill on Windows.
+    setup_kill_watcher(
+        session_dir,
+        kill_handle,
+        run_id,
+        Arc::clone(&timeout_cancel),
+    );
 
     // --- Supervise ---
     let exit_reason = supervise(&session, &mut child)?;
@@ -291,15 +358,33 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         exit_reason
     };
 
-    // Check for force-kill marker (lower priority than timeout)
+    // Check for kill markers (lower priority than timeout).
+    // Priority: TimedOut > KilledForced > Killed (from kill_acted) > raw exit.
     let kill_forced_path = session_dir.join("kill_forced");
-    let exit_reason = if !matches!(exit_reason, ExitReason::TimedOut) && kill_forced_path.exists() {
+    let kill_acted_path = session_dir.join("kill_acted");
+    let exit_reason = if matches!(exit_reason, ExitReason::TimedOut) {
+        // Timeout is highest priority — clean up markers but keep reason.
         let _ = std::fs::remove_file(&kill_forced_path);
+        let _ = std::fs::remove_file(&kill_acted_path);
+        exit_reason
+    } else if kill_forced_path.exists() {
+        let _ = std::fs::remove_file(&kill_forced_path);
+        let _ = std::fs::remove_file(&kill_acted_path);
         ExitReason::KilledForced
+    } else if kill_acted_path.exists() {
+        // Sidecar-mediated graceful kill (force=false).
+        // The child may report ExitedError on Windows (TerminateJobObject
+        // after grace period), but the user requested a kill.
+        let _ = std::fs::remove_file(&kill_acted_path);
+        ExitReason::Killed
     } else {
         let _ = std::fs::remove_file(&kill_forced_path);
+        let _ = std::fs::remove_file(&kill_acted_path);
         exit_reason
     };
+
+    // Clean up kill_request if still present (kill watcher may not have run).
+    let _ = std::fs::remove_file(session_dir.join("kill_request"));
 
     // Clean up stdin transport
     Current::remove_stdin_transport(session_dir);

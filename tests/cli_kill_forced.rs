@@ -8,7 +8,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn force_kill_produces_killed_forced() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -29,7 +29,7 @@ fn force_kill_produces_killed_forced() {
 
 #[test]
 fn graceful_kill_produces_killed() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

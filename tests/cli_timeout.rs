@@ -8,7 +8,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn timeout_kills_child() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let start = std::time::Instant::now();
@@ -26,7 +26,7 @@ fn timeout_kills_child() {
 
 #[test]
 fn timeout_not_triggered() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

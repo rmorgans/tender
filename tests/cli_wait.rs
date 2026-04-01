@@ -9,7 +9,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
 fn wait_returns_terminal_state() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -28,7 +28,7 @@ fn wait_returns_terminal_state() {
 
 #[test]
 fn wait_blocks_until_exit() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -50,7 +50,7 @@ fn wait_blocks_until_exit() {
 
 #[test]
 fn wait_timeout_expires() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -74,7 +74,7 @@ fn wait_timeout_expires() {
 
 #[test]
 fn wait_nonexistent_session_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root).args(["wait", "nope"]).assert().failure();
@@ -82,7 +82,7 @@ fn wait_nonexistent_session_fails() {
 
 #[test]
 fn wait_exit_code_42_for_nonzero_child() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -96,7 +96,7 @@ fn wait_exit_code_42_for_nonzero_child() {
 
 #[test]
 fn wait_exit_code_2_for_spawn_failed() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

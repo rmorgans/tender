@@ -213,7 +213,7 @@ impl Platform for UnixPlatform {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn seal_ready_fd(writer: &File) -> io::Result<()> {
+    fn seal_ready_fd(writer: File) -> io::Result<File> {
         let fd = writer.as_raw_fd();
         // SAFETY: fd is a valid open file descriptor from the ready pipe.
         // F_SETFD with FD_CLOEXEC is a valid fcntl operation.
@@ -222,7 +222,7 @@ impl Platform for UnixPlatform {
         if ret == -1 {
             return Err(io::Error::last_os_error());
         }
-        Ok(())
+        Ok(writer)
     }
 }
 

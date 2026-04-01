@@ -26,7 +26,7 @@ fn tender_with_stdin(root: &TempDir, args: &[&str], input: &[u8]) -> std::proces
 
 #[test]
 fn push_delivers_stdin_to_child() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -50,7 +50,7 @@ fn push_delivers_stdin_to_child() {
 
 #[test]
 fn push_multiple_sequential() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -81,7 +81,7 @@ fn push_multiple_sequential() {
 
 #[test]
 fn push_to_session_without_stdin_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -104,7 +104,7 @@ fn push_to_session_without_stdin_fails() {
 
 #[test]
 fn push_to_nonexistent_session_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     let push_out = tender_with_stdin(&root, &["push", "nope"], b"data\n");
@@ -113,7 +113,7 @@ fn push_to_nonexistent_session_fails() {
 
 #[test]
 fn push_to_terminal_session_fails() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -130,7 +130,7 @@ fn push_to_terminal_session_fails() {
 
 #[test]
 fn push_fails_promptly_when_session_dies() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)
@@ -147,7 +147,7 @@ fn push_fails_promptly_when_session_dies() {
 
 #[test]
 fn push_immediately_after_start() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     tender(&root)

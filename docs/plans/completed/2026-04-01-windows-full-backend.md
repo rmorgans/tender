@@ -1,11 +1,8 @@
 ---
 id: windows-full-backend
-title: "Windows Full Backend"
-created: 2026-03-30
-closed:
 depends_on: []
 links:
-  - ../completed/windows-full-backend.md
+  - ./windows-full-backend.md
 ---
 
 # Windows Full Backend — Implementation Plan
@@ -33,7 +30,32 @@ links:
 | `child_kill_handle` | Real — Arc'd Job Object |
 | `child_identity` / `process_identity` / `process_status` | Real |
 | `self_identity` | Real |
-| `seal_ready_fd` | No-op (to be implemented in this slice) |
+| `seal_ready_fd` | Real — `SetHandleInformation` to clear `HANDLE_FLAG_INHERIT` |
+
+---
+
+## Progress
+
+**Branch:** `windows-full-backend` (pushed to origin)
+
+**All slices complete. Verified on Windows and macOS.**
+
+| Slice | Key Commits | Status |
+|-------|-------------|--------|
+| 1. Sidecar spawn + readiness | `9712c42`, `2124564`, `2138940`, `3f8cc1f`, `d5b7138` | Done |
+| 2. Stdin transport (named pipes) | `71e2053`, `9b5ad1d` | Done |
+| 3. Orphan kill | `3f8cc1f`, `3cfc035`, `d5b7138` | Done |
+
+**Final test results (2026-04-01):**
+
+| Platform | Pass | Fail |
+|----------|------|------|
+| macOS | 234 | 0 |
+| Windows | 237 | 0 |
+
+All Platform trait methods have real implementations — no stubs remain.
+
+PR: rmorgans/tender#2
 
 ---
 

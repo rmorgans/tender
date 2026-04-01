@@ -54,7 +54,7 @@ fn wait_terminal_default(root: &TempDir, session: &str) -> serde_json::Value {
 
 #[test]
 fn watch_emits_initial_state_snapshot() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start a session and let it finish.
@@ -99,7 +99,7 @@ fn watch_emits_initial_state_snapshot() {
 
 #[test]
 fn watch_emits_log_events() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start a session that produces output.
@@ -133,7 +133,7 @@ fn watch_emits_log_events() {
 
 #[test]
 fn watch_filters_by_namespace() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Create sessions in two namespaces.
@@ -180,7 +180,7 @@ fn watch_filters_by_namespace() {
 
 #[test]
 fn watch_from_now_skips_existing() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start and complete a session before running watch.
@@ -214,7 +214,7 @@ fn watch_from_now_skips_existing() {
 
 #[test]
 fn watch_both_events_and_logs_by_default() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start a session that produces output.
@@ -249,7 +249,7 @@ fn watch_both_events_and_logs_by_default() {
 
 #[test]
 fn watch_from_now_includes_sessions_started_after_watch() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start watch --from-now FIRST (before any sessions exist)
@@ -292,7 +292,7 @@ fn watch_from_now_includes_sessions_started_after_watch() {
 
 #[test]
 fn watch_detects_replace_and_resets_log_offset() {
-    let _guard = SERIAL.lock().unwrap();
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
     // Start a session that produces output
