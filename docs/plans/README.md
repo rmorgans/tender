@@ -10,7 +10,6 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 | File | ID | Summary |
 |------|----|---------|
-| `00_windows-full-backend.md` | windows-full-backend | Sidecar, readiness, stdin, orphan kill |
 | `10_run-shebang.md` | run-shebang | Supervised scripts via shebang |
 | `20_wrap-annotation-ingestion.md` | wrap-annotation-ingestion | Streaming stdin tee, exec framing |
 
@@ -24,7 +23,7 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 ## completed/
 
-18 completed plans. See `completed/` directory.
+19 completed plans. See `completed/` directory.
 
 ## specs/
 

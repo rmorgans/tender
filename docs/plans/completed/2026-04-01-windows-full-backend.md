@@ -2,7 +2,7 @@
 id: windows-full-backend
 depends_on: []
 links:
-  - ../completed/windows-full-backend.md
+  - ./windows-full-backend.md
 ---
 
 # Windows Full Backend — Implementation Plan
@@ -38,65 +38,24 @@ links:
 
 **Branch:** `windows-full-backend` (pushed to origin)
 
-**Slice 1 — Complete. Verified on Windows.**
+**All slices complete. Verified on Windows and macOS.**
 
-| Task | Commit | Status |
-|------|--------|--------|
-| 1. windows-sys features | `9712c42` | Done |
-| 2. ready_channel (CreatePipe) | `9712c42` | Done |
-| 3. read/write_ready_signal | `9712c42` | Done |
-| 4. ready_writer_from_env | `9712c42` | Done |
-| 5. seal_ready_fd | `9712c42` | Done |
-| 6. spawn_sidecar | `9712c42` | Done |
-| 7. prepare_sidecar_console | `2124564` | Done |
-| 8. sidecar graceful-kill test | `3f8cc1f` | Done |
-| 9. Slice 1 verification | `d5b7138` | Done |
+| Slice | Key Commits | Status |
+|-------|-------------|--------|
+| 1. Sidecar spawn + readiness | `9712c42`, `2124564`, `2138940`, `3f8cc1f`, `d5b7138` | Done |
+| 2. Stdin transport (named pipes) | `71e2053`, `9b5ad1d` | Done |
+| 3. Orphan kill | `3f8cc1f`, `3cfc035`, `d5b7138` | Done |
 
-**Additional work landed during Slice 1 verification:**
+**Final test results (2026-04-01):**
 
-| Fix | Commit | Description |
-|-----|--------|-------------|
-| SetHandleInformation import | `cd02c01` | Was in wrong module |
-| Directory fsync | `26f4ec9` | `sync_all()` on dir returns ACCESS_DENIED on Windows; now `#[cfg(unix)]` |
-| Git-for-Windows PATH | `1ff3803` | Test harness adds coreutils to PATH |
-| seal_ready_fd DuplicateHandle | `cfe6480` | Replace inheritable handle with non-inheritable duplicate |
-| STARTUPINFOEXW handle whitelist | `2138940` | Raw CreateProcessW with PROC_THREAD_ATTRIBUTE_HANDLE_LIST for sidecar spawn |
-| kill_orphan | `3f8cc1f` | Identity-verified single-process termination for orphans |
-| Sidecar-mediated kill | `3cfc035` | CLI kill signals sidecar via kill_request file; sidecar uses Job Object |
-| Kill review fixes | `d5b7138` | run_id scoping, 8s timeout alignment, atomic writes |
-| Test mutex de-poisoning | `3f8cc1f` | unwrap_or_else across 14 test files |
-| Plans restructure | `8455294` | active/backlog/completed/specs layout |
+| Platform | Pass | Fail |
+|----------|------|------|
+| macOS | 234 | 0 |
+| Windows | 237 | 0 |
 
-**Windows test results (226/237 pass, 11 fail):**
+All Platform trait methods have real implementations — no stubs remain.
 
-| Category | Tests | Notes |
-|----------|-------|-------|
-| Passing | 226 | All Slice 1 functionality works |
-| Slice 2 (push) | 6 fail | Expected — stdin transport not implemented |
-| cli_on_exit | 4 fail | To investigate — on-exit callbacks on Windows |
-| cli_start_idempotent | 1 fail | `start_with_cwd` — Windows path handling |
-
-**macOS:** All 234 tests green.
-
-**To resume — next work items:**
-1. Investigate cli_on_exit failures (4 tests)
-2. Investigate `start_with_cwd_child_runs_in_requested_directory` (1 test)
-3. Slice 2: stdin transport via named pipes
-
-```bash
-# Connect to Windows for testing:
-ssh rick@100.90.60.48
-cd ~/tender
-git fetch origin
-git checkout windows-full-backend
-cargo test 2>&1
-```
-
-**Stop conditions (from plan review):**
-- If readiness pipe inheritance does not work under `Command::spawn` → stop, redesign
-- If `AllocConsole` does not preserve graceful child stop → stop, redesign
-
-**After verification passes:** Continue to Slice 2 (stdin transport) or Slice 3 (orphan kill).
+PR: rmorgans/tender#2
 
 ---
 
