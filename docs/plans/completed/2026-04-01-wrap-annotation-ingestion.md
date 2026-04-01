@@ -1,7 +1,8 @@
 ---
 id: wrap-annotation-ingestion
 depends_on: []
-links: []
+links:
+  - ../backlog/exec.md
 ---
 
 # Wrap — Transparent Annotation Ingestion
@@ -18,85 +19,48 @@ Tap agent hook events without modifying agents or hook scripts.
 tender wrap --session <s> --namespace <ns> --source <src> -- <command> [args...]
 ```
 
-## Behavior
+## What Was Implemented
 
-1. Tee stdin to the wrapped command (live stream, not buffer-then-forward)
+1. Read all of stdin into memory, then forward to the wrapped command's stdin
 2. Capture a copy of stdin for the annotation payload
 3. Let the wrapped command run to completion
 4. Capture stdout, stderr, and exit code
-5. Emit annotation event to session event log
-6. Return stdout/stderr/exit code to caller unchanged
+5. Write annotation event to session output.log
+6. Replay stdout/stderr to caller unchanged, exit with child's exit code
 
-Zero modifications to agent or hook script required.
+Note: stdin is buffered, not streamed. This is fine for hook payloads (small JSON blobs) and simplifies the implementation. A future streaming mode could be added if needed for large inputs.
 
-## Annotation Payload
+## Annotation Payload (actual format)
+
+Annotations are written as tagged lines in `output.log` with this envelope:
 
 ```json
 {
-  "hook_stdin": { ... },
-  "hook_stdout": { ... },
-  "hook_stderr": "...",
-  "hook_exit_code": 0,
-  "command": ["cmux", "claude-hook", "pre-tool-use"],
-  "truncated": false
+  "source": "agent.hooks",
+  "event": "pre-tool-use",
+  "run_id": "019...",
+  "data": {
+    "hook_stdin": { ... },
+    "hook_stdout": { ... },
+    "hook_stderr": "...",
+    "hook_exit_code": 0,
+    "command": ["cmux", "claude-hook", "pre-tool-use"],
+    "truncated": false
+  }
 }
 ```
 
 - `hook_stdin`/`hook_stdout`: parsed as JSON if valid, raw string otherwise
 - `hook_stderr`: captured as string
-- `truncated`: true if any field hit size limit (default 64KB per field, TBD)
+- `truncated`: true if any field exceeds 3KB (`MAX_FIELD_BYTES = 3000`), total annotation line capped at 4KB (`MAX_ANNOTATION_LINE = 4096`)
 
 ## Why wrap, not emit
 
-- `wrap` preserves provenance — Tender observed the actual execution
+- `wrap` preserves provenance -- Tender observed the actual execution
 - `emit` would only carry "some process asserted this happened"
 - `wrap` constrains annotation production to observed command executions
 - `wrap` matches the real integration path (hook commands already exist)
 
-If internal `_emit_annotation` is ever needed (SDK, trusted adapters), it stays below the waterline:
-- annotation kind only
-- cannot emit run events
-- cannot use tender.* sources
-- explicit source required
+## exec (split out)
 
-## Depends On
-
-All dependencies are satisfied.
-
-## exec: wrap applied to supervised shells
-
-`tender exec` is a convenience over `wrap` for the persistent shell pattern:
-
-```bash
-# Start a supervised shell
-tender start myshell --stdin --namespace ws-1 -- /bin/bash
-
-# Run framed commands inside it
-tender exec myshell --namespace ws-1 -- ls -la /tmp
-tender exec myshell --namespace ws-1 -- make -j8
-tender exec myshell --namespace ws-1 -- cd /foo && cargo test
-```
-
-Under the hood, `exec` = `push` (framed with sentinel) + `wrap` (observed with provenance).
-
-1. Frame the command with a sentinel: `<cmd>; echo "TENDER_SENTINEL_<id>_$?"`
-2. Push framed command to the shell's stdin FIFO
-3. Read output.log until sentinel appears
-4. Emit annotation event with command, output, exit code
-5. Return framed output + exit code as JSON
-
-The shell stays alive between `exec` calls. CWD and env persist. If the agent dies, the shell survives — another agent can reconnect via `tender exec` and keep working.
-
-Watch stream gets both layers:
-- Raw output lines as `log` events (from sidecar)
-- Framed command results as `annotation` events (from exec/wrap)
-
-**Design work needed:** sentinel framing protocol. Must be collision-resistant (UUID-based), must handle commands that produce binary output, must handle commands that never return (timeout).
-
-`exec` ships as part of wrap, not a separate feature. If sentinel framing proves complex, it can split into its own plan.
-
-## Notes
-
-Works with any agent that uses the stdin/stdout JSON hook pattern: Claude Code (12+ events), Codex (5, feature-flagged), Cursor (7), Cline (4), GitHub Copilot (2+).
-
-The persistent shell + exec pattern maps directly to what Claude Code does internally (persistent bash via pipes with sentinel delimiting). Tender adds supervision, crash recovery, and the event stream that no agent currently has.
+The `exec` concept (sentinel-framed command execution over persistent shells) was originally part of this plan but has been split into its own plan at `backlog/exec.md`. It needs significant design work (sentinel framing protocol, binary output handling, timeout semantics) that is independent of the completed `wrap` command.

@@ -24,9 +24,12 @@ tender run --detach <script> [args...]
 2. Derive session name from script filename (see Name Derivation)
 3. Build `cmd_start()` arguments from directives + CLI flags
 4. Call `cmd_start()` internally (Rust function call, not re-exec)
-5. Immediately call `cmd_wait()` to block until exit
-6. Stream output to caller's terminal via `cmd_log --follow`
-7. Exit with the child's exit code
+5. Spawn a log-follow thread that streams `output.log` to the caller's stdout/stderr (same logic as `cmd_log --follow`). This thread runs concurrently with step 6.
+6. On the main thread, poll `meta.json` for terminal state (same logic as `cmd_wait()`). Block until the session reaches a terminal state.
+7. Once terminal state is reached, drain any remaining log output from the follow thread, then join it.
+8. Exit with the child's exit code from `meta.json`.
+
+The concurrency model is: one thread follows the log (blocking reads on `output.log`), the main thread polls for terminal state. The follow thread stops naturally when it sees the terminal state marker in the log, or is joined after the main thread detects termination. No complex synchronization needed — the follow thread is read-only and the main thread only reads `meta.json`.
 
 This makes `tender run build.sh` behave like running `build.sh` directly — output visible, blocks until done, returns the exit code. The session is still supervised (crash recovery, output logging, event stream).
 

@@ -11,9 +11,9 @@ links: []
 ## CLI
 
 ```bash
-tender start job2 -- cmd --after job1              # wait for job1 exit 0
-tender start job2 -- cmd --after job1 --any-exit   # wait regardless of exit code
-tender start job2 -- cmd --after job1 --after job3 # wait for both
+tender start job2 --after job1 -- cmd              # wait for job1 exit 0
+tender start job2 --after job1 --any-exit -- cmd   # wait regardless of exit code
+tender start job2 --after job1 --after job3 -- cmd # wait for both
 ```
 
 ## Behavior
