@@ -749,10 +749,11 @@ fn capture_stream_pty(
 
         // Write to log (best-effort line splitting for log queries).
         //
-        // Known limitations in slice one:
+        // Known limitations in slice one (best-effort chunk-based transcript):
         // - Non-UTF-8 bytes are replaced with U+FFFD (lossy conversion)
-        // - Partial lines (no trailing newline) are buffered until the
-        //   next read completes a line, or flushed as-is on EOF
+        // - Line boundaries are determined by chunk boundaries from read(),
+        //   not by newline completion — a line may be split across chunks
+        //   or a partial line may be logged as a full entry
         // - This is acceptable because PTY log is a transcript, not a
         //   structured data channel. The raw attach path (tee) is lossless.
         {
