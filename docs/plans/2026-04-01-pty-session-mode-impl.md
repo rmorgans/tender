@@ -171,7 +171,7 @@ Add `pub mod pty;` to `src/model/mod.rs`.
 In `src/model/meta.rs`, add field:
 
 ```rust
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pty: Option<PtyMeta>,
@@ -407,12 +407,18 @@ In `src/platform/unix.rs`, modify `SupervisedChild`:
 pub struct SupervisedChild {
     child: std::process::Child,
     identity: ProcessIdentity,
+    /// Whether this child was spawned under a PTY.
+    is_pty: bool,
     /// PTY master read half (returned by child_stdout). None for pipe sessions.
     pty_master_read: Option<File>,
     /// PTY master write half (returned by child_stdin). None for pipe sessions.
     pty_master_write: Option<File>,
 }
 ```
+
+The `is_pty` flag is an explicit marker — never inferred from Option
+states. This avoids ambiguity after `child_stdout()` has been called
+(which sets both pipe stdout and pty_master_read to None).
 
 The PTY master fd is dup'd into two `File` handles: one for reading
 (transcript capture, via `child_stdout`), one for writing (push/attach
@@ -531,6 +537,7 @@ fn spawn_child_pty(
     Ok(SupervisedChild {
         child,
         identity,
+        is_pty: true,
         pty_master_read: Some(master_read),
         pty_master_write: Some(master_write),
     })
@@ -539,7 +546,7 @@ fn spawn_child_pty(
 
 **Step 5: Update existing spawn_child**
 
-Add `pty_master_read: None, pty_master_write: None` to the return.
+Add `is_pty: false, pty_master_read: None, pty_master_write: None` to the return.
 
 **Step 6: Update child_stdout / child_stdin / child_stderr for PTY**
 
@@ -550,36 +557,41 @@ In `child_stderr`: return `None` if PTY (merged output), else pipe stderr.
 ```rust
 fn child_stdout(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
     // PTY: return master read half. Pipe: return child stdout.
-    if let Some(f) = child.pty_master_read.take() {
-        return Some(Box::new(f));
+    if child.is_pty {
+        child.pty_master_read.take()
+            .map(|f| Box::new(f) as Box<dyn io::Read + Send>)
+    } else {
+        child.child.stdout.take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
     }
-    child.child.stdout.take()
-        .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
 }
 
 fn child_stderr(child: &mut SupervisedChild) -> Option<Box<dyn io::Read + Send>> {
-    // PTY: no stderr (merged). Pipe: return child stderr.
-    if child.pty_master_read.is_none() && child.child.stdout.is_none() {
-        // PTY session — stdout was already taken, stderr is merged
-        return None;
+    // PTY: no stderr (merged into PTY master). Pipe: return child stderr.
+    if child.is_pty {
+        None
+    } else {
+        child.child.stderr.take()
+            .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
     }
-    child.child.stderr.take()
-        .map(|s| Box::new(s) as Box<dyn io::Read + Send>)
 }
 
 fn child_stdin(child: &mut SupervisedChild) -> Option<Box<dyn io::Write + Send>> {
     // PTY: return master write half. Pipe: return child stdin.
-    if let Some(f) = child.pty_master_write.take() {
-        return Some(Box::new(f));
+    if child.is_pty {
+        child.pty_master_write.take()
+            .map(|f| Box::new(f) as Box<dyn io::Write + Send>)
+    } else {
+        child.child.stdin.take()
+            .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
     }
-    child.child.stdin.take()
-        .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
 }
 ```
 
-This means the sidecar's `supervise()` function works unchanged for PTY —
+`is_pty` is checked explicitly — no inference from Option states.
+The sidecar's `supervise()` function works unchanged for PTY:
 `child_stdout()` returns the PTY master read, `child_stderr()` returns
-`None`, so the sidecar spawns one capture thread instead of two.
+`None`, so the sidecar spawns one capture thread (tag `O`) instead of two.
 
 **Step 7: Add stub for Windows**
 
@@ -655,41 +667,125 @@ In `src/sidecar.rs`, around line 466-484, replace the spawn block:
     };
 ```
 
-**Step 2: Modify stdin forwarding**
+**Step 2: Modify stdin forwarding — shared write handle for PTY**
 
-Around line 513-519, the FIFO setup. For both pipe and PTY sessions,
-`child_stdin()` returns the write side — the sidecar doesn't need to
-know whether it's a pipe or PTY master:
+For pipe sessions, this is unchanged: `child_stdin()` is passed
+directly to the FIFO forwarding thread.
+
+For PTY sessions, the write handle must be shared between FIFO
+forwarding (push) and the attach listener (human input). So:
 
 ```rust
+    // Take the write side once via the trait.
+    let child_write = Current::child_stdin(&mut child);
+
+    // For PTY: wrap in Arc<Mutex> for shared access.
+    // For pipe: use directly (no sharing needed).
+    let pty_write_handle: Option<Arc<Mutex<Box<dyn Write + Send>>>> = if is_pty {
+        child_write.map(|w| Arc::new(Mutex::new(w)))
+    } else {
+        None
+    };
+
     if meta.launch_spec().stdin_mode == StdinMode::Pipe {
-        let child_stdin = Current::child_stdin(&mut child)
-            .ok_or_else(|| anyhow::anyhow!("child stdin not available"))?;
-        setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
+        let stdin_target: Box<dyn Write + Send> = if let Some(ref shared) = pty_write_handle {
+            // PTY: forwarding thread writes through the shared handle
+            Box::new(SharedWriter(Arc::clone(shared)))
+        } else {
+            // Pipe: forwarding thread owns the write side directly
+            child_write.ok_or_else(|| anyhow::anyhow!("child stdin not piped"))?
+        };
+        setup_stdin_forwarding(session_dir, stdin_target, &stdin_errors)?;
     }
 ```
 
-This is unchanged from the current code. The Platform trait handles
-the PTY vs pipe distinction internally.
+`SharedWriter` is a thin wrapper that implements `Write` by locking
+the `Arc<Mutex<...>>`. This keeps the forwarding thread's interface
+unchanged while allowing the attach listener to share the same handle.
 
 **Step 3: Supervision — existing `supervise()` works for PTY**
 
 The existing `supervise()` function calls `child_stdout()` and
 `child_stderr()`. For PTY sessions:
 
-- `child_stdout()` returns the PTY master read half → single capture thread with tag `O`
-- `child_stderr()` returns `None` → no stderr capture thread
+- `child_stdout()` returns the PTY master read half
+- `child_stderr()` returns `None` (merged output)
 
-The only change needed is to handle `child_stderr()` returning `None`
-gracefully instead of panicking:
+Two changes needed:
+
+**A. Handle optional stderr gracefully:**
 
 ```rust
     let stdout = Current::child_stdout(child).expect("stdout was piped");
-    let stderr = Current::child_stderr(child); // May be None for PTY
+    let stderr = Current::child_stderr(child); // None for PTY
+```
 
+**B. PTY capture must tee to both log and attached socket:**
+
+For pipe sessions, `capture_stream` writes to `output.log` only.
+For PTY sessions, the capture thread must also tee raw bytes to the
+attached human's socket (if any). This is essential for interactive
+use — prompts, TUIs, and partial lines cannot go through the
+line-buffered log-follow path.
+
+The capture thread receives an `Option<Arc<Mutex<UnixStream>>>`
+representing the currently attached client. When a human attaches,
+the attach listener sets this to `Some(stream)`. When they detach,
+it's set back to `None`. The capture thread checks on each read:
+
+```rust
+fn capture_stream_pty(
+    stream: Box<dyn Read + Send>,
+    log: &Mutex<File>,
+    attach_sink: &Mutex<Option<UnixStream>>,
+) -> Result<(), String> {
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        // Write to log (timestamped, line-buffered for log queries)
+        // Split on newlines for log format compliance
+        {
+            let mut f = log.lock().map_err(|e| format!("log mutex: {e}"))?;
+            for line in std::str::from_utf8(&buf[..n]).unwrap_or("").lines() {
+                let ts = timestamp_micros();
+                write!(f, "{ts} O {line}\n").ok();
+            }
+        }
+
+        // Tee raw bytes to attached client (if any)
+        if let Ok(mut sink) = attach_sink.lock() {
+            if let Some(ref mut stream) = *sink {
+                // Send as Data message via attach protocol
+                if attach_proto::write_msg(stream, MSG_DATA, &buf[..n]).is_err() {
+                    // Client disconnected — clear the sink
+                    *sink = None;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+The existing `capture_stream` stays for pipe sessions. PTY sessions
+use `capture_stream_pty` which adds the tee. The `supervise()`
+function picks the right one based on `is_pty`.
+
+```rust
     let log_ref = &log;
+    let attach_sink_ref = &attach_sink; // Arc<Mutex<Option<UnixStream>>>
+
     let (stdout_result, stderr_result) = std::thread::scope(|scope| {
-        let stdout_handle = scope.spawn(move || capture_stream(stdout, 'O', log_ref));
+        let stdout_handle = if is_pty {
+            scope.spawn(move || capture_stream_pty(stdout, 'O', log_ref, attach_sink_ref))
+        } else {
+            scope.spawn(move || capture_stream(stdout, 'O', log_ref))
+        };
         let stderr_handle = stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
 
         let stdout_r = stdout_handle.join()
@@ -701,8 +797,13 @@ gracefully instead of panicking:
     });
 ```
 
-No separate `supervise_pty()` function needed — the existing one handles
-both modes through the trait abstraction.
+This means the attach listener's output path is:
+1. Human attaches → listener sets `attach_sink` to `Some(socket)`
+2. Capture thread tees raw PTY bytes to the socket on every read
+3. Human detaches → listener sets `attach_sink` to `None`
+
+No log follow, no line buffering in the attach path. Raw bytes
+from the PTY master go directly to the human's terminal.
 
 **Step 5: Set PTY metadata on Meta**
 
@@ -874,13 +975,26 @@ The FIFO forwarding thread also uses `pty_write_handle.clone()`.
 The listener thread:
 - Binds a Unix domain socket at `attach.sock`
 - Accepts one connection at a time
-- On connect: update meta `pty.control = HumanControl`, write to disk
+- On connect:
+  - update meta `pty.control = HumanControl`, write to disk
+  - set `attach_sink` to `Some(socket)` (capture thread starts teeing)
 - Relay input: read framed messages from socket, write Data payloads
-  to PTY via `pty_write`, handle Resize messages via ioctl
-- Relay output: follow `output.log` and send new lines to socket as
-  Data messages
-- On disconnect: update meta `pty.control = AgentControl`, write to disk
+  to PTY via `pty_write_handle`, handle Resize messages via ioctl
+- Relay output: handled by the capture thread's tee (not the listener)
+- On disconnect:
+  - set `attach_sink` to `None` (capture thread stops teeing)
+  - update meta `pty.control = AgentControl`, write to disk
 - Clean up socket on session exit
+
+Output flow for interactive attach:
+```
+PTY master → capture thread → tee → attach socket (raw bytes)
+                            → output.log (timestamped, line-buffered)
+```
+
+This ensures prompts, partial lines, and TUI output reach the
+human's terminal immediately, without going through the line-oriented
+log format.
 
 **Step 3: Add `tender attach` CLI command**
 
@@ -1185,4 +1299,3 @@ All tasks
 - Agent lease / heartbeat / lease expiry (slice one: detach always → AgentControl)
 - Terminal recording / replay
 - Attach from `watch` events
-- Direct PTY master read multiplexing for attach (slice one: attach reads via log follow)

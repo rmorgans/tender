@@ -151,8 +151,7 @@ Minimal framing. Three message types:
 ### Detach
 
 - Client sends `Detach` message, or just closes the socket (unclean detach)
-- Sidecar transitions control state: → `AgentControl` if agent lease valid,
-  else → `Detached`
+- Sidecar transitions control state → `AgentControl` (always in slice one — no lease check)
 - Child process is unaffected
 - Client restores terminal to cooked mode before exiting
 
