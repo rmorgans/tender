@@ -21,7 +21,7 @@ docs/plans/
 | `completed/` | `YYYY-MM-DD-slug.md` | `2026-03-28-wrap.md` |
 | `specs/` | `slug.md` | `tender-agent-process-sitter.md` |
 
-Priority lives in filenames. `ls active/` is the ordered queue — no README table needed for ordering.
+Priority lives in filenames. `ls active/` is the ordered queue. README.md mirrors the active and backlog tables for discoverability (IDs, summaries, dependencies) but filenames are the source of truth for ordering.
 
 ## Frontmatter
 

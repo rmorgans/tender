@@ -1,7 +1,8 @@
 //! Windows implementation of the Platform trait.
 //!
-//! 2A.2: Module skeleton with process identity/status implemented,
-//! all other methods return Unsupported errors.
+//! All Platform methods are implemented: process lifecycle (spawn, kill,
+//! identity, status), sidecar spawn with STARTUPINFOEXW handle whitelisting,
+//! readiness channel (CreatePipe), and stdin transport (named pipes).
 
 use std::collections::BTreeMap;
 use std::fs::File;
