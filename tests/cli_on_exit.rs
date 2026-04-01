@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_running, wait_terminal};
+use harness::{echo_env_cmd, tender, touch_cmd, wait_running, wait_terminal};
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -58,7 +58,7 @@ fn on_exit_callback_runs_after_normal_exit() {
             "start",
             "on-exit-normal",
             "--on-exit",
-            &format!("touch {}", marker.display()),
+            &touch_cmd(&marker),
             "--",
             "echo",
             "done",
@@ -91,7 +91,7 @@ fn on_exit_callback_runs_after_forced_kill() {
             "start",
             "on-exit-kill",
             "--on-exit",
-            &format!("touch {}", marker.display()),
+            &touch_cmd(&marker),
             "--",
             "sleep",
             "60",
@@ -126,17 +126,12 @@ fn on_exit_callback_sees_env_vars() {
 
     let output_file = root.path().join("env_output.txt");
 
-    let on_exit_cmd = format!(
-        "sh -c \"echo $TENDER_SESSION $TENDER_NAMESPACE $TENDER_EXIT_REASON > {}\"",
-        output_file.display()
-    );
-
     let out = tender(&root)
         .args([
             "start",
             "on-exit-env",
             "--on-exit",
-            &on_exit_cmd,
+            &echo_env_cmd(&output_file),
             "--",
             "echo",
             "done",
@@ -226,9 +221,9 @@ fn on_exit_multiple_callbacks_both_run() {
             "start",
             "on-exit-multi",
             "--on-exit",
-            &format!("touch {}", marker_a.display()),
+            &touch_cmd(&marker_a),
             "--on-exit",
-            &format!("touch {}", marker_b.display()),
+            &touch_cmd(&marker_b),
             "--",
             "echo",
             "done",

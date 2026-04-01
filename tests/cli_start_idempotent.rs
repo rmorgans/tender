@@ -1,6 +1,6 @@
 mod harness;
 
-use harness::{tender, wait_running, wait_terminal};
+use harness::{tender, test_callback_bin, wait_running, wait_terminal};
 use predicates::prelude::*;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -104,7 +104,8 @@ fn start_with_cwd_child_runs_in_requested_directory() {
             "--cwd",
             work_dir.to_str().unwrap(),
             "--",
-            "pwd",
+            &test_callback_bin(),
+            "print-cwd",
         ])
         .output()
         .unwrap();

@@ -1,6 +1,8 @@
 #[allow(unused_imports)]
 use assert_cmd::Command;
 #[allow(unused_imports)]
+use std::path::Path;
+#[allow(unused_imports)]
 use tempfile::TempDir;
 
 /// Create a `tender` command rooted in a temp HOME.
@@ -19,6 +21,37 @@ pub fn tender(root: &TempDir) -> Command {
         }
     }
     cmd
+}
+
+/// Path to the `test_callback` fixture binary (built by cargo as a sibling of the test binary).
+#[allow(dead_code)]
+pub fn test_callback_bin() -> String {
+    let bin = assert_cmd::cargo::cargo_bin("test_callback");
+    bin.to_str().expect("test_callback path is valid UTF-8").to_owned()
+}
+
+/// `test_callback_bin()` quoted for embedding in on-exit command strings
+/// that will be parsed by `shell_words::split`.
+#[allow(dead_code)]
+fn test_callback_bin_quoted() -> String {
+    shell_words::quote(&test_callback_bin()).into_owned()
+}
+
+/// Return an on-exit command string that creates `path` as an empty marker file.
+/// Parsed by `shell_words::split` in the sidecar, then executed directly — no shell involved.
+#[allow(dead_code)]
+pub fn touch_cmd(path: &Path) -> String {
+    let quoted = shell_words::quote(path.to_str().expect("path is valid UTF-8"));
+    format!("{} touch {quoted}", test_callback_bin_quoted())
+}
+
+/// Return an on-exit command string that writes TENDER_SESSION, TENDER_NAMESPACE,
+/// and TENDER_EXIT_REASON to the given file.
+/// Parsed by `shell_words::split` in the sidecar, then executed directly — no shell involved.
+#[allow(dead_code)]
+pub fn echo_env_cmd(path: &Path) -> String {
+    let quoted = shell_words::quote(path.to_str().expect("path is valid UTF-8"));
+    format!("{} echo-env {quoted}", test_callback_bin_quoted())
 }
 
 /// Wait for meta.json to show Running state on disk.
