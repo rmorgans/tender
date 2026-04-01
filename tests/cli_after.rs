@@ -400,3 +400,83 @@ fn after_waits_for_running_dependency() {
     assert_eq!(meta2["status"].as_str(), Some("Exited"));
     assert_eq!(meta2["reason"].as_str(), Some("ExitedOk"));
 }
+
+/// kill --force during dependency wait → DependencyFailed/KilledForced.
+#[test]
+fn kill_force_during_dependency_wait() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "job1", "--", "sleep", "60"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "job1");
+
+    harness::tender(&root)
+        .args(["start", "job2", "--after", "job1", "--", "true"])
+        .assert()
+        .success();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    harness::tender(&root)
+        .args(["kill", "job2", "--force"])
+        .assert()
+        .success();
+
+    let meta = harness::wait_terminal(&root, "job2");
+    assert_eq!(meta["status"].as_str(), Some("DependencyFailed"));
+    assert_eq!(meta["dep_reason"].as_str(), Some("KilledForced"));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "job1", "--force"])
+        .assert();
+}
+
+/// Satisfied dep is latched: replacing it after satisfaction doesn't fail the waiter.
+#[test]
+fn after_satisfied_dep_not_invalidated_by_replace() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // job1 exits quickly, job3 runs long
+    harness::tender(&root)
+        .args(["start", "job1", "--", "true"])
+        .assert()
+        .success();
+    harness::wait_terminal(&root, "job1");
+
+    harness::tender(&root)
+        .args(["start", "job3", "--", "sleep", "3"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "job3");
+
+    // job2 depends on both: job1 (already terminal) and job3 (still running)
+    harness::tender(&root)
+        .args([
+            "start", "job2", "--after", "job1", "--after", "job3", "--", "true",
+        ])
+        .assert()
+        .success();
+
+    // Give sidecar time to latch job1 as satisfied
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // Replace job1 — this would fail the waiter without latching
+    harness::tender(&root)
+        .args(["start", "job1", "--replace", "--", "sleep", "60"])
+        .assert()
+        .success();
+
+    // job3 finishes, job2 should succeed (job1 was already latched)
+    harness::wait_terminal(&root, "job3");
+    let meta = harness::wait_terminal(&root, "job2");
+    assert_eq!(meta["status"].as_str(), Some("Exited"));
+    assert_eq!(meta["reason"].as_str(), Some("ExitedOk"));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "job1", "--force"])
+        .assert();
+}
