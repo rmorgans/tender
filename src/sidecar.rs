@@ -214,13 +214,14 @@ fn wait_for_dependencies(
     let deadline =
         timeout_s.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
     let kill_request_path = session_dir.join("kill_request");
+    let run_id_str = run_id.to_string();
 
     loop {
         // Check kill request first
         if kill_request_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&kill_request_path) {
                 if let Ok(req) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if req["run_id"].as_str() == Some(&run_id.to_string()) {
+                    if req["run_id"].as_str() == Some(run_id_str.as_str()) {
                         let _ = std::fs::remove_file(&kill_request_path);
                         return DepWaitOutcome::Killed(
                             "killed during dependency wait".into(),
