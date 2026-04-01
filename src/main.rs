@@ -9,6 +9,10 @@ mod commands;
 #[derive(Parser)]
 #[command(name = "tender", about = "Agent process sitter")]
 struct Cli {
+    /// Route command through SSH to a remote host (e.g. user@box)
+    #[arg(long, global = true)]
+    host: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
