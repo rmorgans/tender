@@ -118,6 +118,35 @@ pub fn cmd_exec(
     let token = exec_frame::generate_token();
     let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
 
+    // Write annotation event to output.log
+    {
+        let run_id = meta.run_id().to_string();
+        let annotation = serde_json::json!({
+            "source": "agent.exec",
+            "event": "exec",
+            "run_id": run_id,
+            "data": {
+                "command": &cmd,
+                "hook_stdout": &result.stdout,
+                "hook_stderr": &result.stderr,
+                "hook_exit_code": result.exit_code,
+                "cwd_after": &result.cwd_after,
+                "timed_out": result.timed_out,
+                "truncated": result.truncated,
+            }
+        });
+        let ts = timestamp_micros();
+        let json_str = serde_json::to_string(&annotation)?;
+        let line = format!("{ts} A {json_str}\n");
+        let log_path = session.path().join("output.log");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        use std::io::Write as _;
+        file.write_all(line.as_bytes())?;
+    }
+
     let json = serde_json::to_string_pretty(&result)?;
     println!("{json}");
 
@@ -260,4 +289,14 @@ fn run_exec(
             }
         }
     }
+}
+
+fn timestamp_micros() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    let micros = duration.subsec_micros();
+    format!("{secs}.{micros:06}")
 }
