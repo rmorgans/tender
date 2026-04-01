@@ -747,11 +747,18 @@ fn capture_stream_pty(
             Err(_) => break,
         };
 
-        // Write to log (timestamped, line-buffered for log queries)
-        // Split on newlines for log format compliance
+        // Write to log (best-effort line splitting for log queries).
+        //
+        // Known limitations in slice one:
+        // - Non-UTF-8 bytes are replaced with U+FFFD (lossy conversion)
+        // - Partial lines (no trailing newline) are buffered until the
+        //   next read completes a line, or flushed as-is on EOF
+        // - This is acceptable because PTY log is a transcript, not a
+        //   structured data channel. The raw attach path (tee) is lossless.
         {
             let mut f = log.lock().map_err(|e| format!("log mutex: {e}"))?;
-            for line in std::str::from_utf8(&buf[..n]).unwrap_or("").lines() {
+            let text = String::from_utf8_lossy(&buf[..n]);
+            for line in text.lines() {
                 let ts = timestamp_micros();
                 write!(f, "{ts} O {line}\n").ok();
             }
@@ -782,7 +789,7 @@ function picks the right one based on `is_pty`.
 
     let (stdout_result, stderr_result) = std::thread::scope(|scope| {
         let stdout_handle = if is_pty {
-            scope.spawn(move || capture_stream_pty(stdout, 'O', log_ref, attach_sink_ref))
+            scope.spawn(move || capture_stream_pty(stdout, log_ref, attach_sink_ref))
         } else {
             scope.spawn(move || capture_stream(stdout, 'O', log_ref))
         };
@@ -933,68 +940,87 @@ Add `pub mod attach_proto;` to `src/lib.rs`.
 
 **Step 2: Add socket listener to sidecar**
 
-The attach listener needs to write to the PTY master (relay human
-input) and read from it (relay output to the human). But the
-transcript capture thread already owns the read half.
+Two data paths, both handled explicitly:
 
-Design: the attach listener does NOT read from the PTY master
-directly. Instead:
+- **Human → PTY (input):** The listener reads framed messages from
+  its read half of the socket. Data payloads are written to the
+  shared PTY write handle (`Arc<Mutex<dyn Write + Send>>`). Resize
+  messages trigger `ioctl TIOCSWINSZ`. This is the same shared handle
+  that FIFO forwarding uses.
 
-- **Human → PTY:** The listener writes to a shared PTY write handle
-  (`Arc<Mutex<dyn Write + Send>>`). This is the same handle that
-  FIFO forwarding writes to — both go to the PTY master write side.
-  The sidecar takes `child_stdin()` once, wraps it in
-  `Arc<Mutex<...>>`, and shares it between FIFO forwarding and the
-  attach listener.
+- **PTY → Human (output):** The capture thread tees raw PTY bytes
+  to the attached socket via `attach_sink` (set up in Task 6). The
+  listener does NOT read PTY output — the capture thread handles it.
 
-- **PTY → Human:** The transcript capture thread reads from the PTY
-  master and writes to `output.log`. The attach listener separately
-  reads from `output.log` using the same `follow_log` mechanism that
-  `tender log -f` uses. This avoids splitting the PTY master read
-  stream between two consumers.
+**Socket duplex ownership:** A `UnixStream` is bidirectional, but
+the listener needs to read from it (human input) while the capture
+thread writes to it (PTY output) concurrently. Solution:
+`try_clone()` the stream on connect. The listener owns the read
+clone, the write clone goes into `attach_sink`:
 
-  Alternative: the capture thread could also tee output to the
-  attached socket. But using log follow is simpler for slice one
-  and avoids complex multiplexing.
+```rust
+    // On human connect:
+    let write_half = stream.try_clone()?;
+    let read_half = stream; // listener keeps this
+
+    // Capture thread tees PTY output to the write half
+    *attach_sink.lock().unwrap() = Some(write_half);
+
+    // Listener reads framed input from the read half
+    loop {
+        match attach_proto::read_msg(&mut read_half) {
+            Ok((MSG_DATA, payload)) => {
+                pty_write.lock().unwrap().write_all(&payload).ok();
+            }
+            Ok((MSG_RESIZE, payload)) => {
+                if let Some((rows, cols)) = attach_proto::parse_resize(&payload) {
+                    // ioctl TIOCSWINSZ on the PTY
+                }
+            }
+            Ok((MSG_DETACH, _)) | Err(_) => break,
+            _ => {}
+        }
+    }
+
+    // On disconnect: clear the sink, capture thread stops teeing
+    *attach_sink.lock().unwrap() = None;
+```
 
 In `src/sidecar.rs`, after setting up stdin forwarding:
 
 ```rust
     if is_pty {
         let sock_path = session_dir.join("attach.sock");
-        let pty_write = pty_write_handle.clone(); // Arc<Mutex<dyn Write + Send>>
+        let pty_write = pty_write_handle.clone();
+        let attach_sink_clone = Arc::clone(&attach_sink);
         let session_clone = session.clone();
         std::thread::spawn(move || {
-            run_attach_listener(&sock_path, pty_write, &session_clone);
+            run_attach_listener(
+                &sock_path, pty_write, attach_sink_clone, &session_clone,
+            );
         });
     }
 ```
-
-The FIFO forwarding thread also uses `pty_write_handle.clone()`.
 
 The listener thread:
 - Binds a Unix domain socket at `attach.sock`
 - Accepts one connection at a time
 - On connect:
+  - `try_clone()` the stream → read half (listener), write half (sink)
+  - set `attach_sink` to `Some(write_half)` (capture thread tees output)
   - update meta `pty.control = HumanControl`, write to disk
-  - set `attach_sink` to `Some(socket)` (capture thread starts teeing)
-- Relay input: read framed messages from socket, write Data payloads
-  to PTY via `pty_write_handle`, handle Resize messages via ioctl
-- Relay output: handled by the capture thread's tee (not the listener)
+- Input relay: listener reads framed messages from read half
+- Output relay: capture thread tees raw PTY bytes to write half
 - On disconnect:
-  - set `attach_sink` to `None` (capture thread stops teeing)
+  - set `attach_sink` to `None`
   - update meta `pty.control = AgentControl`, write to disk
 - Clean up socket on session exit
 
-Output flow for interactive attach:
+Output flow:
 ```
-PTY master → capture thread → tee → attach socket (raw bytes)
-                            → output.log (timestamped, line-buffered)
+PTY master → capture thread → tee → attach_sink write half (raw bytes)
+                            → output.log (best-effort line-buffered)
 ```
-
-This ensures prompts, partial lines, and TUI output reach the
-human's terminal immediately, without going through the line-oriented
-log format.
 
 **Step 3: Add `tender attach` CLI command**
 
