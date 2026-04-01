@@ -338,7 +338,7 @@ impl Platform for WindowsPlatform {
         let handle = unsafe {
             CreateFileW(
                 wide_name.as_ptr(),
-                windows_sys::Win32::Storage::FileSystem::GENERIC_WRITE,
+                windows_sys::Win32::Foundation::GENERIC_WRITE,
                 0,
                 std::ptr::null(),
                 OPEN_EXISTING,
@@ -716,9 +716,8 @@ fn stdin_pipe_name(session_dir: &Path) -> String {
 
 /// Create a named pipe server for inbound byte-mode reads.
 fn create_named_pipe_server(name: &str) -> io::Result<OwnedHandle> {
-    use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_WAIT,
-    };
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+    use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT};
 
     let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
 
