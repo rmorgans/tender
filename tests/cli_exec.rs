@@ -37,6 +37,45 @@ fn exec_session_not_running() {
         .stderr(predicates::str::contains("not running"));
 }
 
+/// Basic exec: run echo in a bash shell, get structured output.
+#[test]
+fn exec_basic_command() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // Start a bash shell with --stdin
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+
+    // Give shell time to initialize
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Exec a command
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "hello world"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert!(result["stdout"].as_str().unwrap().contains("hello world"));
+    assert!(!result["timed_out"].as_bool().unwrap());
+    assert!(result["cwd_after"].as_str().unwrap().starts_with('/'));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
 /// exec fails if session lacks --stdin.
 #[test]
 fn exec_session_no_stdin() {

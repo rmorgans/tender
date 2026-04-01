@@ -1,8 +1,13 @@
 use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::time::{Duration, Instant};
 
+use tender::exec_frame;
+use tender::log::LogLine;
 use tender::model::ids::{Namespace, SessionName};
 use tender::model::spec::StdinMode;
 use tender::model::state::RunStatus;
+use tender::platform::{Current, Platform};
 use tender::session::{self, SessionDir, SessionRoot};
 
 /// Advisory flock on `session_dir/exec.lock`, non-blocking.
@@ -70,10 +75,21 @@ impl ExecLock {
     }
 }
 
+#[derive(serde::Serialize)]
+struct ExecResult {
+    session: String,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    cwd_after: String,
+    timed_out: bool,
+    truncated: bool,
+}
+
 pub fn cmd_exec(
     name: &str,
     cmd: Vec<String>,
-    _timeout: Option<u64>,
+    timeout: Option<u64>,
     namespace: &Namespace,
 ) -> anyhow::Result<()> {
     let session_name = SessionName::new(name)?;
@@ -99,5 +115,151 @@ pub fn cmd_exec(
         anyhow::bail!("no command specified");
     }
 
-    anyhow::bail!("exec not yet implemented");
+    let token = exec_frame::generate_token();
+    let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
+
+    let json = serde_json::to_string_pretty(&result)?;
+    println!("{json}");
+
+    if result.timed_out {
+        eprintln!("exec timed out — command may still be running in the shell");
+        std::process::exit(124);
+    }
+    if result.exit_code != 0 {
+        std::process::exit(result.exit_code);
+    }
+
+    Ok(())
+}
+
+fn run_exec(
+    session: &SessionDir,
+    _meta: &tender::model::meta::Meta,
+    cmd: &[String],
+    token: &str,
+    timeout: Option<u64>,
+) -> anyhow::Result<ExecResult> {
+    let session_name = session
+        .path()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // 1. Capture log cursor
+    let log_path = session.path().join("output.log");
+    let cursor = std::fs::metadata(&log_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    // 2. Frame the command
+    let framed = exec_frame::unix_frame(cmd, token);
+
+    // 3. Send through stdin transport (with retry on ConnectionRefused)
+    let mut writer = loop {
+        match Current::open_stdin_writer(session.path()) {
+            Ok(f) => break f,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                let current = session::read_meta(session)?;
+                if !matches!(current.status(), RunStatus::Running { .. }) {
+                    anyhow::bail!("session exited before exec could connect");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("failed to open stdin pipe: {e}"));
+            }
+        }
+    };
+    writer.write_all(framed.as_bytes())?;
+    drop(writer);
+
+    // 4. Tail output.log from cursor until sentinel
+    let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
+
+    let mut stdout_lines: Vec<String> = Vec::new();
+    let mut stderr_lines: Vec<String> = Vec::new();
+
+    // Wait for log file to exist
+    while !log_path.exists() {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                return Ok(ExecResult {
+                    session: session_name,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: -1,
+                    cwd_after: String::new(),
+                    timed_out: true,
+                    truncated: false,
+                });
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let file = std::fs::File::open(&log_path)?;
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(cursor))?;
+
+    let mut buf = String::new();
+    loop {
+        // Check timeout
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                return Ok(ExecResult {
+                    session: session_name,
+                    stdout: stdout_lines.join("\n"),
+                    stderr: stderr_lines.join("\n"),
+                    exit_code: -1,
+                    cwd_after: String::new(),
+                    timed_out: true,
+                    truncated: false,
+                });
+            }
+        }
+
+        buf.clear();
+        let bytes = reader.read_line(&mut buf)?;
+        if bytes == 0 {
+            // No data available — check session is still running
+            let current = session::read_meta(session)?;
+            if !matches!(current.status(), RunStatus::Running { .. }) {
+                anyhow::bail!("session exited while waiting for exec result");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+        let Some(parsed) = LogLine::parse(trimmed) else {
+            continue;
+        };
+
+        match parsed.tag {
+            'O' => {
+                // Check if this is the sentinel line
+                if let Some((exit_code, cwd)) =
+                    exec_frame::parse_sentinel(&parsed.content, token)
+                {
+                    return Ok(ExecResult {
+                        session: session_name,
+                        stdout: stdout_lines.join("\n"),
+                        stderr: stderr_lines.join("\n"),
+                        exit_code,
+                        cwd_after: cwd,
+                        timed_out: false,
+                        truncated: false,
+                    });
+                }
+                stdout_lines.push(parsed.content);
+            }
+            'E' => {
+                stderr_lines.push(parsed.content);
+            }
+            _ => {
+                // Skip annotations and other tags
+            }
+        }
+    }
 }
