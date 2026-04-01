@@ -21,6 +21,9 @@ use crate::session::{self, LockGuard, SessionDir, SessionRoot};
 /// Type alias for the platform's ReadyWriter to avoid verbose turbofish.
 type ReadyWriter = <Current as Platform>::ReadyWriter;
 
+/// Shared sink for teeing PTY output to an attached client.
+type AttachSink = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
 /// Run the sidecar process. Called from the `_sidecar` subcommand.
 ///
 /// Contract:
@@ -339,14 +342,14 @@ impl Write for SharedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "write mutex poisoned"))?
+            .map_err(|_| io::Error::other("write mutex poisoned"))?
             .write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.0
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "write mutex poisoned"))?
+            .map_err(|_| io::Error::other("write mutex poisoned"))?
             .flush()
     }
 }
@@ -554,7 +557,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     );
 
     // --- Attach sink for PTY tee ---
-    let attach_sink: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
+    let attach_sink: AttachSink = Arc::new(Mutex::new(None));
 
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -828,7 +831,7 @@ fn signal_meta_snapshot(ready: &mut Option<ReadyWriter>, meta: &Meta) -> anyhow:
 fn supervise(
     session: &SessionDir,
     child: &mut <Current as Platform>::SupervisedChild,
-    attach_sink: Option<&Arc<Mutex<Option<Box<dyn Write + Send>>>>>,
+    attach_sink: Option<&AttachSink>,
 ) -> anyhow::Result<ExitReason> {
     let log_path = session.path().join("output.log");
     let log_file = OpenOptions::new()
@@ -920,7 +923,7 @@ fn capture_stream_with_tee(
     mut stream: Box<dyn std::io::Read + Send>,
     tag: char,
     log: &Mutex<File>,
-    attach_sink: &Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    attach_sink: &AttachSink,
 ) -> Result<(), String> {
     use crate::attach_proto;
     let mut buf = [0u8; 4096];
@@ -968,7 +971,7 @@ fn timestamp_micros() -> String {
 fn run_attach_listener(
     sock_path: &Path,
     pty_write: Arc<Mutex<Box<dyn Write + Send>>>,
-    attach_sink: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    attach_sink: AttachSink,
     session_dir: &Path,
 ) {
     use std::os::unix::net::UnixListener;

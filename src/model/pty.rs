@@ -32,3 +32,9 @@ impl PtyMeta {
         }
     }
 }
+
+impl Default for PtyMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
