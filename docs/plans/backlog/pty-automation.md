@@ -5,115 +5,256 @@ depends_on:
 links: []
 ---
 
-# PTY Automation — Agent Control Of Interactive Sessions
+# PTY Automation — Agent Control of Interactive Sessions
 
-Add agent-driven interaction for PTY-backed sessions after PTY session mode exists.
+Agent-driven control of PTY-backed sessions with exclusive lease-based ownership, observe-only output streaming, and human preemption.
 
-This is the follow-on feature for interactive-program automation. It is intentionally separate from the first PTY slice.
+## Why
 
-## Goal
+Pipe+exec handles structured command execution. But some programs need a real terminal — password prompts, REPLs, TUIs, `ssh`, `psql`. An agent needs to drive these programmatically without a human in the loop, but a human must be able to take over when needed.
 
-Let agents drive interactive terminal sessions safely enough to handle TTY-sensitive programs, while preserving a clear ownership model between humans and agents.
+The hard problem (command boundary detection in terminal transcript) is explicitly out of scope. This plan provides the plumbing: exclusive control, input, output observation, ownership handoff.
 
-## Why This Is Separate
+## Current State
 
-Writing bytes into a PTY is easy. Recovering structured command boundaries from a PTY transcript is not.
+PTY session mode is implemented:
+- `start --pty` spawns via `openpty`, sidecar owns PTY master
+- `push` writes bytes through FIFO to PTY master via `SharedWriter`
+- `attach` gives a human full terminal control via Unix domain socket
+- `PtyControl` enum: `AgentControl`, `HumanControl`, `Detached`
+- Control transitions written to `meta.json`
+- Attach protocol: `MSG_DATA`, `MSG_RESIZE`, `MSG_DETACH`
+- `capture_stream_with_tee` tees PTY output to attached human
 
-Problems this plan owns:
+## Design
 
-- prompts and redraws
-- merged stdout/stderr
-- terminal control sequences
-- shell-state ambiguity
-- human interference during automation
-- command boundary detection in transcript output
+### Lease Model
 
-That is why PTY automation should not be conflated with first-slice `exec`.
+An agent acquires exclusive control via a named lease stored in `PtyMeta`:
 
-## First Slice Goal
-
-Land a minimal, lease-based PTY control model for agents:
-
-- agent can obtain exclusive control of a PTY session
-- agent can send input bytes into the PTY
-- agent can observe transcript output
-- no human controller may be attached while agent control is active
-- results are transcript-based, not stdout/stderr-structured like `exec`
-
-## Model
-
-The PTY broker should eventually support distinct connection modes:
-
-- detached
-- observing
-- controlling
-
-This plan adds agent control on top of that broker model.
-
-Recommended rule:
-
-- at most one controller at a time
-- agent control requires an exclusive lease
-- human attach while agent lease is active is rejected or must explicitly steal control
-
-## Relationship To `exec`
-
-`exec` remains the structured, non-PTY command feature.
-
-PTY automation is different:
-
-- transcript-driven
-- terminal-oriented
-- less structured
-- appropriate for interactive or TTY-sensitive programs
-
-Do not try to make PTY automation return the same cleanliness guarantees as non-PTY `exec` in the first slice.
-
-## Candidate CLI / API Surface
-
-This plan deliberately leaves the public interface open until PTY session mode exists.
-
-Possible shapes:
-
-```bash
-tender pty-send shell
+```json
+{
+  "pty": {
+    "enabled": true,
+    "control": "AgentLeased",
+    "lease": {
+      "agent_id": "claude-session-abc",
+      "acquired_at": 1773654000.0,
+      "ttl_secs": 300
+    }
+  }
+}
 ```
 
-or a more explicit lease/attach-control API.
+- Lease is explicit — `push` alone does not grant a lease
+- Lease has a TTL (default 5 minutes) to handle agent crashes
+- Agent refreshes lease to keep it alive
+- Expired lease is auto-released by sidecar
 
-The key requirement is ownership clarity, not specific flag spelling yet.
+### Control State Model (extended)
+
+```
+start --pty → AgentControl
+                 ↓ pty-control acquire
+              AgentLeased ←→ HumanControl
+                 ↓ pty-control release / expiry
+              AgentControl
+```
+
+- `AgentControl`: no lease, push allowed, attach allowed
+- `AgentLeased`: agent holds lease, push allowed, observe allowed, attach steals (human preemption)
+- `HumanControl`: human attached, push rejected, lease suspended (restored on detach)
+- `Detached`: no push channel
+
+### Input
+
+`push` remains the input mechanism. No new input command. Push is allowed in `AgentControl` and `AgentLeased`, rejected in `HumanControl`. The lease is about ownership exclusivity and human preemption, not push gating.
+
+### Output Observation
+
+New `tender observe` command — read-only socket connection to the PTY attach socket:
+- Sends `MSG_OBSERVE` as first message on connect
+- Sidecar tees output to observer without changing control state
+- Multiple observers allowed simultaneously
+- No input accepted on observe connections
+- Agent-friendly: no raw terminal mode, no resize, just streaming bytes to stdout
+
+Alternative: `tender log --follow --raw` already works. `observe` is lower-latency (socket vs file poll) but optional for first slice.
+
+### Human Preemption
+
+Human `attach` always wins:
+1. If `AgentLeased`: sidecar transitions to `HumanControl`, suspends lease (kept in `PtyMeta`)
+2. Agent detects preemption by polling `tender pty-control status` (control changed to `HumanControl`)
+3. Human detaches → sidecar checks for suspended lease → restores `AgentLeased` automatically
+4. Agent resumes pushing
+
+### Lease IPC
+
+File-based, same pattern as `kill_request`:
+- Agent writes `pty_lease_request` file (JSON: `{action, agent_id, ttl_secs}`)
+- Sidecar polls for it (alongside kill_request poll)
+- Sidecar validates, updates in-memory state, writes `pty_lease_response`
+- Agent reads response, deletes request file
+
+Actions: `acquire`, `release`, `refresh`
+
+## CLI Surface
+
+```bash
+# Acquire exclusive lease
+tender pty-control acquire <session> --agent-id <id> [--ttl <seconds>] [--namespace NS]
+
+# Release lease
+tender pty-control release <session> --agent-id <id> [--namespace NS]
+
+# Check lease status
+tender pty-control status <session> [--namespace NS]
+
+# Observe PTY output (read-only, no control change)
+tender observe <session> [--namespace NS]
+```
+
+## Schema Changes
+
+### PtyControl enum
+
+Add `AgentLeased` variant:
+
+```rust
+pub enum PtyControl {
+    AgentControl,
+    AgentLeased,
+    HumanControl,
+    Detached,
+}
+```
+
+### PtyMeta
+
+Add optional lease struct:
+
+```rust
+pub struct PtyLease {
+    pub agent_id: String,
+    pub acquired_at: f64,
+    pub ttl_secs: u64,
+}
+```
+
+### Attach protocol
+
+Add `MSG_OBSERVE = 0x04` — first message sent on observe connection. Sidecar enters observe mode: tees output, rejects input.
+
+## What NOT to Build
+
+- **Command boundary detection** — agent's problem. Read raw transcript.
+- **Structured PTY exec** — use pipe+exec for that.
+- **Multi-controller collaboration** — one controller at a time.
+- **Browser terminal relay** — attach is always local CLI to local sidecar.
+- **Windows ConPTY** — Unix only.
+- **Automatic prompt injection** — no OSC 633, no shell integration.
+- **Lease persistence across sidecar restart** — sidecar dies = session is `sidecar_lost`.
 
 ## Implementation Tasks
 
-1. Extend PTY session metadata with controller identity / lease state
-2. Define agent control lease semantics
-3. Add input-write API for PTY sessions
-4. Add transcript-follow API suitable for agent consumption
-5. Decide how control stealing / preemption works
-6. Add tests for controller exclusivity and transcript visibility
+### Task 1: Extend PtyMeta with lease fields
 
-## Testing
+Add `PtyLease` struct, `PtyControl::AgentLeased` variant, optional `lease` field to `PtyMeta`.
 
-- agent can acquire control of a detached PTY session
-- agent input reaches the terminal process
-- transcript output is observable during agent control
-- second controller is rejected
-- human attach is rejected or explicitly preempts according to policy
-- session remains alive if the controlling agent disconnects unexpectedly
+Files: `src/model/pty.rs`
 
-## Acceptance Criteria
+Tests:
+- PtyMeta serializes/deserializes with optional lease
+- Existing meta without lease still deserializes
+- AgentLeased variant serializes correctly
 
-- interactive programs can be automated through Tender without pretending they are structured non-PTY sessions
-- controller ownership is explicit
-- human and agent control do not silently interfere with each other
+### Task 2: Lease file IPC in sidecar
 
-## Depends On
+Add `pty_lease_request` file polling to sidecar (alongside kill_request poll). Sidecar validates request, updates in-memory state, writes `pty_lease_response`, updates `meta.json`.
 
-`pty-session-mode` must exist first.
+Files: `src/sidecar.rs`
 
-## Not In Scope
+Tests:
+- Sidecar picks up acquire request, writes response, updates meta
+- Sidecar rejects acquire when different agent holds lease
+- Sidecar processes release request
+- Sidecar processes refresh request (resets TTL)
 
-- clean stdout/stderr separation
-- non-PTY-style `exec` semantics
-- multi-controller collaboration
-- browser relay
+### Task 3: `pty-control` CLI command
+
+Add `pty-control` subcommand with `acquire`, `release`, `status` actions. Writes request file, polls for response with timeout.
+
+Files: `src/main.rs`, `src/commands/pty_control.rs`
+
+Tests:
+- acquire + status shows lease
+- release clears lease
+- second acquire by different agent rejected
+- acquire on non-PTY session fails
+- acquire on non-running session fails
+
+### Task 4: Human preemption of agent lease
+
+When human attaches while `AgentLeased`: transition to `HumanControl`, suspend lease. On detach: restore `AgentLeased` if suspended lease exists and hasn't expired.
+
+Files: `src/sidecar.rs` (attach listener)
+
+Tests:
+- Human attach preempts agent lease, meta shows HumanControl
+- Human detach restores AgentLeased
+- Expired suspended lease is not restored on detach
+
+### Task 5: Lease expiry
+
+Sidecar checks `acquired_at + ttl_secs` on each poll cycle. Expired lease auto-releases to `AgentControl`.
+
+Files: `src/sidecar.rs`
+
+Tests:
+- Lease expires after TTL, status shows AgentControl
+- Refresh resets expiry timer
+- Expired lease allows new acquire by different agent
+
+### Task 6: Observe-only socket connection
+
+Add `MSG_OBSERVE` message type. Change `attach_sink` from `Option<Box<dyn Write>>` to support multiple observers. `tender observe` command connects, sends MSG_OBSERVE, streams output to stdout.
+
+Files: `src/attach_proto.rs`, `src/sidecar.rs`, `src/main.rs`, `src/commands/observe.rs`
+
+Tests:
+- Observe receives output without changing control state
+- Push works while observer connected
+- Multiple observers work
+- Observer disconnect doesn't affect control state
+
+### Task 7: SSH remote forwarding for new commands
+
+Add `pty-control` and `observe` to SSH allowlist and `remote_args()`.
+
+Files: `src/main.rs`, `src/ssh.rs`
+
+Tests:
+- pty-control forwarded correctly
+- observe forwarded correctly
+
+### Task 8: Integration tests
+
+End-to-end scenarios covering the full lease lifecycle.
+
+Tests:
+- Agent acquires lease, pushes commands, releases lease
+- Agent acquires, human attaches (preempts), human detaches (restores), agent resumes
+- Agent crashes (lease expires), new agent acquires
+- Observe during agent control
+- Observe during human control
+
+## Implementation Order
+
+Tasks 1 → 2 → 3 form the minimal useful slice (lease model + CLI + IPC).
+Task 4 adds human preemption (critical for the use case).
+Task 5 adds crash safety (lease expiry).
+Task 6 adds observe mode (nice-to-have, `log --follow` is the fallback).
+Tasks 7-8 are cross-cutting.
+
+Core value: tasks 1-5. Tasks 6-8 are independently deferrable.
