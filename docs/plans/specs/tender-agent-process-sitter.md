@@ -522,13 +522,13 @@ The architectural point is:
 
 ```
 tender log job                    # raw stdout/stderr
-tender log job --grep "ERROR"     # server-side filter
+tender log job | rg "ERROR"       # pipe to standard search tools
 tender log job --since 5m         # time-windowed
 tender log job --tail 50          # last N lines
 tender log job --follow           # stream
 ```
 
-**Rule: don't make agents download 100MB of logs to grep for one line.**
+**Rule: don't make agents download 100MB of logs to search for one line.**
 
 ### 8. Fan-Out is Native
 
@@ -627,7 +627,7 @@ Single `output.log` file with interleaved stdout/stderr. Each line is prefixed b
 1710612345.345678 O second line of stdout
 ```
 
-`O` = stdout, `E` = stderr. Unix epoch with microseconds. This preserves interleaving chronology and enables `--since`, `--grep`, and stream filtering (`--stderr-only`).
+`O` = stdout, `E` = stderr. Unix epoch with microseconds. This preserves interleaving chronology and enables `--since` and downstream filtering.
 
 **This is a line-oriented observability log, not a byte-exact replay stream.** Partial lines are buffered until newline. Binary output is not faithfully reproduced. `tender log --raw` strips the timestamp and stream tag prefixes for human readability, but does not guarantee byte-identical reproduction of original output. If exact byte replay is needed (e.g. binary protocols), use the child's own file redirection instead of tender's log capture.
 
@@ -753,7 +753,7 @@ The minimum viable agent process sitter. Replaces atch for local use.
 5. Sidecar: internal `_sidecar` subcommand — spawn child, capture output with timestamps, write exit state to meta.json
 6. CLI commands: `start`, `status`, `list`, `kill`
 7. Log capture: combined output.log with timestamp + stream tag per line
-8. CLI commands: `log`, `log --tail`, `log --follow`, `log --grep`, `log --raw`
+8. CLI commands: `log`, `log --tail`, `log --follow`, `log --raw`
 9. stdin pipe: `push` via mkfifo
 10. `wait` command (block until exit, poll meta.json)
 11. JSON output by default, `--human` flag
@@ -822,7 +822,7 @@ All composition features are implemented in the sidecar — no new processes or 
 | Wrapper scripts for chaining | `--after`, `--on-exit` |
 | `sleep && check` loops | `tender wait` |
 | Bash for-loops over hosts | `tender fanout` |
-| Grepping raw output | `tender log --grep` |
+| Searching log output | `tender log \| rg ...` |
 | Parsing human text | JSON by default |
 | Screen/tmux | `attach` as explicit human mode |
 | Broken on Windows | First-class Windows support |
