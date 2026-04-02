@@ -1,8 +1,6 @@
 ---
 id: skill-claude-code
 depends_on:
-  - log-jsonl-output
-  - wait-multiple
   - explicit-exec-targets
   - pty-session-mode
   - pty-automation
@@ -146,8 +144,6 @@ The skill should teach agents how to react to:
 
 All other backlog items. The skill documents the stable surface — write it last.
 
-- `log-jsonl-output` — JSONL format and slimmed-down `tender log`
-- `wait-multiple` — fan-out wait patterns
 - `explicit-exec-targets` — persisted exec protocol selection
 - `pty-session-mode` — persistent shell sessions
 - `pty-automation` — agent-driven interactive programs
