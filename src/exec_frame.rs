@@ -33,7 +33,7 @@ pub fn powershell_frame(argv: &[String], token: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "& {cmd}; $__tender_s = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output ('__TENDER_EXEC__ {token} ' + $__tender_s + ' ' + (Get-Location).Path)\n"
+        "$LASTEXITCODE = $null; & {cmd}; $__tender_s = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output ('__TENDER_EXEC__ {token} ' + $__tender_s + ' ' + (Get-Location).Path)\n"
     )
 }
 
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn powershell_frame_simple_command() {
         let frame = powershell_frame(&["echo".into(), "hello".into()], "abc123");
-        assert!(frame.contains("& 'echo' 'hello'"));
+        assert!(frame.starts_with("$LASTEXITCODE = $null; & 'echo' 'hello'"));
         assert!(frame.contains("__TENDER_EXEC__ abc123"));
         assert!(frame.contains("$LASTEXITCODE"));
         assert!(frame.contains("(Get-Location).Path"));
