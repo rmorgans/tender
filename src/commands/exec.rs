@@ -217,7 +217,7 @@ fn run_exec(
         ShellKind::Cmd => {
             anyhow::bail!("exec does not support cmd.exe sessions; use PowerShell or a POSIX shell")
         }
-        ShellKind::Other => exec_frame::unix_frame(cmd, token),
+        ShellKind::AssumedPosix => exec_frame::unix_frame(cmd, token),
     };
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
@@ -382,11 +382,16 @@ fn drain_until_sentinel(session: &SessionDir, token: &str) {
     }
 }
 
+/// Shell family for exec framing. Determined by sniffing argv[0] of the
+/// session's launch spec. Non-PowerShell, non-cmd.exe sessions are treated
+/// as POSIX-compatible by heuristic — not guaranteed for fish, nu, etc.
+/// If this becomes a real problem, the fix is storing an explicit shell
+/// family in LaunchSpec at session start instead of sniffing at exec time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellKind {
     PowerShell,
     Cmd,
-    Other,
+    AssumedPosix,
 }
 
 fn shell_kind(meta: &tender::model::meta::Meta) -> ShellKind {
@@ -395,7 +400,7 @@ fn shell_kind(meta: &tender::model::meta::Meta) -> ShellKind {
 
 fn shell_kind_from_argv0(argv0: Option<&str>) -> ShellKind {
     let Some(argv0) = argv0 else {
-        return ShellKind::Other;
+        return ShellKind::AssumedPosix;
     };
     let lower = argv0.to_lowercase();
     if lower.contains("powershell") || lower.contains("pwsh") {
@@ -403,7 +408,7 @@ fn shell_kind_from_argv0(argv0: Option<&str>) -> ShellKind {
     } else if lower.ends_with("cmd.exe") || lower == "cmd" || lower.ends_with("\\cmd") {
         ShellKind::Cmd
     } else {
-        ShellKind::Other
+        ShellKind::AssumedPosix
     }
 }
 
@@ -435,8 +440,8 @@ mod tests {
 
     #[test]
     fn leaves_other_shells_alone() {
-        assert_eq!(shell_kind_from_argv0(Some("bash")), ShellKind::Other);
-        assert_eq!(shell_kind_from_argv0(Some("zsh")), ShellKind::Other);
-        assert_eq!(shell_kind_from_argv0(None), ShellKind::Other);
+        assert_eq!(shell_kind_from_argv0(Some("bash")), ShellKind::AssumedPosix);
+        assert_eq!(shell_kind_from_argv0(Some("zsh")), ShellKind::AssumedPosix);
+        assert_eq!(shell_kind_from_argv0(None), ShellKind::AssumedPosix);
     }
 }
