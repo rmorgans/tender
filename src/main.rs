@@ -154,16 +154,20 @@ enum Commands {
         #[arg(short, long)]
         raw: bool,
     },
-    /// Block until session reaches terminal state
+    /// Block until session(s) reach terminal state
     Wait {
-        /// Session name
-        name: String,
+        /// Session name(s)
+        #[arg(required = true)]
+        names: Vec<String>,
         /// Namespace for session grouping
         #[arg(long)]
         namespace: Option<String>,
         /// Timeout in seconds
         #[arg(short, long)]
         timeout: Option<u64>,
+        /// Return when ANY session reaches terminal state (default: wait for ALL)
+        #[arg(long)]
+        any: bool,
     },
     /// Execute a command in a running shell session
     Exec {
@@ -299,10 +303,12 @@ impl Commands {
                 if *force { args.push("--force".to_string()); }
                 args
             }
-            Commands::Wait { name, namespace, timeout } => {
-                let mut args = vec!["wait".to_string(), name.clone()];
+            Commands::Wait { names, namespace, timeout, any } => {
+                let mut args = vec!["wait".to_string()];
                 if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
                 if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
+                if *any { args.push("--any".to_string()); }
+                args.extend(names.iter().cloned());
                 args
             }
             Commands::Watch { namespace, events, logs, annotations, from_now } => {
@@ -478,10 +484,11 @@ fn main() {
         } => resolve_namespace(namespace)
             .and_then(|ns| commands::cmd_log(&name, tail, follow, since, raw, &ns)),
         Commands::Wait {
-            name,
+            names,
             namespace,
             timeout,
-        } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&name, timeout, &ns)),
+            any,
+        } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&names, timeout, any, &ns)),
         Commands::Exec {
             name,
             namespace,

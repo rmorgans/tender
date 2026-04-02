@@ -55,12 +55,22 @@ With `--any`, the array contains only the session(s) that reached terminal state
 
 ## Exit Code
 
-- `0`: all sessions exited successfully (exit code 0)
-- `42`: at least one session exited non-zero
-- `3`: timeout reached before all/any sessions terminated
-- `1`: session error (not found, etc.)
+Multi-session exit code picks the most severe failure in the set:
 
-Same exit code contract as single-session `wait`, extended to the set.
+- `0`: all sessions exited successfully
+- `2`: at least one spawn failure (most severe — process never started)
+- `3`: at least one sidecar lost (supervision crashed)
+- `4`: at least one dependency failure (upstream failure)
+- `42`: at least one non-zero child exit (process ran but failed)
+- `1`: timeout or session error (not found, etc.) — via anyhow bail
+
+Severity order: spawn failure (2) > sidecar lost (3) > dep failed (4) > non-zero exit (42).
+
+DependencyFailed sub-reasons (TimedOut, Killed) are collapsed to code 4 for multi-session aggregation. The sub-reason detail is in the JSON output.
+
+Timeout uses `anyhow::bail!` (exit code 1), consistent with the original single-session wait and other Tender commands. It is an operational error, not a process outcome.
+
+Duplicate session names are deduplicated — `tender wait foo foo` emits one entry.
 
 ## Implementation
 

@@ -1,58 +1,183 @@
+use std::collections::BTreeMap;
+
 use tender::model::ids::{EpochTimestamp, Namespace, SessionName};
+use tender::model::meta::Meta;
 use tender::model::state::{ExitReason, RunStatus};
 use tender::session::{self, SessionRoot};
 
-pub fn cmd_wait(name: &str, timeout: Option<u64>, namespace: &Namespace) -> anyhow::Result<()> {
-    let session_name = SessionName::new(name)?;
+/// Poll interval for the wait loop.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Wait for one or more sessions to reach terminal state.
+///
+/// - `any == false` (default): blocks until ALL sessions are terminal.
+/// - `any == true`: blocks until ANY session is terminal, then returns only
+///   the terminal sessions in the output array.
+///
+/// Exit codes follow the single-session convention extended to sets:
+/// - 0: all reported sessions exited successfully
+/// - 2: at least one spawn failure
+/// - 3: at least one sidecar lost
+/// - 4: at least one dependency failure
+/// - 42: at least one non-zero child exit
+/// - 1: session error (not found, etc.) — handled by anyhow bail
+///
+/// Timeout is reported via anyhow::bail (exit code 1), consistent with
+/// other Tender commands that use anyhow for operational errors.
+pub fn cmd_wait(
+    names: &[String],
+    timeout: Option<u64>,
+    any: bool,
+    namespace: &Namespace,
+) -> anyhow::Result<()> {
     let root = SessionRoot::default_path()?;
 
-    let session = session::open(&root, namespace, &session_name)?
-        .ok_or_else(|| anyhow::anyhow!("session not found: {name}"))?;
+    // Deduplicate while preserving request order for output.
+    let mut seen = std::collections::HashSet::new();
+    let unique_names: Vec<&str> = names
+        .iter()
+        .filter_map(|n| {
+            if seen.insert(n.as_str()) {
+                Some(n.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Open all unique sessions upfront — fail fast if any don't exist.
+    let sessions: BTreeMap<String, session::SessionDir> = unique_names
+        .iter()
+        .map(|&n| {
+            let name = SessionName::new(n)?;
+            let dir = session::open(&root, namespace, &name)?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {name}"));
+            dir.map(|d| (n.to_string(), d))
+        })
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
     let deadline = timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
 
-    loop {
-        let mut meta = session::read_meta(&session)?;
+    // Track which sessions have reached terminal state.
+    let mut terminal_metas: BTreeMap<String, Meta> = BTreeMap::new();
 
-        // Reconciliation: non-terminal + lock not held -> sidecar crashed
-        if !meta.status().is_terminal() && !session::is_locked(&session)? {
-            meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
-            session::write_meta_atomic(&session, &meta)?;
-            // Fall through to terminal check below
+    loop {
+        for (name, session_dir) in &sessions {
+            if terminal_metas.contains_key(name) {
+                continue;
+            }
+
+            let mut meta = session::read_meta(session_dir)?;
+
+            // Reconciliation: non-terminal + lock not held -> sidecar crashed
+            if !meta.status().is_terminal() && !session::is_locked(session_dir)? {
+                meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
+                session::write_meta_atomic(session_dir, &meta)?;
+            }
+
+            if meta.status().is_terminal() {
+                terminal_metas.insert(name.clone(), meta);
+            }
         }
 
-        if meta.status().is_terminal() {
-            let json = serde_json::to_string_pretty(&meta)?;
+        // Check completion condition.
+        let done = if any {
+            !terminal_metas.is_empty()
+        } else {
+            terminal_metas.len() == sessions.len()
+        };
+
+        if done {
+            // Collect metas in deduplicated request order, one entry per unique name.
+            let results: Vec<&Meta> = unique_names
+                .iter()
+                .filter_map(|n| terminal_metas.get(*n))
+                .collect();
+
+            let json = serde_json::to_string_pretty(&results)?;
             println!("{json}");
 
-            match meta.status() {
-                RunStatus::Exited { how, .. } => match how {
-                    ExitReason::ExitedOk => return Ok(()),
-                    ExitReason::ExitedError { .. } => std::process::exit(42),
-                    _ => return Ok(()), // Killed, KilledForced, TimedOut
-                },
-                RunStatus::SpawnFailed { .. } => std::process::exit(2),
-                RunStatus::SidecarLost { .. } => std::process::exit(3),
-                RunStatus::DependencyFailed { reason, .. } => {
-                    use tender::model::dep_fail::DepFailReason;
-                    match reason {
-                        DepFailReason::Failed => std::process::exit(4),
-                        DepFailReason::TimedOut => std::process::exit(124),
-                        DepFailReason::Killed | DepFailReason::KilledForced => {
-                            std::process::exit(137)
-                        }
-                    }
-                }
-                _ => return Ok(()),
+            // Derive exit code from the set.
+            let exit_code = derive_exit_code(&results);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
+            return Ok(());
         }
 
+        // Check timeout.
         if let Some(dl) = deadline {
             if std::time::Instant::now() >= dl {
-                anyhow::bail!("timeout waiting for session {name}");
+                let pending: Vec<&str> = unique_names
+                    .iter()
+                    .copied()
+                    .filter(|n| !terminal_metas.contains_key(*n))
+                    .collect();
+                anyhow::bail!("timeout waiting for {}", pending.join(", "));
             }
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Derive the exit code from a set of terminal metas.
+///
+/// When multiple sessions have different failure modes, the most severe
+/// failure wins. Severity order (highest to lowest):
+///
+/// - 2: spawn failure (process never started)
+/// - 3: sidecar lost (supervision crashed)
+/// - 4: dependency failed (upstream failure)
+/// - 42: child exited non-zero (process ran but failed)
+/// - 0: success
+///
+/// DependencyFailed sub-reasons (TimedOut→124, Killed→137) are collapsed
+/// to 4 for multi-session aggregation because the dep-failed distinction
+/// matters for the individual session, not the set.
+fn derive_exit_code(metas: &[&Meta]) -> i32 {
+    let mut worst: i32 = 0;
+
+    for meta in metas {
+        let code = single_exit_code(meta.status());
+        if code != 0 && (worst == 0 || severity(code) > severity(worst)) {
+            worst = code;
+        }
+    }
+
+    worst
+}
+
+/// Severity rank for exit code comparison. Higher = more severe.
+fn severity(code: i32) -> u8 {
+    match code {
+        2 => 4,  // spawn failed
+        3 => 3,  // sidecar lost
+        4 => 2,  // dependency failed
+        42 => 1, // non-zero exit
+        _ => 0,
+    }
+}
+
+/// Map a single terminal RunStatus to its exit code.
+///
+/// These codes match the documented Tender exit code contract:
+/// - 0: success (ExitedOk, Killed, KilledForced, TimedOut)
+/// - 2: spawn failure
+/// - 3: sidecar lost
+/// - 4: dependency failure
+/// - 42: child exited non-zero
+fn single_exit_code(status: &RunStatus) -> i32 {
+    match status {
+        RunStatus::Exited { how, .. } => match how {
+            ExitReason::ExitedOk => 0,
+            ExitReason::ExitedError { .. } => 42,
+            ExitReason::Killed | ExitReason::KilledForced | ExitReason::TimedOut => 0,
+        },
+        RunStatus::SpawnFailed { .. } => 2,
+        RunStatus::SidecarLost { .. } => 3,
+        RunStatus::DependencyFailed { .. } => 4,
+        // Non-terminal states shouldn't reach here, but return 0 if they do.
+        _ => 0,
     }
 }
