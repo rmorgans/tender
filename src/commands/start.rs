@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use tender::model::ids::{Namespace, SessionName};
-use tender::model::spec::{IoMode, LaunchSpec, StdinMode};
+use tender::model::spec::{ExecTarget, IoMode, LaunchSpec, StdinMode};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
@@ -19,9 +19,11 @@ pub fn cmd_start(
     any_exit: bool,
     namespace: &Namespace,
     pty: bool,
+    exec_target: Option<ExecTarget>,
 ) -> anyhow::Result<()> {
     let (meta, _session) = launch_session(
         name, cmd, stdin, replace, timeout, cwd, env_vars, on_exit, after, any_exit, namespace, pty,
+        exec_target,
     )?;
 
     let json = serde_json::to_string_pretty(&meta)?;
@@ -58,6 +60,7 @@ pub(crate) fn launch_session(
     any_exit: bool,
     namespace: &Namespace,
     pty: bool,
+    exec_target: Option<ExecTarget>,
 ) -> anyhow::Result<(tender::model::meta::Meta, session::SessionDir)> {
     let session_name = SessionName::new(name)?;
     let root = SessionRoot::default_path()?;
@@ -93,6 +96,7 @@ pub(crate) fn launch_session(
     if pty {
         launch_spec.io_mode = IoMode::Pty;
     }
+    launch_spec.exec_target = exec_target.unwrap_or_else(|| infer_exec_target(&launch_spec.argv()[0]));
 
     // Resolve --after: capture each dependency's run_id at bind time
     if !after.is_empty() {
@@ -321,4 +325,19 @@ fn spawn_and_wait_ready_inner(
 
     let meta: tender::model::meta::Meta = serde_json::from_str(meta_json)?;
     Ok(meta)
+}
+
+/// Infer exec target from argv[0] when --exec-target is not specified.
+fn infer_exec_target(argv0: &str) -> ExecTarget {
+    let name = std::path::Path::new(argv0)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(argv0);
+    let lower = name.to_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    match stem {
+        "bash" | "sh" | "zsh" | "dash" | "ash" => ExecTarget::PosixShell,
+        "pwsh" | "powershell" => ExecTarget::PowerShell,
+        _ => ExecTarget::None,
+    }
 }

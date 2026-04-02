@@ -6,6 +6,28 @@ use tender::model::ids::{Namespace, Source};
 
 mod commands;
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum CliExecTarget {
+    /// POSIX shell (bash, sh, zsh)
+    PosixShell,
+    /// PowerShell (pwsh, powershell.exe)
+    #[value(name = "powershell")]
+    PowerShell,
+    /// Exec not supported
+    #[value(name = "none")]
+    None,
+}
+
+impl From<CliExecTarget> for tender::model::spec::ExecTarget {
+    fn from(c: CliExecTarget) -> Self {
+        match c {
+            CliExecTarget::PosixShell => Self::PosixShell,
+            CliExecTarget::PowerShell => Self::PowerShell,
+            CliExecTarget::None => Self::None,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tender", about = "Agent process sitter")]
 struct Cli {
@@ -32,6 +54,9 @@ enum Commands {
         /// Interactive pseudo-terminal mode
         #[arg(long)]
         pty: bool,
+        /// Exec target protocol (inferred from argv[0] if omitted)
+        #[arg(long = "exec-target", value_enum)]
+        exec_target: Option<CliExecTarget>,
         /// Replace existing session (kill + restart)
         #[arg(long)]
         replace: bool,
@@ -259,6 +284,7 @@ impl Commands {
                 namespace,
                 stdin,
                 pty,
+                exec_target,
                 replace,
                 timeout,
                 cwd,
@@ -298,6 +324,13 @@ impl Commands {
                 }
                 if *any_exit {
                     args.push("--any-exit".to_string());
+                }
+                if let Some(et) = exec_target {
+                    args.extend(["--exec-target".to_string(), match et {
+                        CliExecTarget::PosixShell => "posix-shell",
+                        CliExecTarget::PowerShell => "powershell",
+                        CliExecTarget::None => "none",
+                    }.to_string()]);
                 }
                 args.push("--".to_string());
                 args.extend(cmd.iter().cloned());
@@ -492,6 +525,7 @@ fn main() {
             cmd,
             stdin,
             pty,
+            exec_target,
             replace,
             timeout,
             cwd,
@@ -513,6 +547,7 @@ fn main() {
                 any_exit,
                 &ns,
                 pty,
+                exec_target.map(tender::model::spec::ExecTarget::from),
             )
         }),
         Commands::Run {

@@ -88,6 +88,7 @@ pub fn cmd_run(
         effective.any_exit,
         &effective.namespace,
         false, // pty not supported via `run`
+        Some(tender::model::spec::ExecTarget::None),
     )?;
 
     // Check for spawn failure.
