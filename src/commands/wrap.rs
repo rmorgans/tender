@@ -1,15 +1,13 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tender::model::ids::{Namespace, SessionName, Source};
 use tender::platform::{Current, Platform};
 use tender::session::{self, SessionRoot};
 
 /// Re-export shared constants for local use.
-const MAX_ANNOTATION_LINE: usize = tender::annotation::MAX_LINE;
 const MAX_FIELD_BYTES: usize = tender::annotation::MAX_FIELD_BYTES;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -72,7 +70,7 @@ pub fn cmd_wrap(
     let _ = io::stderr().write_all(&stderr_bytes);
 
     // Build and write annotation
-    let payload = build_annotation_payload(
+    let payloads = build_annotation_payloads(
         source,
         event,
         &run_id,
@@ -83,18 +81,31 @@ pub fn cmd_wrap(
         &cmd,
     );
 
-    if let Some(line) = payload {
-        let log_path = session_dir.path().join("output.log");
-        if let Err(e) = write_annotation_line(&log_path, &line) {
-            eprintln!("tender wrap: failed to write annotation: {e}");
+    let log_path = session_dir.path().join("output.log");
+    let mut wrote = false;
+    for payload in payloads {
+        match tender::annotation::write_annotation_line(&log_path, &payload) {
+            Ok(true) => {
+                wrote = true;
+                break;
+            }
+            Ok(false) => continue,
+            Err(e) => {
+                eprintln!("tender wrap: failed to write annotation: {e}");
+                wrote = true;
+                break;
+            }
         }
+    }
+    if !wrote {
+        eprintln!("tender wrap: annotation too large even after truncation, dropping");
     }
 
     // Exit with child's exit code
     std::process::exit(exit_code.unwrap_or(1));
 }
 
-fn build_annotation_payload(
+fn build_annotation_payloads(
     source: &Source,
     event: &str,
     run_id: &str,
@@ -103,13 +114,12 @@ fn build_annotation_payload(
     stderr_bytes: &[u8],
     exit_code: Option<i32>,
     cmd: &[String],
-) -> Option<String> {
+) -> Vec<serde_json::Value> {
     let hook_stdin = try_parse_json_or_string(stdin_buf);
     let hook_stdout = try_parse_json_or_string(stdout_bytes);
     let hook_stderr = String::from_utf8_lossy(stderr_bytes).into_owned();
 
-    // Try full payload first
-    let payload = serde_json::json!({
+    let full_payload = serde_json::json!({
         "source": source.as_str(),
         "event": event,
         "run_id": run_id,
@@ -123,20 +133,11 @@ fn build_annotation_payload(
         }
     });
 
-    let ts = timestamp_micros();
-    let json = serde_json::to_string(&payload).expect("JSON serialization cannot fail");
-    let line = format!("{ts} A {json}\n");
-
-    if line.len() <= MAX_ANNOTATION_LINE {
-        return Some(line);
-    }
-
-    // Truncate fields to fit
     let truncated_stdin = truncate_field(&hook_stdin, MAX_FIELD_BYTES);
     let truncated_stdout = truncate_field(&hook_stdout, MAX_FIELD_BYTES);
     let truncated_stderr = truncate_string(&hook_stderr, MAX_FIELD_BYTES);
 
-    let payload = serde_json::json!({
+    let truncated_payload = serde_json::json!({
         "source": source.as_str(),
         "event": event,
         "run_id": run_id,
@@ -150,15 +151,7 @@ fn build_annotation_payload(
         }
     });
 
-    let json = serde_json::to_string(&payload).expect("JSON serialization cannot fail");
-    let line = format!("{ts} A {json}\n");
-
-    if line.len() <= MAX_ANNOTATION_LINE {
-        return Some(line);
-    }
-
-    // Still too large — drop all data fields
-    let payload = serde_json::json!({
+    let minimal_payload = serde_json::json!({
         "source": source.as_str(),
         "event": event,
         "run_id": run_id,
@@ -172,16 +165,7 @@ fn build_annotation_payload(
         }
     });
 
-    let json = serde_json::to_string(&payload).expect("JSON serialization cannot fail");
-    let line = format!("{ts} A {json}\n");
-
-    if line.len() <= MAX_ANNOTATION_LINE {
-        return Some(line);
-    }
-
-    // Shouldn't happen — envelope alone is small. Drop entirely.
-    eprintln!("tender wrap: annotation too large even after truncation, dropping");
-    None
+    vec![full_payload, truncated_payload, minimal_payload]
 }
 
 fn try_parse_json_or_string(bytes: &[u8]) -> serde_json::Value {
@@ -216,24 +200,6 @@ fn truncate_string(s: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     s[..end].to_owned()
-}
-
-fn write_annotation_line(log_path: &std::path::Path, line: &str) -> io::Result<()> {
-    debug_assert!(
-        line.len() <= MAX_ANNOTATION_LINE,
-        "annotation line exceeds size limit: {} bytes",
-        line.len()
-    );
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
-}
-
-fn timestamp_micros() -> String {
-    tender::annotation::timestamp_micros()
 }
 
 #[cfg(unix)]

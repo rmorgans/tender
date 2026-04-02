@@ -5,7 +5,6 @@ use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 
@@ -908,8 +907,13 @@ fn capture_stream(
             Ok(l) => l,
             Err(_) => break, // pipe closed
         };
-        let ts = timestamp_micros();
-        let formatted = format!("{ts} {tag} {line}\n");
+        let formatted = serde_json::to_string(&crate::log::LogLine {
+            ts: crate::log::timestamp_secs(),
+            tag: tag.to_string(),
+            content: serde_json::Value::String(line),
+        })
+        .expect("JSON serialization cannot fail")
+            + "\n";
         let mut f = log.lock().map_err(|e| format!("log mutex poisoned: {e}"))?;
         f.write_all(formatted.as_bytes())
             .map_err(|e| format!("log write failed: {e}"))?;
@@ -939,8 +943,13 @@ fn capture_stream_with_tee(
             let mut f = log.lock().map_err(|e| format!("log mutex: {e}"))?;
             let text = String::from_utf8_lossy(&buf[..n]);
             for line in text.lines() {
-                let ts = timestamp_micros();
-                let formatted = format!("{ts} {tag} {line}\n");
+                let formatted = serde_json::to_string(&crate::log::LogLine {
+                    ts: crate::log::timestamp_secs(),
+                    tag: tag.to_string(),
+                    content: serde_json::Value::String(line.to_owned()),
+                })
+                .expect("JSON serialization cannot fail")
+                    + "\n";
                 f.write_all(formatted.as_bytes())
                     .map_err(|e| format!("log write failed: {e}"))?;
             }
@@ -956,15 +965,6 @@ fn capture_stream_with_tee(
         }
     }
     Ok(())
-}
-
-fn timestamp_micros() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let micros = duration.subsec_micros();
-    format!("{secs}.{micros:06}")
 }
 
 #[cfg(unix)]

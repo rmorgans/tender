@@ -2,62 +2,80 @@ use proptest::prelude::*;
 use tender::log::LogLine;
 use tender::model::ids::{EpochTimestamp, SessionName, SessionNameError};
 
-// --- LogLine parse/format roundtrip ---
+// --- LogLine JSONL roundtrip ---
 
 proptest! {
     #[test]
-    fn logline_parse_roundtrip(
-        secs in 0u64..10_000_000_000,
-        micros in 0u64..1_000_000,
-        tag in prop_oneof![Just('O'), Just('E')],
+    fn logline_json_roundtrip(
+        ts in 0f64..10_000_000_000f64,
+        tag in prop_oneof![Just("O"), Just("E")],
         content in "[^\n\r]{0,200}",
     ) {
-        let line = format!("{secs}.{micros:06} {tag} {content}");
-        let parsed = LogLine::parse(&line).expect("should parse well-formed line");
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": ts,
+            "tag": tag,
+            "content": content,
+        })).unwrap();
+        let parsed: LogLine = serde_json::from_str(&line).expect("should parse well-formed JSONL");
 
-        prop_assert_eq!(parsed.timestamp_us, secs * 1_000_000 + micros);
-        prop_assert_eq!(parsed.tag, tag);
-        prop_assert_eq!(&parsed.content, &content);
+        prop_assert_eq!(parsed.tag.as_str(), tag);
+        prop_assert_eq!(parsed.content.as_str(), Some(content.as_str()));
 
-        // format_prefixed roundtrips back to the original line
-        let formatted = parsed.format_prefixed();
-        prop_assert_eq!(&formatted, &line);
+        let formatted = serde_json::to_string(&parsed).unwrap();
+        let reparsed: LogLine = serde_json::from_str(&formatted).unwrap();
+        prop_assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn logline_annotation_json_roundtrip(
+        ts in 0f64..10_000_000_000f64,
+        source in "[a-z]{1,12}\\.[a-z]{1,12}",
+        event in "[a-z-]{1,20}",
+        msg in "[^\n\r]{0,120}",
+    ) {
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": ts,
+            "tag": "A",
+            "content": {
+                "source": source,
+                "event": event,
+                "data": {
+                    "msg": msg,
+                }
+            },
+        })).unwrap();
+        let parsed: LogLine = serde_json::from_str(&line).expect("should parse annotation JSONL");
+
+        prop_assert_eq!(parsed.tag.as_str(), "A");
+        prop_assert_eq!(parsed.content["source"].as_str(), Some(source.as_str()));
+        prop_assert_eq!(parsed.content["event"].as_str(), Some(event.as_str()));
+        prop_assert_eq!(parsed.content["data"]["msg"].as_str(), Some(msg.as_str()));
+
+        let formatted = serde_json::to_string(&parsed).unwrap();
+        let reparsed: LogLine = serde_json::from_str(&formatted).unwrap();
+        prop_assert_eq!(reparsed, parsed);
     }
 
     #[test]
     fn logline_format_raw_is_content(
-        secs in 0u64..10_000_000_000,
-        micros in 0u64..1_000_000,
-        tag in prop_oneof![Just('O'), Just('E')],
+        ts in 0f64..10_000_000_000f64,
+        tag in prop_oneof![Just("O"), Just("E")],
         content in "[^\n\r]{0,200}",
     ) {
-        let line = format!("{secs}.{micros:06} {tag} {content}");
-        let parsed = LogLine::parse(&line).unwrap();
-        prop_assert_eq!(parsed.format_raw(), &content);
+        let line = serde_json::to_string(&serde_json::json!({
+            "ts": ts,
+            "tag": tag,
+            "content": content,
+        })).unwrap();
+        let parsed: LogLine = serde_json::from_str(&line).unwrap();
+        prop_assert_eq!(parsed.format_raw(), content);
     }
 
     #[test]
-    fn logline_rejects_invalid_tag(
-        secs in 0u64..10_000_000_000,
-        micros in 0u64..1_000_000,
-        tag in "[^OEA]",
-        content in "[^\n\r]{0,50}",
+    fn logline_rejects_non_json(
+        content in "[^\n\r]{1,50}",
     ) {
-        let line = format!("{secs}.{micros:06} {tag} {content}");
-        prop_assert!(LogLine::parse(&line).is_none());
-    }
-
-    #[test]
-    fn logline_rejects_short_micros(
-        secs in 0u64..10_000_000_000,
-        micros in 0u64..1_000_000,
-    ) {
-        // Micros formatted with fewer than 6 digits should be rejected
-        let short = format!("{secs}.{micros} O test");
-        let digits = format!("{micros}").len();
-        if digits != 6 {
-            prop_assert!(LogLine::parse(&short).is_none());
-        }
+        prop_assert!(serde_json::from_str::<LogLine>(&content).is_err());
     }
 }
 

@@ -51,32 +51,6 @@ fn log_tail() {
 }
 
 #[test]
-fn log_grep() {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let root = TempDir::new().unwrap();
-
-    tender(&root)
-        .args([
-            "start",
-            "log-grep",
-            "sh",
-            "-c",
-            "echo good; echo bad; echo good again",
-        ])
-        .assert()
-        .success();
-    wait_terminal(&root, "log-grep");
-
-    tender(&root)
-        .args(["log", "--grep", "good", "log-grep"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("good"))
-        .stdout(predicate::str::contains("good again"))
-        .stdout(predicate::str::contains("bad").not());
-}
-
-#[test]
 fn log_raw_strips_prefix() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
@@ -99,8 +73,8 @@ fn log_raw_strips_prefix() {
             continue;
         }
         assert!(
-            !line.contains(" O ") && !line.contains(" E "),
-            "raw line should not contain stream tag: {line}"
+            !line.contains("\"tag\""),
+            "raw line should not contain JSON envelope: {line}"
         );
     }
 }
@@ -148,7 +122,7 @@ fn log_stderr_captured() {
         .assert()
         .success()
         .stdout(predicate::str::contains("err"))
-        .stdout(predicate::str::contains(" E "));
+        .stdout(predicate::str::contains("\"tag\":\"E\""));
 }
 
 #[test]

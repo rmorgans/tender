@@ -258,11 +258,11 @@ pub fn cmd_watch(
                                         watcher.last_log_offset += n as u64;
                                         let trimmed =
                                             buf.trim_end_matches('\n').trim_end_matches('\r');
-                                        if let Some(parsed) = LogLine::parse(trimmed) {
-                                            let ts_secs = parsed.timestamp_us as f64 / 1_000_000.0;
-                                            match parsed.tag {
-                                                'O' | 'E' if emit_logs => {
-                                                    let log_name = if parsed.tag == 'O' {
+                                        if let Ok(parsed) = serde_json::from_str::<LogLine>(trimmed) {
+                                            let ts_secs = parsed.ts;
+                                            match parsed.tag.as_str() {
+                                                "O" | "E" if emit_logs => {
+                                                    let log_name = if parsed.tag == "O" {
                                                         "log.stdout"
                                                     } else {
                                                         "log.stderr"
@@ -276,17 +276,14 @@ pub fn cmd_watch(
                                                         "tender.sidecar",
                                                         "log",
                                                         log_name,
-                                                        serde_json::json!({"content": parsed.content}),
+                                                        serde_json::json!({"content": parsed.format_raw()}),
                                                     ) {
                                                         return Ok(());
                                                     }
                                                 }
-                                                'A' if emit_annotations => {
-                                                    if let Ok(ann) =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &parsed.content,
-                                                        )
-                                                    {
+                                                "A" if emit_annotations => {
+                                                    if !parsed.content.is_null() {
+                                                        let ann = parsed.content.clone();
                                                         let source = ann["source"]
                                                             .as_str()
                                                             .unwrap_or("unknown")

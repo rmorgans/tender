@@ -16,6 +16,12 @@ fn read_log(root: &TempDir, session: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+fn parse_log_lines(log: &str) -> Vec<serde_json::Value> {
+    log.lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
+}
+
 #[test]
 fn start_returns_running_with_child() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -77,13 +83,12 @@ fn stdout_captured_to_output_log() {
         .success();
 
     let log = read_log(&root, "stdout-job");
-    assert!(log.contains("O hello world"), "log: {log}");
+    assert!(log.contains("\"content\":\"hello world\""), "log: {log}");
 
-    for line in log.lines() {
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        assert!(parts.len() >= 3, "malformed log line: {line}");
-        assert!(parts[0].contains('.'), "timestamp missing micros: {line}");
-        assert!(parts[1] == "O" || parts[1] == "E", "bad tag: {}", parts[1]);
+    for line in parse_log_lines(&log) {
+        assert!(line["ts"].is_number(), "timestamp missing: {line}");
+        assert!(line["tag"] == "O" || line["tag"] == "E", "bad tag: {}", line["tag"]);
+        assert!(line["content"].is_string(), "content should be string: {line}");
     }
 }
 
@@ -98,7 +103,8 @@ fn stderr_captured_to_output_log() {
         .success();
 
     let log = read_log(&root, "stderr-job");
-    assert!(log.contains("E error"), "log: {log}");
+    assert!(log.contains("\"tag\":\"E\""), "log: {log}");
+    assert!(log.contains("\"content\":\"error\""), "log: {log}");
 }
 
 #[test]
@@ -118,9 +124,9 @@ fn interleaved_stdout_stderr() {
         .success();
 
     let log = read_log(&root, "interleave-job");
-    assert!(log.contains("O out1"), "missing out1 in: {log}");
-    assert!(log.contains("E err1"), "missing err1 in: {log}");
-    assert!(log.contains("O out2"), "missing out2 in: {log}");
+    assert!(log.contains("\"content\":\"out1\""), "missing out1 in: {log}");
+    assert!(log.contains("\"content\":\"err1\""), "missing err1 in: {log}");
+    assert!(log.contains("\"content\":\"out2\""), "missing out2 in: {log}");
 }
 
 #[test]

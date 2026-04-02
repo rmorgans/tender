@@ -52,28 +52,27 @@ fn read_run_id(root: &TempDir, namespace: &str, session: &str) -> String {
     meta["run_id"].as_str().unwrap().to_owned()
 }
 
-/// Read output.log and find A-tagged lines.
-fn read_annotation_lines(root: &TempDir, namespace: &str, session: &str) -> Vec<String> {
+/// Read output.log and return annotation payloads.
+fn read_annotation_lines(
+    root: &TempDir,
+    namespace: &str,
+    session: &str,
+) -> Vec<serde_json::Value> {
     let path = root
         .path()
         .join(format!(".tender/sessions/{namespace}/{session}/output.log"));
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     content
         .lines()
-        .filter(|line| {
-            // Format: {ts} A {json}
-            let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            parts.len() >= 2 && parts[1] == "A"
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| {
+            if line["tag"] == "A" {
+                Some(line["content"].clone())
+            } else {
+                None
+            }
         })
-        .map(|s| s.to_owned())
         .collect()
-}
-
-/// Extract the JSON payload from an A-tagged log line.
-fn parse_annotation_json(line: &str) -> serde_json::Value {
-    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-    assert!(parts.len() == 3, "expected 3 parts in annotation line");
-    serde_json::from_str(parts[2]).expect("annotation payload should be valid JSON")
 }
 
 #[test]
@@ -189,7 +188,7 @@ fn wrap_captures_and_replays_stdout() {
     // Also check annotation was written
     let ann_lines = read_annotation_lines(&root, "default", "wrap-stdout");
     assert_eq!(ann_lines.len(), 1, "should have one annotation line");
-    let ann = parse_annotation_json(&ann_lines[0]);
+    let ann = &ann_lines[0];
     assert_eq!(ann["source"], "test.src");
     assert_eq!(ann["event"], "test-event");
     assert_eq!(ann["data"]["hook_exit_code"], 0);
@@ -231,7 +230,7 @@ fn wrap_writes_annotation_line() {
     let ann_lines = read_annotation_lines(&root, "default", "wrap-ann");
     assert_eq!(ann_lines.len(), 1);
 
-    let ann = parse_annotation_json(&ann_lines[0]);
+    let ann = &ann_lines[0];
     assert_eq!(ann["source"], "cmux.claude-hook");
     assert_eq!(ann["event"], "pre-tool-use");
     assert_eq!(ann["run_id"], run_id);
@@ -430,14 +429,14 @@ fn wrap_truncates_large_payload() {
     assert_eq!(ann_lines.len(), 1);
 
     // Verify line is within limit
-    let line = &ann_lines[0];
-    assert!(
-        line.len() <= 4096,
-        "annotation line should be ≤4096 bytes, got {}",
-        line.len()
-    );
-
-    let ann = parse_annotation_json(line);
+    let ann = &ann_lines[0];
+    let wrapped = serde_json::json!({
+        "ts": 0.0,
+        "tag": "A",
+        "content": ann.clone(),
+    });
+    let line = serde_json::to_string(&wrapped).unwrap();
+    assert!(line.len() < 4096, "annotation line should fit within the line cap, got {}", line.len());
     assert_eq!(ann["data"]["truncated"], true, "should be marked truncated");
 
     // Cleanup
@@ -485,7 +484,7 @@ fn wrap_passes_stdin_to_child() {
     // Verify annotation recorded the stdin
     let ann_lines = read_annotation_lines(&root, "default", "wrap-stdin");
     assert_eq!(ann_lines.len(), 1);
-    let ann = parse_annotation_json(&ann_lines[0]);
+    let ann = &ann_lines[0];
     // hook_stdin should be parsed as JSON since input is valid JSON
     assert_eq!(ann["data"]["hook_stdin"]["tool"], "bash");
 
@@ -622,7 +621,7 @@ fn wrap_forwards_sigterm_and_writes_annotation() {
 
     let ann_lines = read_annotation_lines(&root, "default", "wrap-sigterm");
     assert_eq!(ann_lines.len(), 1, "should write an annotation on SIGTERM");
-    let ann = parse_annotation_json(&ann_lines[0]);
+    let ann = &ann_lines[0];
     assert_eq!(ann["event"], "sigterm-test");
     assert_eq!(ann["data"]["hook_exit_code"], 0);
 

@@ -127,7 +127,6 @@ fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
     let follow_handle = thread::spawn(move || {
         let query = LogQuery {
             tail: None,
-            grep: None,
             since_us: Some(0), // Show all output from the beginning, don't seek to EOF.
             raw: true,
         };

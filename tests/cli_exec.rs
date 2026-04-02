@@ -191,13 +191,12 @@ fn exec_writes_annotation() {
         .path()
         .join(".tender/sessions/default/shell/output.log");
     let content = std::fs::read_to_string(&log_path).unwrap();
-    let ann_line = content
+    let ann_line: serde_json::Value = content
         .lines()
-        .find(|l| l.contains(" A ") && l.contains("agent.exec"))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|line| line["tag"] == "A" && line["content"]["source"] == "agent.exec")
         .expect("annotation line should exist in output.log");
-    let json_start = ann_line.find('{').unwrap();
-    let ann: serde_json::Value =
-        serde_json::from_str(&ann_line[json_start..]).unwrap();
+    let ann = &ann_line["content"];
     assert_eq!(ann["source"].as_str(), Some("agent.exec"));
     assert_eq!(ann["event"].as_str(), Some("exec"));
     assert_eq!(ann["data"]["hook_exit_code"].as_i64(), Some(0));

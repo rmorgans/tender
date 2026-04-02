@@ -6,7 +6,6 @@ pub fn cmd_log(
     name: &str,
     tail: Option<usize>,
     follow: bool,
-    grep: Option<String>,
     since: Option<String>,
     raw: bool,
     namespace: &Namespace,
@@ -24,7 +23,6 @@ pub fn cmd_log(
 
     let query = LogQuery {
         tail,
-        grep,
         since_us,
         raw,
     };

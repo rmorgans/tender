@@ -4,13 +4,54 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 /// Query parameters for filtering log output.
 #[derive(Default)]
 pub struct LogQuery {
     pub tail: Option<usize>,
-    pub grep: Option<String>,
     pub since_us: Option<u64>,
     pub raw: bool,
+}
+
+/// One JSONL line from `output.log`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogLine {
+    /// Epoch seconds with sub-second precision.
+    pub ts: f64,
+    /// `"O"` stdout, `"E"` stderr, `"A"` annotation.
+    pub tag: String,
+    /// String content for O/E, structured JSON for A.
+    pub content: serde_json::Value,
+}
+
+impl LogLine {
+    #[must_use]
+    pub fn format_raw(&self) -> String {
+        match &self.content {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        }
+    }
+
+    #[must_use]
+    pub fn content_text(&self) -> Option<&str> {
+        self.content.as_str()
+    }
+
+    #[must_use]
+    pub fn timestamp_us(&self) -> u64 {
+        (self.ts * 1_000_000.0) as u64
+    }
+}
+
+/// Return current time as epoch seconds with microsecond-ish precision.
+#[must_use]
+pub fn timestamp_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs_f64()
 }
 
 /// Read and filter a log file, writing matching lines to `out`.
@@ -20,15 +61,13 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
 
-    // When tail is set, use a ring buffer capped at N to avoid unbounded
-    // memory growth on long-running sessions. Without tail, stream directly.
     let tail_n = query.tail;
     let mut ring: VecDeque<LogLine> = VecDeque::with_capacity(tail_n.unwrap_or(0));
     let mut count = 0usize;
 
     for raw_line in reader.lines() {
         let raw_line = raw_line?;
-        let Some(parsed) = LogLine::parse(&raw_line) else {
+        let Some(parsed) = serde_json::from_str::<LogLine>(&raw_line).ok() else {
             continue;
         };
 
@@ -49,7 +88,6 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
         }
     }
 
-    // Flush the ring buffer (tail mode)
     for line in &ring {
         write_line(out, line, query.raw)?;
         count += 1;
@@ -58,15 +96,9 @@ pub fn query_log(path: &Path, query: &LogQuery, out: &mut dyn Write) -> io::Resu
     Ok(count)
 }
 
-/// Check if a parsed log line passes the query filters (since + grep).
 fn matches_query(line: &LogLine, query: &LogQuery) -> bool {
     if let Some(threshold) = query.since_us {
-        if line.timestamp_us < threshold {
-            return false;
-        }
-    }
-    if let Some(ref pattern) = query.grep {
-        if !line.content.contains(pattern.as_str()) {
+        if line.timestamp_us() < threshold {
             return false;
         }
     }
@@ -77,16 +109,20 @@ fn write_line(out: &mut dyn Write, line: &LogLine, raw: bool) -> io::Result<()> 
     if raw {
         writeln!(out, "{}", line.format_raw())
     } else {
-        writeln!(out, "{}", line.format_prefixed())
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string(line).expect("JSON serialization cannot fail")
+        )
     }
 }
 
 /// Follow a log file, writing new lines as they appear.
 ///
-/// Waits for the file to exist, then tails it. Applies grep/since/raw
-/// filters from the query. If neither `tail` nor `since_us` is set,
-/// seeks to end of file (only showing new lines). Polls every 100ms
-/// and returns `Ok(())` when `should_stop` returns true.
+/// Waits for the file to exist, then tails it. Applies since/raw filters
+/// from the query. If neither `tail` nor `since_us` is set, seeks to end
+/// of file (only showing new lines). Polls every 100ms and returns `Ok(())`
+/// when `should_stop` returns true.
 pub fn follow_log<F>(
     path: &Path,
     query: &LogQuery,
@@ -96,7 +132,6 @@ pub fn follow_log<F>(
 where
     F: Fn() -> bool,
 {
-    // Wait for file to exist.
     while !path.exists() {
         if should_stop() {
             return Ok(());
@@ -107,13 +142,10 @@ where
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);
 
-    // If no tail/since constraint, seek to end (only show new lines).
     if query.tail.is_none() && query.since_us.is_none() {
         reader.seek(SeekFrom::End(0))?;
     }
 
-    // If tail is set, read existing lines into a ring buffer (O(N) memory),
-    // apply filters, flush the last N, then enter the live loop.
     if let Some(n) = query.tail {
         let mut ring: VecDeque<LogLine> = VecDeque::with_capacity(n);
         let mut buf = String::new();
@@ -124,7 +156,7 @@ where
                 break;
             }
             let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-            let Some(parsed) = LogLine::parse(trimmed) else {
+            let Some(parsed) = serde_json::from_str::<LogLine>(trimmed).ok() else {
                 continue;
             };
             if !matches_query(&parsed, query) {
@@ -143,7 +175,6 @@ where
         }
     }
 
-    // Live tail loop.
     let mut buf = String::new();
     loop {
         buf.clear();
@@ -157,7 +188,7 @@ where
         }
 
         let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-        let Some(parsed) = LogLine::parse(trimmed) else {
+        let Some(parsed) = serde_json::from_str::<LogLine>(trimmed).ok() else {
             continue;
         };
 
@@ -170,7 +201,6 @@ where
     }
 }
 
-/// Return current time in microseconds since Unix epoch.
 fn now_us() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -188,7 +218,6 @@ pub fn parse_since(value: &str) -> Result<u64, String> {
         return Err("empty value".to_owned());
     }
 
-    // Check for duration suffix.
     let last = value.as_bytes()[value.len() - 1];
     let multiplier = match last {
         b's' => Some(1_000_000u64),
@@ -209,7 +238,6 @@ pub fn parse_since(value: &str) -> Result<u64, String> {
         return Ok(now_us().saturating_sub(duration_us));
     }
 
-    // Plain epoch seconds.
     let secs: u64 = value
         .parse()
         .map_err(|_| format!("invalid since value: {value:?}"))?;
@@ -217,177 +245,51 @@ pub fn parse_since(value: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("epoch overflow: {value:?}"))
 }
 
-/// Parsed representation of a single output.log line.
-///
-/// The on-disk format is:
-/// ```text
-/// {epoch_secs}.{micros:06} {O|E|A} {content}\n
-/// ```
-/// Tags: `O` = stdout, `E` = stderr, `A` = annotation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogLine {
-    /// Microseconds since Unix epoch.
-    pub timestamp_us: u64,
-    /// `'O'` for stdout, `'E'` for stderr.
-    pub tag: char,
-    /// The captured line content (may be empty).
-    pub content: String,
-}
-
-impl LogLine {
-    /// Parse a single log line in sidecar format.
-    ///
-    /// Returns `None` if the line is malformed: wrong structure, invalid
-    /// numbers, or a tag that is neither `O` nor `E`.
-    #[must_use]
-    pub fn parse(line: &str) -> Option<Self> {
-        // Split off the timestamp portion: "{secs}.{micros:06}"
-        let (timestamp_str, rest) = line.split_once(' ')?;
-        let (secs_str, micros_str) = timestamp_str.split_once('.')?;
-
-        let secs: u64 = secs_str.parse().ok()?;
-        let micros: u64 = micros_str.parse().ok()?;
-
-        if micros_str.len() != 6 {
-            return None;
-        }
-
-        // Next character must be the tag, followed by a space.
-        let tag = rest.as_bytes().first().copied()? as char;
-        if !matches!(tag, 'O' | 'E' | 'A') {
-            return None;
-        }
-
-        // After the tag there must be a space separator.
-        if rest.as_bytes().get(1).copied()? != b' ' {
-            return None;
-        }
-
-        let content = &rest[2..];
-
-        Some(LogLine {
-            timestamp_us: secs.checked_mul(1_000_000)?.checked_add(micros)?,
-            tag,
-            content: content.to_owned(),
-        })
-    }
-
-    /// Reconstruct the original sidecar log format.
-    #[must_use]
-    pub fn format_prefixed(&self) -> String {
-        let secs = self.timestamp_us / 1_000_000;
-        let micros = self.timestamp_us % 1_000_000;
-        format!("{secs}.{micros:06} {} {}", self.tag, self.content)
-    }
-
-    /// Return just the line content, without timestamp or tag prefix.
-    #[must_use]
-    pub fn format_raw(&self) -> &str {
-        &self.content
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn parse_stdout_line() {
-        let line = "1773653954.012345 O hello world";
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.timestamp_us, 1_773_653_954_012_345);
-        assert_eq!(parsed.tag, 'O');
-        assert_eq!(parsed.content, "hello world");
-    }
-
-    #[test]
-    fn parse_stderr_line() {
-        let line = "1773653954.012345 E some error";
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.tag, 'E');
-        assert_eq!(parsed.content, "some error");
-    }
-
-    #[test]
-    fn parse_empty_content() {
-        let line = "1773653954.000000 O ";
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.timestamp_us, 1_773_653_954_000_000);
-        assert_eq!(parsed.tag, 'O');
-        assert_eq!(parsed.content, "");
-    }
-
-    #[test]
-    fn parse_content_with_spaces() {
-        let line = "1773653954.012345 O   hello   world  ";
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.content, "  hello   world  ");
-    }
-
-    #[test]
-    fn parse_annotation_line() {
-        let line = r#"1773653954.012345 A {"source":"cmux.hook","event":"pre-tool-use"}"#;
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.tag, 'A');
-        assert_eq!(
-            parsed.content,
-            r#"{"source":"cmux.hook","event":"pre-tool-use"}"#
-        );
-    }
-
-    #[test]
-    fn parse_malformed_returns_none() {
-        assert!(LogLine::parse("").is_none(), "empty string");
-        assert!(LogLine::parse("garbage").is_none(), "no structure");
-        assert!(
-            LogLine::parse("1773653954.012345 X hello").is_none(),
-            "bad tag X"
-        );
-        assert!(
-            LogLine::parse("notanumber.012345 O hello").is_none(),
-            "non-numeric secs"
-        );
-        assert!(
-            LogLine::parse("1773653954.12 O hello").is_none(),
-            "short micros field"
-        );
-        assert!(
-            LogLine::parse("1773653954.012345 O").is_none(),
-            "missing space after tag"
-        );
-    }
-
-    #[test]
-    fn format_prefixed_roundtrip() {
-        let original = "1773653954.012345 O hello world";
-        let parsed = LogLine::parse(original).expect("should parse");
-        assert_eq!(parsed.format_prefixed(), original);
-    }
-
-    #[test]
-    fn format_raw_strips_prefix() {
-        let line = "1773653954.012345 O hello world";
-        let parsed = LogLine::parse(line).expect("should parse");
-        assert_eq!(parsed.format_raw(), "hello world");
-    }
-
-    // --- Test helpers ---
 
     fn write_test_log(dir: &std::path::Path) -> std::path::PathBuf {
         let path = dir.join("output.log");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "1000000.000000 O line one").unwrap();
-        writeln!(f, "1000001.000000 O line two").unwrap();
-        writeln!(f, "1000002.000000 E error here").unwrap();
-        writeln!(f, "1000003.000000 O line four").unwrap();
-        writeln!(f, "1000004.000000 O line five with error word").unwrap();
+        for line in [
+            serde_json::json!({"ts":1000000.0,"tag":"O","content":"line one"}),
+            serde_json::json!({"ts":1000001.0,"tag":"O","content":"line two"}),
+            serde_json::json!({"ts":1000002.0,"tag":"E","content":"error here"}),
+            serde_json::json!({"ts":1000003.0,"tag":"O","content":"line four"}),
+            serde_json::json!({"ts":1000004.0,"tag":"A","content":{"source":"test.src","event":"evt","data":{"msg":"line five with error word"}}}),
+        ] {
+            writeln!(f, "{}", serde_json::to_string(&line).unwrap()).unwrap();
+        }
         path
     }
 
-    // --- Task 2: query_log tests ---
+    #[test]
+    fn format_raw_returns_string_content() {
+        let line: LogLine = serde_json::from_value(serde_json::json!({
+            "ts": 1773653954.012345,
+            "tag": "O",
+            "content": "hello world"
+        }))
+        .unwrap();
+        assert_eq!(line.format_raw(), "hello world");
+    }
+
+    #[test]
+    fn format_raw_stringifies_annotation_content() {
+        let line: LogLine = serde_json::from_value(serde_json::json!({
+            "ts": 1773653954.012345,
+            "tag": "A",
+            "content": {"source":"cmux.hook","event":"pre-tool-use"}
+        }))
+        .unwrap();
+        assert_eq!(
+            line.format_raw(),
+            r#"{"event":"pre-tool-use","source":"cmux.hook"}"#
+        );
+    }
 
     #[test]
     fn query_full_log() {
@@ -398,8 +300,8 @@ mod tests {
         let count = query_log(&path, &query, &mut buf).unwrap();
         assert_eq!(count, 5);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("line one"));
-        assert!(output.contains("line five with error word"));
+        assert!(output.contains("\"content\":\"line one\""));
+        assert!(output.contains("\"tag\":\"A\""));
     }
 
     #[test]
@@ -414,9 +316,9 @@ mod tests {
         let count = query_log(&path, &query, &mut buf).unwrap();
         assert_eq!(count, 2);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("line four"));
-        assert!(output.contains("line five with error word"));
-        assert!(!output.contains("line one"));
+        assert!(output.contains("\"content\":\"line four\""));
+        assert!(output.contains("\"tag\":\"A\""));
+        assert!(!output.contains("\"content\":\"line one\""));
     }
 
     #[test]
@@ -434,27 +336,10 @@ mod tests {
     }
 
     #[test]
-    fn query_grep() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_test_log(dir.path());
-        let mut buf = Vec::new();
-        let query = LogQuery {
-            grep: Some("error".to_owned()),
-            ..Default::default()
-        };
-        let count = query_log(&path, &query, &mut buf).unwrap();
-        assert_eq!(count, 2);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("error here"));
-        assert!(output.contains("line five with error word"));
-    }
-
-    #[test]
     fn query_since() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_log(dir.path());
         let mut buf = Vec::new();
-        // since_us = 1000002_000000 should include lines at ts 1000002, 1000003, 1000004
         let query = LogQuery {
             since_us: Some(1_000_002_000_000),
             ..Default::default()
@@ -462,10 +347,10 @@ mod tests {
         let count = query_log(&path, &query, &mut buf).unwrap();
         assert_eq!(count, 3);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("error here"));
-        assert!(output.contains("line four"));
-        assert!(output.contains("line five"));
-        assert!(!output.contains("line one"));
+        assert!(output.contains("\"content\":\"error here\""));
+        assert!(output.contains("\"content\":\"line four\""));
+        assert!(output.contains("\"msg\":\"line five with error word\""));
+        assert!(!output.contains("\"content\":\"line one\""));
     }
 
     #[test]
@@ -480,27 +365,16 @@ mod tests {
         let count = query_log(&path, &query, &mut buf).unwrap();
         assert_eq!(count, 5);
         let output = String::from_utf8(buf).unwrap();
-        // Raw output should not contain timestamp digits.
-        assert!(!output.contains("1000000.000000"));
         assert!(output.contains("line one"));
-    }
-
-    #[test]
-    fn query_combined_grep_and_tail() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_test_log(dir.path());
-        let mut buf = Vec::new();
-        // grep "error" gives 2 hits, tail 1 should give only the last one.
-        let query = LogQuery {
-            grep: Some("error".to_owned()),
-            tail: Some(1),
-            ..Default::default()
-        };
-        let count = query_log(&path, &query, &mut buf).unwrap();
-        assert_eq!(count, 1);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("line five with error word"));
-        assert!(!output.contains("error here"));
+        let annotation = output
+            .lines()
+            .find(|line| line.contains("line five with error word"))
+            .unwrap();
+        let annotation: serde_json::Value = serde_json::from_str(annotation).unwrap();
+        assert_eq!(annotation["source"], "test.src");
+        assert_eq!(annotation["event"], "evt");
+        assert_eq!(annotation["data"]["msg"], "line five with error word");
+        assert!(!output.contains("\"tag\""));
     }
 
     #[test]
@@ -513,14 +387,11 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- Task 3: follow_log tests ---
-
     #[test]
     fn follow_stops_on_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_log(dir.path());
         let mut buf = Vec::new();
-        // With tail set, should read existing content then stop immediately.
         let query = LogQuery {
             tail: Some(100),
             ..Default::default()
@@ -528,7 +399,7 @@ mod tests {
         follow_log(&path, &query, &mut buf, || true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("line one"));
-        assert!(output.contains("line five"));
+        assert!(output.contains("line five with error word"));
     }
 
     #[test]
@@ -536,10 +407,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.log");
 
-        // Create initial file.
         {
             let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "1000000.000000 O initial line").unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({"ts":1000000.0,"tag":"O","content":"initial line"})
+            )
+            .unwrap();
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -559,19 +434,21 @@ mod tests {
             String::from_utf8(buf).unwrap()
         });
 
-        // Give the follow thread time to start tailing.
         thread::sleep(Duration::from_millis(250));
 
-        // Append a new line.
         {
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
                 .unwrap();
-            writeln!(f, "1000001.000000 O appended line").unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({"ts":1000001.0,"tag":"O","content":"appended line"})
+            )
+            .unwrap();
         }
 
-        // Give it time to pick up the new line, then stop.
         thread::sleep(Duration::from_millis(350));
         stop.store(true, Ordering::Relaxed);
 
@@ -602,22 +479,23 @@ mod tests {
             String::from_utf8(buf).unwrap()
         });
 
-        // Wait, then create the file.
         thread::sleep(Duration::from_millis(300));
         {
             let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "1000000.000000 O delayed line").unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({"ts":1000000.0,"tag":"O","content":"delayed line"})
+            )
+            .unwrap();
         }
 
-        // Let it pick up the line.
         thread::sleep(Duration::from_millis(350));
         stop.store(true, Ordering::Relaxed);
 
         let output = handle.join().unwrap();
         assert!(output.contains("delayed line"));
     }
-
-    // --- Task 4: parse_since tests ---
 
     #[test]
     fn parse_since_epoch_seconds() {
@@ -630,7 +508,6 @@ mod tests {
         let before = now_us();
         let result = parse_since("30s").unwrap();
         let after = now_us();
-        // Result should be approximately now - 30s.
         let expected_low = before - 30_000_000;
         let expected_high = after - 30_000_000;
         assert!(

@@ -136,8 +136,6 @@ pub fn cmd_exec(
         let run_id = meta.run_id().to_string();
         let hook_stdin = shell_words::join(&cmd);
         let log_path = session.path().join("output.log");
-        let ts = annotation::timestamp_micros();
-
         // Try full payload first
         let payload = serde_json::json!({
             "source": "agent.exec",
@@ -155,10 +153,8 @@ pub fn cmd_exec(
                 "truncated": result.truncated,
             }
         });
-        let json_str = serde_json::to_string(&payload)?;
-        let line = format!("{ts} A {json_str}\n");
 
-        if !annotation::write_annotation_line(&log_path, &line)? {
+        if !annotation::write_annotation_line(&log_path, &payload)? {
             // Truncate and retry
             let trunc_stdout =
                 annotation::truncate_string(&result.stdout, annotation::MAX_FIELD_BYTES);
@@ -180,9 +176,7 @@ pub fn cmd_exec(
                     "truncated": true,
                 }
             });
-            let json_str = serde_json::to_string(&payload)?;
-            let line = format!("{ts} A {json_str}\n");
-            if !annotation::write_annotation_line(&log_path, &line)? {
+            if !annotation::write_annotation_line(&log_path, &payload)? {
                 eprintln!("tender exec: annotation too large even after truncation, dropping");
             }
         }
@@ -305,15 +299,16 @@ fn run_exec(
         }
 
         let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-        let Some(parsed) = LogLine::parse(trimmed) else {
+        let Some(parsed) = serde_json::from_str::<LogLine>(trimmed).ok() else {
             continue;
         };
 
-        match parsed.tag {
-            'O' => {
+        match parsed.tag.as_str() {
+            "O" => {
                 // Check if this is the sentinel line
-                if let Some((exit_code, cwd)) =
-                    exec_frame::parse_sentinel(&parsed.content, token)
+                if let Some((exit_code, cwd)) = parsed
+                    .content_text()
+                    .and_then(|content| exec_frame::parse_sentinel(content, token))
                 {
                     return Ok(ExecResult {
                         session: session_name,
@@ -325,10 +320,14 @@ fn run_exec(
                         truncated: false,
                     });
                 }
-                stdout_lines.push(parsed.content);
+                if let Some(content) = parsed.content_text() {
+                    stdout_lines.push(content.to_owned());
+                }
             }
-            'E' => {
-                stderr_lines.push(parsed.content);
+            "E" => {
+                if let Some(content) = parsed.content_text() {
+                    stderr_lines.push(content.to_owned());
+                }
             }
             _ => {
                 // Skip annotations and other tags
@@ -367,9 +366,12 @@ fn drain_until_sentinel(session: &SessionDir, token: &str) {
             }
             Ok(_) => {
                 let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
-                if let Some(parsed) = LogLine::parse(trimmed) {
-                    if parsed.tag == 'O'
-                        && exec_frame::parse_sentinel(&parsed.content, token).is_some()
+                if let Ok(parsed) = serde_json::from_str::<LogLine>(trimmed) {
+                    if parsed.tag == "O"
+                        && parsed
+                            .content_text()
+                            .and_then(|content| exec_frame::parse_sentinel(content, token))
+                            .is_some()
                     {
                         return; // Sentinel found — command finished
                     }

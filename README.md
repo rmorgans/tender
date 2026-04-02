@@ -8,8 +8,9 @@ It is designed to be the execution substrate under agent workflows, hook wrapper
 
 - starting long-lived supervised sessions
 - following logs and waiting on terminal state
-- pushing stdin into pipe-backed sessions
-- running structured commands inside persistent shell sessions with `exec`
+- pushing stdin into supervised sessions
+- running structured commands inside persistent pipe-backed shell sessions with `exec`
+- attaching to PTY-backed sessions for live terminal control
 - wrapping hooks and writing durable annotation events
 - chaining runs with `--after`
 - exposing the same semantic model locally and, later, over SSH
@@ -37,6 +38,7 @@ Core commands today include:
 - `run`
 - `exec`
 - `push`
+- `attach`
 - `log`
 - `status`
 - `wait`
@@ -52,6 +54,7 @@ Tender has one lifecycle model and multiple access paths.
 
 - local execution calls Tender core directly
 - remote execution should be the same semantic contract over SSH, not a separate system
+- pipe `start --stdin` + `exec` is the default agent lane for persistent shells
 - PTY support is secondary and should stay a distinct execution lane from structured non-PTY `exec`
 
 That makes Tender a good foundation for:

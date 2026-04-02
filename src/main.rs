@@ -147,13 +147,10 @@ enum Commands {
         /// Follow log output (like tail -f)
         #[arg(short, long)]
         follow: bool,
-        /// Filter lines containing PATTERN
-        #[arg(short, long)]
-        grep: Option<String>,
         /// Show lines since TIME (epoch seconds or duration: 30s, 5m, 2h, 1d)
         #[arg(short, long)]
         since: Option<String>,
-        /// Strip timestamp and stream tag prefixes
+        /// Output content only, stripping the JSONL envelope
         #[arg(short, long)]
         raw: bool,
     },
@@ -282,12 +279,11 @@ impl Commands {
                 if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
                 args
             }
-            Commands::Log { name, namespace, tail, follow, grep, since, raw } => {
+            Commands::Log { name, namespace, tail, follow, since, raw } => {
                 let mut args = vec!["log".to_string(), name.clone()];
                 if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
                 if let Some(n) = tail { args.extend(["--tail".to_string(), n.to_string()]); }
                 if *follow { args.push("--follow".to_string()); }
-                if let Some(g) = grep { args.extend(["--grep".to_string(), g.clone()]); }
                 if let Some(s) = since { args.extend(["--since".to_string(), s.clone()]); }
                 if *raw { args.push("--raw".to_string()); }
                 args
@@ -477,11 +473,10 @@ fn main() {
             namespace,
             tail,
             follow,
-            grep,
             since,
             raw,
         } => resolve_namespace(namespace)
-            .and_then(|ns| commands::cmd_log(&name, tail, follow, grep, since, raw, &ns)),
+            .and_then(|ns| commands::cmd_log(&name, tail, follow, since, raw, &ns)),
         Commands::Wait {
             name,
             namespace,
