@@ -220,8 +220,7 @@ fn wait_for_dependencies(
     session_dir: &Path,
     run_id: &RunId,
 ) -> DepWaitOutcome {
-    let deadline =
-        timeout_s.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
+    let deadline = timeout_s.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t));
     let kill_request_path = session_dir.join("kill_request");
     let run_id_str = run_id.to_string();
 
@@ -241,9 +240,7 @@ fn wait_for_dependencies(
                                 "force-killed during dependency wait".into(),
                             )
                         } else {
-                            DepWaitOutcome::Killed(
-                                "killed during dependency wait".into(),
-                            )
+                            DepWaitOutcome::Killed("killed during dependency wait".into())
                         };
                     }
                 }
@@ -255,9 +252,7 @@ fn wait_for_dependencies(
         // Check timeout
         if let Some(dl) = deadline {
             if std::time::Instant::now() >= dl {
-                return DepWaitOutcome::TimedOut(
-                    "timeout expired during dependency wait".into(),
-                );
+                return DepWaitOutcome::TimedOut("timeout expired during dependency wait".into());
             }
         }
 
@@ -462,10 +457,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             }
             DepWaitOutcome::TimedOut(msg) => {
                 meta.add_warning(msg);
-                meta.transition_dependency_failed(
-                    EpochTimestamp::now(),
-                    DepFailReason::TimedOut,
-                )?;
+                meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::TimedOut)?;
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
@@ -583,7 +575,8 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         setup_stdin_forwarding(session_dir, child_stdin, &stdin_errors)?;
     }
 
-    // --- Attach listener for PTY sessions ---
+    // --- Attach listener for PTY sessions (Unix only) ---
+    #[cfg(unix)]
     if is_pty {
         let sock_path = crate::attach_proto::sock_path(session_dir);
         crate::attach_proto::write_sock_breadcrumb(session_dir, &sock_path);
@@ -591,7 +584,12 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         let attach_sink_clone = Arc::clone(&attach_sink);
         let session_path = session_dir.to_path_buf();
         std::thread::spawn(move || {
-            run_attach_listener(&sock_path, pty_write_clone, attach_sink_clone, &session_path);
+            run_attach_listener(
+                &sock_path,
+                pty_write_clone,
+                attach_sink_clone,
+                &session_path,
+            );
         });
     }
 
@@ -850,8 +848,7 @@ fn supervise(
         } else {
             scope.spawn(move || capture_stream(stdout, 'O', log_ref))
         };
-        let stderr_handle =
-            stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
+        let stderr_handle = stderr.map(|s| scope.spawn(move || capture_stream(s, 'E', log_ref)));
 
         let stdout_r = stdout_handle
             .join()
@@ -974,8 +971,8 @@ fn run_attach_listener(
     attach_sink: AttachSink,
     session_dir: &Path,
 ) {
-    use std::os::unix::net::UnixListener;
     use crate::attach_proto;
+    use std::os::unix::net::UnixListener;
 
     // Remove stale socket if exists
     let _ = std::fs::remove_file(sock_path);
@@ -1041,8 +1038,11 @@ fn update_pty_control(session_dir: &Path, control: &str) {
             if let Some(pty) = meta.get_mut("pty") {
                 pty["control"] = serde_json::Value::String(control.to_string());
                 let tmp = session_dir.join("meta.json.tmp");
-                if std::fs::write(&tmp, serde_json::to_string_pretty(&meta).unwrap_or_default())
-                    .is_ok()
+                if std::fs::write(
+                    &tmp,
+                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
+                )
+                .is_ok()
                 {
                     let _ = std::fs::rename(&tmp, &meta_path);
                 }
