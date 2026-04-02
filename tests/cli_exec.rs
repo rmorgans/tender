@@ -64,8 +64,7 @@ fn exec_basic_command() {
         "exec failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(0));
     assert!(result["stdout"].as_str().unwrap().contains("hello world"));
     assert!(!result["timed_out"].as_bool().unwrap());
@@ -115,8 +114,7 @@ fn exec_nonzero_exit() {
         .unwrap();
 
     assert!(!output.status.success());
-    let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(1));
 
     // Shell still running after failed command
@@ -124,11 +122,12 @@ fn exec_nonzero_exit() {
         .args(["status", "shell"])
         .output()
         .unwrap();
-    let status: serde_json::Value =
-        serde_json::from_slice(&status_output.stdout).unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
     assert_eq!(status["status"].as_str(), Some("Running"));
 
-    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }
 
 /// Shell state (cwd) persists across exec calls.
@@ -149,24 +148,30 @@ fn exec_cwd_persists() {
         .args(["exec", "shell", "--", "cd", "/tmp"])
         .output()
         .unwrap();
-    let result1: serde_json::Value =
-        serde_json::from_slice(&output1.stdout).unwrap();
+    let result1: serde_json::Value = serde_json::from_slice(&output1.stdout).unwrap();
     // After cd, cwd_after should be /tmp (or /private/tmp on macOS)
     let cwd1 = result1["cwd_after"].as_str().unwrap();
-    assert!(cwd1.contains("tmp"), "cwd_after should contain tmp, got: {cwd1}");
+    assert!(
+        cwd1.contains("tmp"),
+        "cwd_after should contain tmp, got: {cwd1}"
+    );
 
     // Next exec should see /tmp as cwd
     let output2 = harness::tender(&root)
         .args(["exec", "shell", "--", "pwd"])
         .output()
         .unwrap();
-    let result2: serde_json::Value =
-        serde_json::from_slice(&output2.stdout).unwrap();
+    let result2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
     assert!(result2["stdout"].as_str().unwrap().contains("tmp"));
     let cwd2 = result2["cwd_after"].as_str().unwrap();
-    assert!(cwd2.contains("tmp"), "cwd_after should contain tmp, got: {cwd2}");
+    assert!(
+        cwd2.contains("tmp"),
+        "cwd_after should contain tmp, got: {cwd2}"
+    );
 
-    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }
 
 /// Annotation event is written to output.log after exec.
@@ -202,7 +207,9 @@ fn exec_writes_annotation() {
     assert_eq!(ann["data"]["hook_exit_code"].as_i64(), Some(0));
     assert!(ann["data"]["command"].is_array());
 
-    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }
 
 /// exec --timeout: returns timeout error, shell stays alive.
@@ -224,8 +231,7 @@ fn exec_timeout() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(124));
-    let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(result["timed_out"].as_bool().unwrap());
 
     // Shell should still be running
@@ -233,11 +239,12 @@ fn exec_timeout() {
         .args(["status", "shell"])
         .output()
         .unwrap();
-    let status: serde_json::Value =
-        serde_json::from_slice(&status_output.stdout).unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
     assert_eq!(status["status"].as_str(), Some("Running"));
 
-    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }
 
 /// Second concurrent exec fails with busy error.
@@ -254,15 +261,13 @@ fn exec_concurrent_busy() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     // Start a long exec in the background
-    let mut long_exec = std::process::Command::new(
-        assert_cmd::cargo::cargo_bin("tender"),
-    )
-    .env("HOME", root.path())
-    .args(["exec", "shell", "--", "sleep", "30"])
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .spawn()
-    .unwrap();
+    let mut long_exec = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .env("HOME", root.path())
+        .args(["exec", "shell", "--", "sleep", "30"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
 
     // Give it time to acquire the lock
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -277,5 +282,7 @@ fn exec_concurrent_busy() {
     // Clean up
     let _ = long_exec.kill();
     let _ = long_exec.wait();
-    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }

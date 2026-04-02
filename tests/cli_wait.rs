@@ -217,10 +217,7 @@ fn wait_single_session_emits_array_of_one() {
         .success();
     wait_terminal(&root, "single-arr");
 
-    let output = tender(&root)
-        .args(["wait", "single-arr"])
-        .output()
-        .unwrap();
+    let output = tender(&root).args(["wait", "single-arr"]).output().unwrap();
     assert!(output.status.success());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -297,7 +294,16 @@ fn wait_dep_timed_out_exits_124() {
     wait_running(&root, "dep-slow");
 
     tender(&root)
-        .args(["start", "dep-waiter", "--after", "dep-slow", "--timeout", "2", "--", "true"])
+        .args([
+            "start",
+            "dep-waiter",
+            "--after",
+            "dep-slow",
+            "--timeout",
+            "2",
+            "--",
+            "true",
+        ])
         .assert()
         .success();
     wait_terminal(&root, "dep-waiter");
@@ -364,7 +370,14 @@ fn wait_dep_failed_beats_nonzero_in_multi() {
     wait_terminal(&root, "dep-upstream");
 
     tender(&root)
-        .args(["start", "dep-downstream", "--after", "dep-upstream", "--", "true"])
+        .args([
+            "start",
+            "dep-downstream",
+            "--after",
+            "dep-upstream",
+            "--",
+            "true",
+        ])
         .assert()
         .success();
     wait_terminal(&root, "dep-downstream");

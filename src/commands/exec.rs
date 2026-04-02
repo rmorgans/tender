@@ -49,13 +49,14 @@ impl ExecLock {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::Storage::FileSystem::{
-            LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
         };
 
         let lock_path = session.path().join("exec.lock");
         let file = File::create(&lock_path)?;
 
-        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
+            unsafe { std::mem::zeroed() };
         let ret = unsafe {
             LockFileEx(
                 file.as_raw_handle() as HANDLE,
@@ -208,17 +209,16 @@ fn run_exec(
 
     // 1. Capture log cursor
     let log_path = session.path().join("output.log");
-    let cursor = std::fs::metadata(&log_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let cursor = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
-    // 2. Frame the command (Unix shell only in this slice)
-    if is_powershell_session(meta) {
-        anyhow::bail!(
-            "exec does not yet support PowerShell sessions (argv[0] contains powershell/pwsh)"
-        );
-    }
-    let framed = exec_frame::unix_frame(cmd, token);
+    // 2. Frame the command according to the session shell.
+    let framed = match shell_kind(meta) {
+        ShellKind::PowerShell => exec_frame::powershell_frame(cmd, token),
+        ShellKind::Cmd => {
+            anyhow::bail!("exec does not support cmd.exe sessions; use PowerShell or a POSIX shell")
+        }
+        ShellKind::Other => exec_frame::unix_frame(cmd, token),
+    };
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
     let mut writer = loop {
@@ -382,14 +382,61 @@ fn drain_until_sentinel(session: &SessionDir, token: &str) {
     }
 }
 
-/// Detect if the session's shell is PowerShell based on argv[0].
-fn is_powershell_session(meta: &tender::model::meta::Meta) -> bool {
-    meta.launch_spec()
-        .argv()
-        .first()
-        .map(|s| {
-            let lower = s.to_lowercase();
-            lower.contains("powershell") || lower.contains("pwsh")
-        })
-        .unwrap_or(false)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellKind {
+    PowerShell,
+    Cmd,
+    Other,
+}
+
+fn shell_kind(meta: &tender::model::meta::Meta) -> ShellKind {
+    shell_kind_from_argv0(meta.launch_spec().argv().first().map(|s| s.as_str()))
+}
+
+fn shell_kind_from_argv0(argv0: Option<&str>) -> ShellKind {
+    let Some(argv0) = argv0 else {
+        return ShellKind::Other;
+    };
+    let lower = argv0.to_lowercase();
+    if lower.contains("powershell") || lower.contains("pwsh") {
+        ShellKind::PowerShell
+    } else if lower.ends_with("cmd.exe") || lower == "cmd" || lower.ends_with("\\cmd") {
+        ShellKind::Cmd
+    } else {
+        ShellKind::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ShellKind, shell_kind_from_argv0};
+
+    #[test]
+    fn detects_powershell_shells() {
+        assert_eq!(
+            shell_kind_from_argv0(Some("powershell.exe")),
+            ShellKind::PowerShell
+        );
+        assert_eq!(
+            shell_kind_from_argv0(Some(r"C:\Program Files\PowerShell\7\pwsh.exe")),
+            ShellKind::PowerShell
+        );
+    }
+
+    #[test]
+    fn detects_cmd_shells() {
+        assert_eq!(shell_kind_from_argv0(Some("cmd")), ShellKind::Cmd);
+        assert_eq!(shell_kind_from_argv0(Some("cmd.exe")), ShellKind::Cmd);
+        assert_eq!(
+            shell_kind_from_argv0(Some(r"C:\Windows\System32\cmd.exe")),
+            ShellKind::Cmd
+        );
+    }
+
+    #[test]
+    fn leaves_other_shells_alone() {
+        assert_eq!(shell_kind_from_argv0(Some("bash")), ShellKind::Other);
+        assert_eq!(shell_kind_from_argv0(Some("zsh")), ShellKind::Other);
+        assert_eq!(shell_kind_from_argv0(None), ShellKind::Other);
+    }
 }

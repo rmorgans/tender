@@ -17,10 +17,9 @@ pub fn unix_frame(argv: &[String], token: &str) -> String {
 
 /// Build a framed command string for PowerShell.
 ///
-/// **WARNING**: Argument escaping is minimal (space-joined). Arguments containing
-/// spaces, quotes, `$`, `;`, or other PowerShell-significant characters will be
-/// misinterpreted. This is a known first-slice limitation. Full PowerShell escaping
-/// (with proper quoting of each argument) is follow-on work.
+/// Each argv element is passed as a single-quoted PowerShell string literal and
+/// invoked through the call operator so spaces and metacharacters survive
+/// round-tripping through the shell.
 ///
 /// Token must be hex-only (as produced by `generate_token`).
 pub fn powershell_frame(argv: &[String], token: &str) -> String {
@@ -28,10 +27,18 @@ pub fn powershell_frame(argv: &[String], token: &str) -> String {
         token.bytes().all(|b| b.is_ascii_hexdigit()),
         "token must be hex-only, got: {token}"
     );
-    let cmd = argv.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" ");
+    let cmd = argv
+        .iter()
+        .map(|arg| powershell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "{cmd}; $__tender_s=$LASTEXITCODE; if ($null -eq $__tender_s) {{ $__tender_s=0 }}; Write-Output \"__TENDER_EXEC__ {token} $__tender_s $(Get-Location)\"\n"
+        "& {cmd}; $__tender_s = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output ('__TENDER_EXEC__ {token} ' + $__tender_s + ' ' + (Get-Location).Path)\n"
     )
+}
+
+fn powershell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "''"))
 }
 
 /// Parse a sentinel line, extracting exit code and cwd.
@@ -116,9 +123,25 @@ mod tests {
     #[test]
     fn powershell_frame_simple_command() {
         let frame = powershell_frame(&["echo".into(), "hello".into()], "abc123");
-        assert!(frame.contains("echo hello"));
+        assert!(frame.contains("& 'echo' 'hello'"));
         assert!(frame.contains("__TENDER_EXEC__ abc123"));
         assert!(frame.contains("$LASTEXITCODE"));
+        assert!(frame.contains("(Get-Location).Path"));
+        assert!(frame.ends_with('\n'));
+    }
+
+    #[test]
+    fn powershell_frame_quotes_special_chars() {
+        let frame = powershell_frame(
+            &[
+                "Write-Output".into(),
+                "a b".into(),
+                "$HOME".into(),
+                "it's `quoted`;".into(),
+            ],
+            "abc123",
+        );
+        assert!(frame.contains("& 'Write-Output' 'a b' '$HOME' 'it''s `quoted`;'"));
         assert!(frame.ends_with('\n'));
     }
 

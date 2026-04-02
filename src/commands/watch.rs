@@ -258,7 +258,8 @@ pub fn cmd_watch(
                                         watcher.last_log_offset += n as u64;
                                         let trimmed =
                                             buf.trim_end_matches('\n').trim_end_matches('\r');
-                                        if let Ok(parsed) = serde_json::from_str::<LogLine>(trimmed) {
+                                        if let Ok(parsed) = serde_json::from_str::<LogLine>(trimmed)
+                                        {
                                             let ts_secs = parsed.ts;
                                             match parsed.tag.as_str() {
                                                 "O" | "E" if emit_logs => {

@@ -23,9 +23,7 @@ fn after_bind_captures_run_id() {
     harness::wait_terminal(&root, "job1");
 
     // Read job1's run_id
-    let job1_meta_path = root
-        .path()
-        .join(".tender/sessions/default/job1/meta.json");
+    let job1_meta_path = root.path().join(".tender/sessions/default/job1/meta.json");
     let job1_meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&job1_meta_path).unwrap()).unwrap();
     let job1_run_id = job1_meta["run_id"].as_str().unwrap();
@@ -38,9 +36,7 @@ fn after_bind_captures_run_id() {
     harness::wait_terminal(&root, "job2");
 
     // Verify job2's launch_spec.after contains job1's run_id
-    let job2_meta_path = root
-        .path()
-        .join(".tender/sessions/default/job2/meta.json");
+    let job2_meta_path = root.path().join(".tender/sessions/default/job2/meta.json");
     let job2_meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&job2_meta_path).unwrap()).unwrap();
     let after = &job2_meta["launch_spec"]["after"];
@@ -95,9 +91,7 @@ fn after_idempotent_on_running() {
     let _ = harness::tender(&root)
         .args(["kill", "job1", "--force"])
         .assert();
-    let _ = harness::tender(&root)
-        .args(["kill", "job2"])
-        .assert();
+    let _ = harness::tender(&root).args(["kill", "job2"]).assert();
 }
 
 /// Idempotent start on Starting session (waiting for deps): same spec -> return existing.
@@ -132,9 +126,7 @@ fn after_idempotent_on_starting() {
     let _ = harness::tender(&root)
         .args(["kill", "job1", "--force"])
         .assert();
-    let _ = harness::tender(&root)
-        .args(["kill", "job2"])
-        .assert();
+    let _ = harness::tender(&root).args(["kill", "job2"]).assert();
 }
 
 /// Kill during dependency wait → DependencyFailed/Killed.
@@ -210,7 +202,15 @@ fn after_any_exit_proceeds_on_failure() {
     harness::wait_terminal(&root, "job1");
 
     harness::tender(&root)
-        .args(["start", "job2", "--after", "job1", "--any-exit", "--", "true"])
+        .args([
+            "start",
+            "job2",
+            "--after",
+            "job1",
+            "--any-exit",
+            "--",
+            "true",
+        ])
         .assert()
         .success();
 
@@ -263,7 +263,16 @@ fn after_timeout_during_wait() {
     harness::wait_running(&root, "job1");
 
     harness::tender(&root)
-        .args(["start", "job2", "--after", "job1", "--timeout", "2", "--", "true"])
+        .args([
+            "start",
+            "job2",
+            "--after",
+            "job1",
+            "--timeout",
+            "2",
+            "--",
+            "true",
+        ])
         .assert()
         .success();
 
@@ -294,7 +303,9 @@ fn after_multiple_dependencies() {
     harness::wait_terminal(&root, "job3");
 
     harness::tender(&root)
-        .args(["start", "job2", "--after", "job1", "--after", "job3", "--", "true"])
+        .args([
+            "start", "job2", "--after", "job1", "--after", "job3", "--", "true",
+        ])
         .assert()
         .success();
 
@@ -387,9 +398,7 @@ fn after_waits_for_running_dependency() {
         .success();
 
     // job2 should be Starting (waiting)
-    let meta_path = root
-        .path()
-        .join(".tender/sessions/default/job2/meta.json");
+    let meta_path = root.path().join(".tender/sessions/default/job2/meta.json");
     let content = std::fs::read_to_string(&meta_path).unwrap();
     let meta: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(meta["status"].as_str(), Some("Starting"));

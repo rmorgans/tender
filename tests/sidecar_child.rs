@@ -87,8 +87,15 @@ fn stdout_captured_to_output_log() {
 
     for line in parse_log_lines(&log) {
         assert!(line["ts"].is_number(), "timestamp missing: {line}");
-        assert!(line["tag"] == "O" || line["tag"] == "E", "bad tag: {}", line["tag"]);
-        assert!(line["content"].is_string(), "content should be string: {line}");
+        assert!(
+            line["tag"] == "O" || line["tag"] == "E",
+            "bad tag: {}",
+            line["tag"]
+        );
+        assert!(
+            line["content"].is_string(),
+            "content should be string: {line}"
+        );
     }
 }
 
@@ -124,9 +131,18 @@ fn interleaved_stdout_stderr() {
         .success();
 
     let log = read_log(&root, "interleave-job");
-    assert!(log.contains("\"content\":\"out1\""), "missing out1 in: {log}");
-    assert!(log.contains("\"content\":\"err1\""), "missing err1 in: {log}");
-    assert!(log.contains("\"content\":\"out2\""), "missing out2 in: {log}");
+    assert!(
+        log.contains("\"content\":\"out1\""),
+        "missing out1 in: {log}"
+    );
+    assert!(
+        log.contains("\"content\":\"err1\""),
+        "missing err1 in: {log}"
+    );
+    assert!(
+        log.contains("\"content\":\"out2\""),
+        "missing out2 in: {log}"
+    );
 }
 
 #[test]

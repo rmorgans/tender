@@ -53,11 +53,7 @@ fn read_run_id(root: &TempDir, namespace: &str, session: &str) -> String {
 }
 
 /// Read output.log and return annotation payloads.
-fn read_annotation_lines(
-    root: &TempDir,
-    namespace: &str,
-    session: &str,
-) -> Vec<serde_json::Value> {
+fn read_annotation_lines(root: &TempDir, namespace: &str, session: &str) -> Vec<serde_json::Value> {
     let path = root
         .path()
         .join(format!(".tender/sessions/{namespace}/{session}/output.log"));
@@ -436,7 +432,11 @@ fn wrap_truncates_large_payload() {
         "content": ann.clone(),
     });
     let line = serde_json::to_string(&wrapped).unwrap();
-    assert!(line.len() < 4096, "annotation line should fit within the line cap, got {}", line.len());
+    assert!(
+        line.len() < 4096,
+        "annotation line should fit within the line cap, got {}",
+        line.len()
+    );
     assert_eq!(ann["data"]["truncated"], true, "should be marked truncated");
 
     // Cleanup

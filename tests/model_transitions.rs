@@ -359,10 +359,7 @@ fn starting_to_dependency_failed() {
     )
     .unwrap();
     assert!(meta.status().is_terminal());
-    assert!(matches!(
-        meta.status(),
-        RunStatus::DependencyFailed { .. }
-    ));
+    assert!(matches!(meta.status(), RunStatus::DependencyFailed { .. }));
 }
 
 #[test]

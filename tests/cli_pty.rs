@@ -2,8 +2,8 @@
 
 mod harness;
 
-use std::sync::Mutex;
 use harness::tender;
+use std::sync::Mutex;
 use tempfile::TempDir;
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -18,7 +18,11 @@ fn start_pty_flag_sets_io_mode() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let meta: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(meta["launch_spec"]["io_mode"], "Pty");
@@ -60,10 +64,7 @@ fn start_pty_session_shows_pty_metadata() {
 
     harness::wait_terminal(&root, "pty-meta");
 
-    let output = tender(&root)
-        .args(["status", "pty-meta"])
-        .output()
-        .unwrap();
+    let output = tender(&root).args(["status", "pty-meta"]).output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let meta: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -78,7 +79,15 @@ fn exec_rejected_on_pty_session() {
     let root = TempDir::new().unwrap();
 
     tender(&root)
-        .args(["start", "pty-shell", "--pty", "--stdin", "--", "sleep", "60"])
+        .args([
+            "start",
+            "pty-shell",
+            "--pty",
+            "--stdin",
+            "--",
+            "sleep",
+            "60",
+        ])
         .output()
         .unwrap();
     harness::wait_running(&root, "pty-shell");
@@ -90,8 +99,10 @@ fn exec_rejected_on_pty_session() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not supported") || stderr.contains("PTY"),
-        "should reject exec on PTY: {stderr}");
+    assert!(
+        stderr.contains("not supported") || stderr.contains("PTY"),
+        "should reject exec on PTY: {stderr}"
+    );
 
     tender(&root).args(["kill", "pty-shell"]).output().ok();
 }
@@ -145,7 +156,10 @@ fn attach_socket_exists_for_pty_session() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(breadcrumb.exists(), "a.sock.path breadcrumb should exist for PTY session");
+    assert!(
+        breadcrumb.exists(),
+        "a.sock.path breadcrumb should exist for PTY session"
+    );
 
     // The breadcrumb should point to an actual socket file
     let sock_path = std::fs::read_to_string(&breadcrumb).unwrap();
@@ -187,8 +201,10 @@ fn push_to_pty_session_delivers_input() {
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("hello-from-push"),
-        "push input should appear in PTY log: {stdout}");
+    assert!(
+        stdout.contains("hello-from-push"),
+        "push input should appear in PTY log: {stdout}"
+    );
 
     tender(&root).args(["kill", "pty-push"]).output().ok();
 }

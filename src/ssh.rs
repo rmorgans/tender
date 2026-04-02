@@ -93,7 +93,9 @@ mod tests {
     fn ssh_argv(host: &str, tender_args: &[&str]) -> Vec<String> {
         let args: Vec<String> = tender_args.iter().map(|s| s.to_string()).collect();
         let cmd = build_ssh_command(host, &args, false);
-        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
@@ -106,7 +108,10 @@ mod tests {
         assert_eq!(args[4], "tender");
         assert_eq!(args[5], "status");
         assert_eq!(args[6], "my-session");
-        assert!(!args.contains(&"--".to_string()), "no -- in ssh argv: {args:?}");
+        assert!(
+            !args.contains(&"--".to_string()),
+            "no -- in ssh argv: {args:?}"
+        );
     }
 
     #[test]
@@ -119,13 +124,17 @@ mod tests {
             "hello world".to_string(),
         ];
         let cmd = build_ssh_command("user@box", &args, false);
-        let argv: Vec<String> = cmd.get_args()
+        let argv: Vec<String> = cmd
+            .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let remote_args = &argv[4..];
         let remote_cmd = remote_args.join(" ");
         let parsed = shell_words::split(&remote_cmd).unwrap();
-        assert_eq!(parsed, vec!["tender", "start", "job", "--", "echo", "hello world"]);
+        assert_eq!(
+            parsed,
+            vec!["tender", "start", "job", "--", "echo", "hello world"]
+        );
     }
 
     #[test]
@@ -139,7 +148,8 @@ mod tests {
             "echo $HOME && ls".to_string(),
         ];
         let cmd = build_ssh_command("user@box", &args, false);
-        let argv: Vec<String> = cmd.get_args()
+        let argv: Vec<String> = cmd
+            .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let remote_args = &argv[4..];

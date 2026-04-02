@@ -255,69 +255,157 @@ impl Commands {
     fn remote_args(&self) -> Vec<String> {
         match self {
             Commands::Start {
-                name, namespace, stdin, pty, replace, timeout, cwd, env_vars,
-                on_exit, after, any_exit, cmd,
+                name,
+                namespace,
+                stdin,
+                pty,
+                replace,
+                timeout,
+                cwd,
+                env_vars,
+                on_exit,
+                after,
+                any_exit,
+                cmd,
             } => {
                 let mut args = vec!["start".to_string(), name.clone()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
-                if *stdin { args.push("--stdin".to_string()); }
-                if *pty { args.push("--pty".to_string()); }
-                if *replace { args.push("--replace".to_string()); }
-                if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
-                if let Some(c) = cwd { args.extend(["--cwd".to_string(), c.display().to_string()]); }
-                for e in env_vars { args.extend(["--env".to_string(), e.clone()]); }
-                for o in on_exit { args.extend(["--on-exit".to_string(), o.clone()]); }
-                for a in after { args.extend(["--after".to_string(), a.clone()]); }
-                if *any_exit { args.push("--any-exit".to_string()); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if *stdin {
+                    args.push("--stdin".to_string());
+                }
+                if *pty {
+                    args.push("--pty".to_string());
+                }
+                if *replace {
+                    args.push("--replace".to_string());
+                }
+                if let Some(t) = timeout {
+                    args.extend(["--timeout".to_string(), t.to_string()]);
+                }
+                if let Some(c) = cwd {
+                    args.extend(["--cwd".to_string(), c.display().to_string()]);
+                }
+                for e in env_vars {
+                    args.extend(["--env".to_string(), e.clone()]);
+                }
+                for o in on_exit {
+                    args.extend(["--on-exit".to_string(), o.clone()]);
+                }
+                for a in after {
+                    args.extend(["--after".to_string(), a.clone()]);
+                }
+                if *any_exit {
+                    args.push("--any-exit".to_string());
+                }
                 args.push("--".to_string());
                 args.extend(cmd.iter().cloned());
                 args
             }
             Commands::Status { name, namespace } => {
                 let mut args = vec!["status".to_string(), name.clone()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
                 args
             }
             Commands::List { namespace } => {
                 let mut args = vec!["list".to_string()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
                 args
             }
-            Commands::Log { name, namespace, tail, follow, since, raw } => {
+            Commands::Log {
+                name,
+                namespace,
+                tail,
+                follow,
+                since,
+                raw,
+            } => {
                 let mut args = vec!["log".to_string(), name.clone()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
-                if let Some(n) = tail { args.extend(["--tail".to_string(), n.to_string()]); }
-                if *follow { args.push("--follow".to_string()); }
-                if let Some(s) = since { args.extend(["--since".to_string(), s.clone()]); }
-                if *raw { args.push("--raw".to_string()); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if let Some(n) = tail {
+                    args.extend(["--tail".to_string(), n.to_string()]);
+                }
+                if *follow {
+                    args.push("--follow".to_string());
+                }
+                if let Some(s) = since {
+                    args.extend(["--since".to_string(), s.clone()]);
+                }
+                if *raw {
+                    args.push("--raw".to_string());
+                }
                 args
             }
             Commands::Push { name, namespace } => {
                 let mut args = vec!["push".to_string(), name.clone()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
                 args
             }
-            Commands::Kill { name, namespace, force } => {
+            Commands::Kill {
+                name,
+                namespace,
+                force,
+            } => {
                 let mut args = vec!["kill".to_string(), name.clone()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
-                if *force { args.push("--force".to_string()); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if *force {
+                    args.push("--force".to_string());
+                }
                 args
             }
-            Commands::Wait { names, namespace, timeout, any } => {
+            Commands::Wait {
+                names,
+                namespace,
+                timeout,
+                any,
+            } => {
                 let mut args = vec!["wait".to_string()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
-                if let Some(t) = timeout { args.extend(["--timeout".to_string(), t.to_string()]); }
-                if *any { args.push("--any".to_string()); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if let Some(t) = timeout {
+                    args.extend(["--timeout".to_string(), t.to_string()]);
+                }
+                if *any {
+                    args.push("--any".to_string());
+                }
                 args.extend(names.iter().cloned());
                 args
             }
-            Commands::Watch { namespace, events, logs, annotations, from_now } => {
+            Commands::Watch {
+                namespace,
+                events,
+                logs,
+                annotations,
+                from_now,
+            } => {
                 let mut args = vec!["watch".to_string()];
-                if let Some(ns) = namespace { args.extend(["--namespace".to_string(), ns.clone()]); }
-                if *events { args.push("--events".to_string()); }
-                if *logs { args.push("--logs".to_string()); }
-                if *annotations { args.push("--annotations".to_string()); }
-                if *from_now { args.push("--from-now".to_string()); }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if *events {
+                    args.push("--events".to_string());
+                }
+                if *logs {
+                    args.push("--logs".to_string());
+                }
+                if *annotations {
+                    args.push("--annotations".to_string());
+                }
+                if *from_now {
+                    args.push("--from-now".to_string());
+                }
                 args
             }
             Commands::Attach { name, namespace } => {
@@ -488,14 +576,16 @@ fn main() {
             namespace,
             timeout,
             any,
-        } => resolve_namespace(namespace).and_then(|ns| commands::cmd_wait(&names, timeout, any, &ns)),
+        } => resolve_namespace(namespace)
+            .and_then(|ns| commands::cmd_wait(&names, timeout, any, &ns)),
         Commands::Exec {
             name,
             namespace,
             timeout,
             cmd,
-        } => resolve_namespace(namespace)
-            .and_then(|ns| commands::cmd_exec(&name, cmd, timeout, &ns)),
+        } => {
+            resolve_namespace(namespace).and_then(|ns| commands::cmd_exec(&name, cmd, timeout, &ns))
+        }
         Commands::Watch {
             namespace,
             events,

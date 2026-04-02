@@ -65,7 +65,9 @@ impl RunStatus {
     #[must_use]
     pub fn child(&self) -> Option<&ProcessIdentity> {
         match self {
-            RunStatus::Starting | RunStatus::SpawnFailed { .. } | RunStatus::DependencyFailed { .. } => None,
+            RunStatus::Starting
+            | RunStatus::SpawnFailed { .. }
+            | RunStatus::DependencyFailed { .. } => None,
             RunStatus::Running { child } | RunStatus::Exited { child, .. } => Some(child),
             RunStatus::SidecarLost { child, .. } => child.as_ref(),
         }

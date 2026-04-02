@@ -147,10 +147,10 @@ fn derive_exit_code(metas: &[&Meta]) -> i32 {
 /// Severity rank for exit code comparison. Higher = more severe.
 fn severity(code: i32) -> u8 {
     match code {
-        2 => 5,          // spawn failed
-        3 => 4,          // sidecar lost
+        2 => 5,             // spawn failed
+        3 => 4,             // sidecar lost
         4 | 124 | 137 => 3, // dependency failed (any sub-reason)
-        42 => 1,         // non-zero exit
+        42 => 1,            // non-zero exit
         _ => 0,
     }
 }

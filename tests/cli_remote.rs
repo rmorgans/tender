@@ -15,7 +15,11 @@ static SERIAL: Mutex<()> = Mutex::new(());
 fn fake_ssh_echo() -> TempDir {
     let tmp = TempDir::new().unwrap();
     let fake_ssh = tmp.path().join("ssh");
-    std::fs::write(&fake_ssh, "#!/bin/sh\nfor arg in \"$@\"; do echo \"ARG:$arg\"; done\n").unwrap();
+    std::fs::write(
+        &fake_ssh,
+        "#!/bin/sh\nfor arg in \"$@\"; do echo \"ARG:$arg\"; done\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
     tmp
 }
@@ -63,14 +67,18 @@ fn host_flag_invokes_ssh_with_correct_remote_command() {
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let args: Vec<&str> = stdout.lines()
+    let args: Vec<&str> = stdout
+        .lines()
         .filter_map(|l| l.strip_prefix("ARG:"))
         .collect();
     // Should see: -T, -o, ConnectTimeout=10, user@box, tender, list
     assert!(args.contains(&"tender"), "should contain tender: {args:?}");
     assert!(args.contains(&"list"), "should contain list: {args:?}");
     // No "--" should be passed to ssh
-    assert!(!args.contains(&"--"), "should not contain -- in ssh args: {args:?}");
+    assert!(
+        !args.contains(&"--"),
+        "should not contain -- in ssh args: {args:?}"
+    );
 }
 
 /// Helper: extract the remote command from the fake ssh output.
@@ -83,14 +91,14 @@ fn host_flag_invokes_ssh_with_correct_remote_command() {
 /// We do the same and then `shell_words::split()` to simulate what the
 /// remote POSIX shell would produce as argv.
 fn parse_remote_argv(stdout: &str) -> Vec<String> {
-    let args: Vec<&str> = stdout.lines()
+    let args: Vec<&str> = stdout
+        .lines()
         .filter_map(|l| l.strip_prefix("ARG:"))
         .collect();
     // Skip: -T, -o, ConnectTimeout=10, <host>
     let remote_parts = &args[4..];
     let remote_cmd = remote_parts.join(" ");
-    shell_words::split(&remote_cmd)
-        .expect("remote command should be valid POSIX shell syntax")
+    shell_words::split(&remote_cmd).expect("remote command should be valid POSIX shell syntax")
 }
 
 // -- Task 4: Transport error classification --
@@ -110,7 +118,11 @@ fn host_flag_exit_255_is_transport_error() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1), "transport error should exit 1");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "transport error should exit 1"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("transport"),
@@ -133,7 +145,11 @@ fn host_flag_preserves_remote_exit_code() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(42), "should preserve remote exit code 42");
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "should preserve remote exit code 42"
+    );
 }
 
 // -- Task 5: JSON output passthrough --
@@ -189,8 +205,8 @@ exit 0
     assert_eq!(lines.len(), 2, "should have 2 NDJSON lines, got: {stdout}");
 
     for line in &lines {
-        let event: serde_json::Value =
-            serde_json::from_str(line).unwrap_or_else(|_| panic!("each line should be valid JSON: {line}"));
+        let event: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|_| panic!("each line should be valid JSON: {line}"));
         assert_eq!(event["source"], "tender.sidecar");
     }
 
@@ -230,16 +246,32 @@ fn host_flag_forwards_namespace_and_strips_host() {
     let tmp = fake_ssh_echo();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-        .args(["--host", "user@box", "status", "my-session", "--namespace", "prod"])
+        .args([
+            "--host",
+            "user@box",
+            "status",
+            "my-session",
+            "--namespace",
+            "prod",
+        ])
         .env("PATH", tmp.path())
         .output()
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed = parse_remote_argv(&stdout);
-    assert!(parsed.contains(&"--namespace".to_string()), "should forward --namespace: {parsed:?}");
-    assert!(parsed.contains(&"prod".to_string()), "should forward prod: {parsed:?}");
-    assert!(!parsed.contains(&"--host".to_string()), "--host should NOT be in remote command: {parsed:?}");
+    assert!(
+        parsed.contains(&"--namespace".to_string()),
+        "should forward --namespace: {parsed:?}"
+    );
+    assert!(
+        parsed.contains(&"prod".to_string()),
+        "should forward prod: {parsed:?}"
+    );
+    assert!(
+        !parsed.contains(&"--host".to_string()),
+        "--host should NOT be in remote command: {parsed:?}"
+    );
 }
 
 // -- Task 9: Stderr passthrough --
@@ -277,7 +309,17 @@ fn host_flag_forwards_start_with_trailing_args() {
     let tmp = fake_ssh_echo();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-        .args(["--host", "user@box", "start", "job", "--timeout", "30", "--", "sleep", "60"])
+        .args([
+            "--host",
+            "user@box",
+            "start",
+            "job",
+            "--timeout",
+            "30",
+            "--",
+            "sleep",
+            "60",
+        ])
         .env("PATH", tmp.path())
         .output()
         .unwrap();
@@ -288,11 +330,17 @@ fn host_flag_forwards_start_with_trailing_args() {
     assert_eq!(parsed[0], "tender");
     assert!(parsed.contains(&"start".to_string()), "parsed: {parsed:?}");
     assert!(parsed.contains(&"job".to_string()), "parsed: {parsed:?}");
-    assert!(parsed.contains(&"--timeout".to_string()), "parsed: {parsed:?}");
+    assert!(
+        parsed.contains(&"--timeout".to_string()),
+        "parsed: {parsed:?}"
+    );
     assert!(parsed.contains(&"30".to_string()), "parsed: {parsed:?}");
     assert!(parsed.contains(&"sleep".to_string()), "parsed: {parsed:?}");
     assert!(parsed.contains(&"60".to_string()), "parsed: {parsed:?}");
-    assert!(!parsed.contains(&"--host".to_string()), "parsed: {parsed:?}");
+    assert!(
+        !parsed.contains(&"--host".to_string()),
+        "parsed: {parsed:?}"
+    );
 }
 
 #[test]
@@ -303,9 +351,15 @@ fn host_flag_quotes_child_args_with_spaces() {
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args([
-            "--host", "user@box",
-            "start", "job", "--",
-            "echo", "hello world", "foo;bar", "$HOME",
+            "--host",
+            "user@box",
+            "start",
+            "job",
+            "--",
+            "echo",
+            "hello world",
+            "foo;bar",
+            "$HOME",
         ])
         .env("PATH", tmp.path())
         .output()
@@ -315,12 +369,18 @@ fn host_flag_quotes_child_args_with_spaces() {
     let parsed = parse_remote_argv(&stdout);
 
     assert_eq!(parsed[0], "tender");
-    assert!(parsed.contains(&"hello world".to_string()),
-        "space-containing arg must survive round-trip: {parsed:?}");
-    assert!(parsed.contains(&"foo;bar".to_string()),
-        "semicolon-containing arg must survive: {parsed:?}");
-    assert!(parsed.contains(&"$HOME".to_string()),
-        "dollar sign must survive (not expanded): {parsed:?}");
+    assert!(
+        parsed.contains(&"hello world".to_string()),
+        "space-containing arg must survive round-trip: {parsed:?}"
+    );
+    assert!(
+        parsed.contains(&"foo;bar".to_string()),
+        "semicolon-containing arg must survive: {parsed:?}"
+    );
+    assert!(
+        parsed.contains(&"$HOME".to_string()),
+        "dollar sign must survive (not expanded): {parsed:?}"
+    );
 }
 
 #[test]
@@ -331,9 +391,14 @@ fn host_flag_does_not_eat_child_host_arg() {
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
         .args([
-            "--host", "user@box",
-            "start", "job", "--",
-            "myprog", "--host", "other-host",
+            "--host",
+            "user@box",
+            "start",
+            "job",
+            "--",
+            "myprog",
+            "--host",
+            "other-host",
         ])
         .env("PATH", tmp.path())
         .output()
@@ -342,12 +407,16 @@ fn host_flag_does_not_eat_child_host_arg() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed = parse_remote_argv(&stdout);
 
-    let host_indices: Vec<usize> = parsed.iter().enumerate()
+    let host_indices: Vec<usize> = parsed
+        .iter()
+        .enumerate()
         .filter(|(_, a)| a.as_str() == "--host")
         .map(|(i, _)| i)
         .collect();
-    assert!(!host_indices.is_empty(),
-        "child's --host must be preserved in remote command: {parsed:?}");
+    assert!(
+        !host_indices.is_empty(),
+        "child's --host must be preserved in remote command: {parsed:?}"
+    );
     for &i in &host_indices {
         if i + 1 < parsed.len() && parsed[i + 1] == "other-host" {
             return;
@@ -370,10 +439,14 @@ fn host_flag_attach_uses_tty_allocation() {
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let args: Vec<&str> = stdout.lines()
+    let args: Vec<&str> = stdout
+        .lines()
         .filter_map(|l| l.strip_prefix("ARG:"))
         .collect();
-    assert!(args.contains(&"-t"), "attach should use -t for TTY: {args:?}");
+    assert!(
+        args.contains(&"-t"),
+        "attach should use -t for TTY: {args:?}"
+    );
     assert!(!args.contains(&"-T"), "attach should not use -T: {args:?}");
 }
 
@@ -386,7 +459,17 @@ fn host_flag_rejects_unsupported_commands() {
     for cmd_args in &[
         vec!["--host", "user@box", "run", "script.sh"],
         vec!["--host", "user@box", "exec", "session", "--", "ls"],
-        vec!["--host", "user@box", "wrap", "--source", "test.hook", "--event", "test", "--", "true"],
+        vec![
+            "--host",
+            "user@box",
+            "wrap",
+            "--source",
+            "test.hook",
+            "--event",
+            "test",
+            "--",
+            "true",
+        ],
         vec!["--host", "user@box", "prune", "--all"],
     ] {
         let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
