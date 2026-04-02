@@ -14,7 +14,9 @@ No active plans. See backlog for next candidates.
 
 | ID | File | Depends On |
 |----|------|------------|
+| agent-exec-spike | `agent-exec-spike.md` | — |
 | explicit-exec-targets | `explicit-exec-targets.md` | — |
+| duckdb-exec | `duckdb-exec.md` | explicit-exec-targets |
 | python-repl-exec | `python-repl-exec.md` | explicit-exec-targets |
 | pty-session-mode | `pty-session-mode.md` | — |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
@@ -32,3 +34,4 @@ Long-lived design documents (not queue items).
 | File | Description |
 |------|-------------|
 | `tender-agent-process-sitter.md` | Full design spec |
+| `decision-process-sitter-not-framework.md` | Decision: no native LLM protocol support |

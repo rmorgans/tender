@@ -22,25 +22,27 @@ The fix is making exec target a first-class part of the session identity.
 ### ExecTarget enum
 
 ```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum ExecTarget {
+    None,
     PosixShell,
     PowerShell,
 }
 ```
 
+`None` is a real variant, not `Option` wrapping. No backward-compat deserialization — there are no old sessions in the wild.
+
 No `Cmd` — cmd.exe is unsupported. No `PythonRepl` — that's a separate protocol (follow-on slice). The enum is non-exhaustive for future extension.
 
 ### LaunchSpec change
 
-Add `exec_target: Option<ExecTarget>` to `LaunchSpec`.
+Add `exec_target: ExecTarget` to `LaunchSpec`.
 
-- `Some(PosixShell)` — exec uses `unix_frame`
-- `Some(PowerShell)` — exec uses `powershell_frame`
 - `None` — exec is not supported on this session
+- `PosixShell` — exec uses `unix_frame`
+- `PowerShell` — exec uses `powershell_frame`
 
 `exec_target` is included in spec hash. Different exec target = different session identity.
-
-Deserialization of old sessions without `exec_target` defaults to `None`.
 
 ### CLI
 
@@ -66,23 +68,33 @@ Inference happens once at `tender start` and is stored. No re-detection at exec 
 
 `exec` reads `meta.launch_spec().exec_target` and branches:
 
-- `Some(PosixShell)` → `unix_frame`
-- `Some(PowerShell)` → `powershell_frame`
+- `PosixShell` → `unix_frame`
+- `PowerShell` → `powershell_frame`
 - `None` → `"session has no exec target — restart with --exec-target if this is a shell"`
 
-The `ShellKind` enum and `shell_kind_from_argv0` are deleted.
+The `ShellKind` enum, `shell_kind`, and `shell_kind_from_argv0` are deleted.
 
-The PTY rejection check (`io_mode == Pty`) stays as a defensive invariant guard alongside `exec_target`.
+### PowerShell frame fix
+
+Fix stale `$LASTEXITCODE` bug: if a previous exec ran a native executable and the current exec runs a cmdlet that fails, `$LASTEXITCODE` retains the old value and masks the failure.
+
+Fix: prepend `$LASTEXITCODE = $null;` to reset before each command:
+
+```powershell
+$LASTEXITCODE = $null; & 'cmd' 'args'; $__tender_s = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }; Write-Output ('__TENDER_EXEC__ {token} ' + $__tender_s + ' ' + (Get-Location).Path)
+```
 
 ## Implementation Tasks
 
-1. Add `ExecTarget` enum to `src/model/spec.rs` with `Serialize`/`Deserialize`, default `None` for backward compat
-2. Add `--exec-target` flag to `tender start` CLI, wire to `LaunchSpec`
-3. Add inference from `argv[0]` in `start` when `--exec-target` not specified
-4. Change `exec` to branch on stored `exec_target` instead of `shell_kind_from_argv0`
-5. Delete `ShellKind`, `shell_kind`, `shell_kind_from_argv0` from `exec.rs`
-6. Update tests: explicit `--exec-target` in exec tests, test inference, test `None` rejection
-7. Update `tender run` if it touches shell classification
+1. Add `ExecTarget` enum to `src/model/spec.rs` with `Serialize`/`Deserialize`
+2. Add `exec_target: ExecTarget` field to `LaunchSpec` (not `Option`)
+3. Add `--exec-target` flag to `tender start` CLI, wire to `LaunchSpec`
+4. Add inference from `argv[0]` in `start` when `--exec-target` not specified
+5. Change `exec` to branch on stored `exec_target` instead of `shell_kind_from_argv0`
+6. Delete `ShellKind`, `shell_kind`, `shell_kind_from_argv0` from `exec.rs`
+7. Fix `powershell_frame` to prepend `$LASTEXITCODE = $null;`
+8. Update tests: explicit `--exec-target` in exec tests, test inference, test `None` rejection
+9. Update `tender run` if it touches shell classification
 
 ## Acceptance Criteria
 
@@ -91,9 +103,9 @@ The PTY rejection check (`io_mode == Pty`) stays as a defensive invariant guard 
 - `tender start -- cargo build` stores `exec_target: None`
 - `tender exec` on a session with `exec_target: None` fails with a clear message
 - `tender start --stdin -- bash` infers `PosixShell` without `--exec-target`
-- Old sessions without `exec_target` deserialize with `None` (fail closed)
 - `exec_target` is included in spec hash
 - `ShellKind` and argv[0] sniffing are deleted from exec.rs
+- PowerShell frame resets `$LASTEXITCODE` before each command
 
 ## Not In Scope
 
