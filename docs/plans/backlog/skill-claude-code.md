@@ -2,6 +2,7 @@
 id: skill-claude-code
 depends_on:
   - explicit-exec-targets
+  - python-repl-exec
   - pty-session-mode
   - pty-automation
   - fleet-migration
@@ -145,6 +146,7 @@ The skill should teach agents how to react to:
 All other backlog items. The skill documents the stable surface — write it last.
 
 - `explicit-exec-targets` — persisted exec protocol selection
+- `python-repl-exec` — side-channel exec for interpreter sessions
 - `pty-session-mode` — persistent shell sessions
 - `pty-automation` — agent-driven interactive programs
 - `fleet-migration` — operational rollout (skill should reference fleet patterns)

@@ -15,6 +15,7 @@ No active plans. See backlog for next candidates.
 | ID | File | Depends On |
 |----|------|------------|
 | explicit-exec-targets | `explicit-exec-targets.md` | — |
+| python-repl-exec | `python-repl-exec.md` | explicit-exec-targets |
 | pty-session-mode | `pty-session-mode.md` | — |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
 | pty-automation | `pty-automation.md` | pty-session-mode |
