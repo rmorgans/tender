@@ -7,6 +7,10 @@ links: []
 # PTY Session Mode — Interactive Terminal Sessions
 
 > **Slice one scope:** Unix only. Windows ConPTY support is deferred.
+>
+> **Status:** core Unix PTY support is already implemented and tested. This
+> plan now tracks the remaining cleanup needed before the feature can be
+> considered complete.
 
 Add a PTY-backed session mode to Tender so agents can drive
 terminal-sensitive programs without respawning, and humans can take over
@@ -239,20 +243,24 @@ not separable through a PTY. Annotations (`A` tag) work normally.
 - `attach` on a non-PTY session → `"session is not PTY-enabled"`
 - `attach` when already attached → `"session is already under human control"`
 
-## Implementation Tasks
+## Remaining Cleanup
 
-1. Add `io_mode` field to LaunchSpec and `--pty` flag to `start`
-2. Add PTY control state to Meta
-3. Add platform PTY creation API (Unix: `openpty`/`forkpty`)
-4. Wire sidecar to use PTY when `io_mode: "pty"` — master/slave instead of pipes
-5. Implement merged transcript logging from PTY output
-6. Forward FIFO push input to PTY master in sidecar
-7. Add attach endpoint (Unix domain socket) creation and lifecycle in sidecar
-8. Add `tender attach` CLI command with raw terminal mode and resize
-9. Implement control state transitions (AgentControl/HumanControl/Detached)
-10. Reject `exec` on PTY sessions, `push` in HumanControl, `attach` on non-PTY
-11. Update `--host` dispatch: `attach` uses `ssh -t` instead of `ssh -T`
-12. Add integration tests
+Shipped already:
+
+- `start --pty`
+- PTY-backed spawn and merged transcript capture
+- `push` delivery into PTY sessions
+- `attach` on Unix
+- `exec` rejection on PTY sessions
+- remote `attach` using SSH TTY allocation
+
+Still open:
+
+1. Reject `push` while a human is attached (`HumanControl`)
+2. Either implement `Detached` startup semantics for PTY sessions without `--stdin`, or remove that state from slice one
+3. Apply resize events to the PTY (`TIOCSWINSZ`) instead of ignoring them
+4. Add integration tests for human-control rejection, attach contention, and resize behavior
+5. Reconcile the docs/acceptance criteria with the shipped slice and archive the plan once the remaining gaps are closed
 
 ## Testing
 
@@ -272,6 +280,7 @@ not separable through a PTY. Annotations (`A` tag) work normally.
 
 ## Acceptance Criteria
 
+- the shipped Unix PTY slice remains stable and documented accurately
 - an agent can start a PTY session and drive it with `push`
 - a human can take over a live supervised session via `attach`
 - detach preserves the session and returns control to the agent

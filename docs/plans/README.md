@@ -8,22 +8,24 @@ Convention: see [CONVENTIONS.md](CONVENTIONS.md)
 
 Filename prefix sets priority. `ls active/` is the ordered queue.
 
-No active plans. See backlog for next candidates.
+| ID | File | Depends On |
+|----|------|------------|
+| log-jsonl-output | `00_log-jsonl-output.md` | — |
 
 ## backlog/ — Future Work
 
 | ID | File | Depends On |
 |----|------|------------|
-| remote-ssh-transport | `remote-ssh-transport.md` | — |
+| wait-multiple | `wait-multiple.md` | — |
 | pty-session-mode | `pty-session-mode.md` | — |
-| skill-claude-code | `skill-claude-code.md` | wrap-annotation-ingestion (complete) |
 | exec-windows-shells | `exec-windows-shells.md` | exec (complete) |
+| fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
 | pty-automation | `pty-automation.md` | pty-session-mode |
-| fleet-migration | `fleet-migration.md` | remote-ssh-transport |
+| skill-claude-code | `skill-claude-code.md` | all other backlog items |
 
 ## completed/
 
-23 completed plans. See `completed/` directory.
+24 completed plans. See `completed/` directory.
 
 ## specs/
 

@@ -1,7 +1,12 @@
 ---
 id: skill-claude-code
 depends_on:
-  - wrap-annotation-ingestion
+  - log-jsonl-output
+  - wait-multiple
+  - exec-windows-shells
+  - pty-session-mode
+  - pty-automation
+  - fleet-migration
 links: []
 ---
 
@@ -33,16 +38,23 @@ First-slice output:
 - concise workflow examples
 - recovery guidance for common failures
 
-The first version should document the current product surface only. It must not pretend `exec`, remote SSH, or PTY attach already exist.
+The first version should document the current product surface accurately:
+
+- pipe `start --stdin` + `exec` is the default persistent-shell lane
+- remote SSH command forwarding exists
+- Unix PTY attach exists as a separate interactive lane
+- PTY automation does not exist yet and must not be implied
 
 ## Required Content
 
 The skill should cover:
 
 - `tender start`
+- `tender exec`
 - `tender status` and `tender list`
 - `tender log` and `tender watch`
 - `tender push`
+- `tender attach` for Unix PTY sessions
 - `tender kill`
 - `tender wrap`
 - `tender run`
@@ -68,7 +80,8 @@ The skill should include at least:
 
 - start a long-running server, then watch logs
 - run a script in the foreground and propagate its exit code
-- start an interactive shell with `--stdin`, then `push` follow-up commands
+- start a persistent shell with `--stdin`, then use `exec` for structured commands
+- start an interactive shell with `--stdin`, then `push` follow-up commands when `exec` is not the right fit
 - use `wrap` from hooks and inspect annotations with `watch`
 - replace an existing session safely
 - kill a stuck run and verify terminal state
@@ -83,6 +96,7 @@ The trigger list should include phrases like:
 - "check on that job"
 - "stream the logs"
 - "send input to the running shell"
+- "run another command in that existing shell"
 - "run this script but keep logs/state"
 
 It should also say when not to trigger:
@@ -125,20 +139,16 @@ The skill should teach agents how to react to:
 - the skill reflects the current CLI, including `run`
 - examples are valid on both Unix and Windows where possible
 - the skill teaches idempotency and namespace usage correctly
+- the skill teaches the lane split: pipe `exec` by default, PTY only for terminal-sensitive workflows
 - the skill does not mention unimplemented features as if they already exist
 
 ## Depends On
 
-`wrap-annotation-ingestion` is the only real dependency because the skill must document `tender wrap` for hook integration. `run` is already complete, so it should be included in the first version.
+All other backlog items. The skill documents the stable surface — write it last.
 
-## Not Blocked By
-
-- `exec`
-- `remote-ssh-transport`
-- `pty-attach`
-
-Those are additive future features, not prerequisites for the first skill version.
-
-## Notes
-
-This is now a strong candidate for promotion to active once you want a documentation and agent-leverage slice instead of another core runtime slice.
+- `log-jsonl-output` — JSONL format and slimmed-down `tender log`
+- `wait-multiple` — fan-out wait patterns
+- `exec-windows-shells` — cross-platform exec
+- `pty-session-mode` — persistent shell sessions
+- `pty-automation` — agent-driven interactive programs
+- `fleet-migration` — operational rollout (skill should reference fleet patterns)
