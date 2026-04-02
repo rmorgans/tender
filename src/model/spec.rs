@@ -28,6 +28,17 @@ pub enum IoMode {
     Pty,
 }
 
+/// What exec protocol the session speaks. Determined at start time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecTarget {
+    /// Exec not supported on this session.
+    None,
+    /// POSIX shell (bash, sh, zsh). Uses unix_frame.
+    PosixShell,
+    /// PowerShell (pwsh, powershell.exe). Uses powershell_frame.
+    PowerShell,
+}
+
 /// A dependency on another session's specific execution.
 /// Binds to run_id, not session name — safe against --replace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +69,7 @@ pub struct LaunchSpec {
     pub stdin_mode: StdinMode,
     #[serde(default)]
     pub io_mode: IoMode,
+    pub exec_target: ExecTarget,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +92,7 @@ impl LaunchSpec {
             on_exit: vec![],
             stdin_mode: StdinMode::None,
             io_mode: IoMode::Pipe,
+            exec_target: ExecTarget::None,
         })
     }
 
@@ -117,6 +130,7 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             stdin_mode: StdinMode,
             #[serde(default)]
             io_mode: IoMode,
+            exec_target: ExecTarget,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -134,6 +148,7 @@ impl<'de> Deserialize<'de> for LaunchSpec {
             on_exit: raw.on_exit,
             stdin_mode: raw.stdin_mode,
             io_mode: raw.io_mode,
+            exec_target: raw.exec_target,
         })
     }
 }

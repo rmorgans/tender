@@ -14,7 +14,7 @@ fn launch_spec_pty_mode_serializes() {
 
 #[test]
 fn launch_spec_without_io_mode_deserializes_as_pipe() {
-    let json = r#"{"argv":["echo"],"stdin_mode":"None"}"#;
+    let json = r#"{"argv":["echo"],"stdin_mode":"None","exec_target":"None"}"#;
     let spec: tender::model::spec::LaunchSpec = serde_json::from_str(json).unwrap();
     assert_eq!(spec.io_mode, tender::model::spec::IoMode::Pipe);
 }
