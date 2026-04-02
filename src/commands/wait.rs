@@ -128,13 +128,9 @@ pub fn cmd_wait(
 ///
 /// - 2: spawn failure (process never started)
 /// - 3: sidecar lost (supervision crashed)
-/// - 4: dependency failed (upstream failure)
+/// - 4/124/137: dependency failed (4=upstream non-zero, 124=upstream timeout, 137=killed during wait)
 /// - 42: child exited non-zero (process ran but failed)
 /// - 0: success
-///
-/// DependencyFailed sub-reasons (TimedOut→124, Killed→137) are collapsed
-/// to 4 for multi-session aggregation because the dep-failed distinction
-/// matters for the individual session, not the set.
 fn derive_exit_code(metas: &[&Meta]) -> i32 {
     let mut worst: i32 = 0;
 
@@ -151,22 +147,25 @@ fn derive_exit_code(metas: &[&Meta]) -> i32 {
 /// Severity rank for exit code comparison. Higher = more severe.
 fn severity(code: i32) -> u8 {
     match code {
-        2 => 4,  // spawn failed
-        3 => 3,  // sidecar lost
-        4 => 2,  // dependency failed
-        42 => 1, // non-zero exit
+        2 => 5,          // spawn failed
+        3 => 4,          // sidecar lost
+        4 | 124 | 137 => 3, // dependency failed (any sub-reason)
+        42 => 1,         // non-zero exit
         _ => 0,
     }
 }
 
 /// Map a single terminal RunStatus to its exit code.
 ///
-/// These codes match the documented Tender exit code contract:
+/// These codes match the documented Tender exit code contract
+/// (consistent with `tender run`):
 /// - 0: success (ExitedOk, Killed, KilledForced, TimedOut)
 /// - 2: spawn failure
 /// - 3: sidecar lost
-/// - 4: dependency failure
+/// - 4: dependency failed (upstream exited non-zero)
 /// - 42: child exited non-zero
+/// - 124: dependency timed out
+/// - 137: killed during dependency wait
 fn single_exit_code(status: &RunStatus) -> i32 {
     match status {
         RunStatus::Exited { how, .. } => match how {
@@ -176,7 +175,14 @@ fn single_exit_code(status: &RunStatus) -> i32 {
         },
         RunStatus::SpawnFailed { .. } => 2,
         RunStatus::SidecarLost { .. } => 3,
-        RunStatus::DependencyFailed { .. } => 4,
+        RunStatus::DependencyFailed { reason, .. } => {
+            use tender::model::dep_fail::DepFailReason;
+            match reason {
+                DepFailReason::Failed => 4,
+                DepFailReason::TimedOut => 124,
+                DepFailReason::Killed | DepFailReason::KilledForced => 137,
+            }
+        }
         // Non-terminal states shouldn't reach here, but return 0 if they do.
         _ => 0,
     }

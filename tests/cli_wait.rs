@@ -285,6 +285,104 @@ fn wait_multiple_timeout() {
 }
 
 #[test]
+fn wait_dep_timed_out_exits_124() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    // job1 runs forever; job2 depends on it with a 2s timeout.
+    tender(&root)
+        .args(["start", "dep-slow", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running(&root, "dep-slow");
+
+    tender(&root)
+        .args(["start", "dep-waiter", "--after", "dep-slow", "--timeout", "2", "--", "true"])
+        .assert()
+        .success();
+    wait_terminal(&root, "dep-waiter");
+
+    tender(&root)
+        .args(["wait", "dep-waiter"])
+        .assert()
+        .code(124);
+
+    tender(&root)
+        .args(["kill", "--force", "dep-slow"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn wait_killed_during_dep_wait_exits_137() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    // job1 runs forever; job2 depends on it.
+    tender(&root)
+        .args(["start", "dep-block", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running(&root, "dep-block");
+
+    tender(&root)
+        .args(["start", "dep-victim", "--after", "dep-block", "--", "true"])
+        .assert()
+        .success();
+
+    // Give the sidecar time to enter dependency wait.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Kill the waiting session.
+    tender(&root)
+        .args(["kill", "dep-victim"])
+        .assert()
+        .success();
+    wait_terminal(&root, "dep-victim");
+
+    tender(&root)
+        .args(["wait", "dep-victim"])
+        .assert()
+        .code(137);
+
+    tender(&root)
+        .args(["kill", "--force", "dep-block"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn wait_dep_failed_beats_nonzero_in_multi() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    // One non-zero exit, one dependency failure.
+    tender(&root)
+        .args(["start", "dep-upstream", "false"])
+        .assert()
+        .success();
+    wait_terminal(&root, "dep-upstream");
+
+    tender(&root)
+        .args(["start", "dep-downstream", "--after", "dep-upstream", "--", "true"])
+        .assert()
+        .success();
+    wait_terminal(&root, "dep-downstream");
+
+    tender(&root)
+        .args(["start", "plain-fail", "sh", "-c", "exit 1"])
+        .assert()
+        .success();
+    wait_terminal(&root, "plain-fail");
+
+    // Dep failed (4) is more severe than non-zero exit (42).
+    tender(&root)
+        .args(["wait", "plain-fail", "dep-downstream"])
+        .assert()
+        .code(4);
+}
+
+#[test]
 fn wait_duplicate_session_names() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
