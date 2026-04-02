@@ -3,7 +3,7 @@ id: skill-claude-code
 depends_on:
   - log-jsonl-output
   - wait-multiple
-  - exec-windows-shells
+  - explicit-exec-targets
   - pty-session-mode
   - pty-automation
   - fleet-migration
@@ -148,7 +148,7 @@ All other backlog items. The skill documents the stable surface — write it las
 
 - `log-jsonl-output` — JSONL format and slimmed-down `tender log`
 - `wait-multiple` — fan-out wait patterns
-- `exec-windows-shells` — cross-platform exec
+- `explicit-exec-targets` — persisted exec protocol selection
 - `pty-session-mode` — persistent shell sessions
 - `pty-automation` — agent-driven interactive programs
 - `fleet-migration` — operational rollout (skill should reference fleet patterns)

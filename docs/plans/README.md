@@ -17,15 +17,15 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 | ID | File | Depends On |
 |----|------|------------|
 | wait-multiple | `wait-multiple.md` | — |
+| explicit-exec-targets | `explicit-exec-targets.md` | — |
 | pty-session-mode | `pty-session-mode.md` | — |
-| exec-windows-shells | `exec-windows-shells.md` | exec (complete) |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
 | pty-automation | `pty-automation.md` | pty-session-mode |
 | skill-claude-code | `skill-claude-code.md` | all other backlog items |
 
 ## completed/
 
-24 completed plans. See `completed/` directory.
+25 completed plans. See `completed/` directory.
 
 ## specs/
 
