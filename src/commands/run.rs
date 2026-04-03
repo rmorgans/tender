@@ -48,7 +48,7 @@ pub fn cmd_run(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("script path is not valid UTF-8"))?;
 
-    let cmd = resolve_shell_argv(shell.as_deref(), script_str, &script_path, args);
+    let cmd = resolve_shell_argv(shell.as_deref(), script_str, &script_path, &content, args)?;
 
     // --- Merge directives with CLI overrides (CLI wins) ---
     let effective = merge_directives_with_cli(
@@ -180,27 +180,97 @@ fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
     }
 }
 
-/// Resolve the child command argv based on --shell flag and script executability.
+/// Map a file extension to the interpreter argv prefix.
+/// Returns None for unmapped extensions.
+fn launcher_argv_for_extension(ext: &str) -> Option<Vec<String>> {
+    let argv: &[&str] = match ext {
+        "sh" => &["bash"],
+        "ps1" => &["pwsh", "-File"],
+        #[cfg(windows)]
+        "bat" | "cmd" => &["cmd", "/c"],
+        #[cfg(not(windows))]
+        "bat" | "cmd" => return None,
+        "py" => {
+            if cfg!(windows) {
+                &["py", "-3"]
+            } else {
+                &["python3"]
+            }
+        }
+        "rb" => &["ruby"],
+        "js" => &["node"],
+        _ => return None,
+    };
+    Some(argv.iter().map(|s| s.to_string()).collect())
+}
+
+/// Resolve the child command argv.
+///
+/// Precedence: `--shell` > executable > extension mapping > shebang (Unix) > error.
 fn resolve_shell_argv(
     shell: Option<&str>,
     script_str: &str,
     script_path: &Path,
+    script_content: &str,
     args: Vec<String>,
-) -> Vec<String> {
+) -> anyhow::Result<Vec<String>> {
     let mut cmd = Vec::new();
 
     if let Some(sh) = shell {
+        // 1. Explicit --shell override
         cmd.push(sh.to_string());
         cmd.push(script_str.to_string());
     } else if is_executable(script_path) {
+        // 2. Directly executable (+x on Unix, .exe on Windows)
+        cmd.push(script_str.to_string());
+    } else if let Some(launcher) = script_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(launcher_argv_for_extension)
+    {
+        // 3. Extension mapping
+        cmd.extend(launcher);
+        cmd.push(script_str.to_string());
+    } else if let Some(interp) = parse_shebang(script_content) {
+        // 4. Shebang (Unix only)
+        cmd.push(interp);
         cmd.push(script_str.to_string());
     } else {
-        cmd.push("bash".to_string());
-        cmd.push(script_str.to_string());
+        // 5. Hard fail
+        anyhow::bail!(
+            "cannot determine interpreter for '{}'\n  \
+             hint: use --shell to specify the interpreter\n  \
+             example: tender run --shell bash {}",
+            script_path.display(),
+            script_path.display(),
+        );
     }
 
     cmd.extend(args);
-    cmd
+    Ok(cmd)
+}
+
+/// Extract the interpreter from a shebang line.
+/// Handles `#!/path/to/interp` and `#!/usr/bin/env interp`.
+/// Returns a single interpreter token — args are not preserved.
+#[cfg(unix)]
+fn parse_shebang(content: &str) -> Option<String> {
+    let first_line = content.lines().next()?;
+    let shebang = first_line.strip_prefix("#!")?.trim();
+    if shebang.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = shebang.split_whitespace().collect();
+    if parts.len() >= 2 && parts[0].ends_with("/env") {
+        Some(parts[1].to_string())
+    } else {
+        Some(parts[0].to_string())
+    }
+}
+
+#[cfg(windows)]
+fn parse_shebang(_content: &str) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
@@ -212,8 +282,13 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn is_executable(_path: &Path) -> bool {
-    false // Windows doesn't have +x; always fall back to shell.
+fn is_executable(path: &Path) -> bool {
+    // Only .exe is directly executable. .bat/.cmd use the extension
+    // mapping (cmd /c) so they go through launcher_argv_for_extension.
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e == "exe")
+        .unwrap_or(false)
 }
 
 /// Merged effective options (CLI overrides directives).
@@ -285,5 +360,138 @@ fn merge_directives_with_cli(
         on_exit,
         after,
         any_exit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launcher_sh() {
+        assert_eq!(
+            launcher_argv_for_extension("sh"),
+            Some(vec!["bash".to_string()])
+        );
+    }
+
+    #[test]
+    fn launcher_ps1() {
+        assert_eq!(
+            launcher_argv_for_extension("ps1"),
+            Some(vec!["pwsh".to_string(), "-File".to_string()])
+        );
+    }
+
+    #[test]
+    fn launcher_py() {
+        let argv = launcher_argv_for_extension("py").unwrap();
+        if cfg!(windows) {
+            assert_eq!(argv, vec!["py", "-3"]);
+        } else {
+            assert_eq!(argv, vec!["python3"]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_bat() {
+        assert_eq!(
+            launcher_argv_for_extension("bat"),
+            Some(vec!["cmd".to_string(), "/c".to_string()])
+        );
+        assert_eq!(
+            launcher_argv_for_extension("cmd"),
+            Some(vec!["cmd".to_string(), "/c".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_bat_not_on_unix() {
+        assert!(launcher_argv_for_extension("bat").is_none());
+        assert!(launcher_argv_for_extension("cmd").is_none());
+    }
+
+    #[test]
+    fn launcher_rb() {
+        assert_eq!(
+            launcher_argv_for_extension("rb"),
+            Some(vec!["ruby".to_string()])
+        );
+    }
+
+    #[test]
+    fn launcher_js() {
+        assert_eq!(
+            launcher_argv_for_extension("js"),
+            Some(vec!["node".to_string()])
+        );
+    }
+
+    #[test]
+    fn launcher_unknown() {
+        assert!(launcher_argv_for_extension("xyz").is_none());
+        assert!(launcher_argv_for_extension("ts").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shebang_basic() {
+        assert_eq!(parse_shebang("#!/bin/bash\necho hi"), Some("/bin/bash".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shebang_env() {
+        assert_eq!(parse_shebang("#!/usr/bin/env python3\nprint(1)"), Some("python3".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shebang_missing() {
+        assert_eq!(parse_shebang("echo hi"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shebang_empty() {
+        assert_eq!(parse_shebang("#!\n"), None);
+    }
+
+    #[test]
+    fn resolve_shell_override() {
+        let result = resolve_shell_argv(
+            Some("ruby"), "/tmp/test.xyz", Path::new("/tmp/test.xyz"), "", vec![]
+        ).unwrap();
+        assert_eq!(result, vec!["ruby", "/tmp/test.xyz"]);
+    }
+
+    #[test]
+    fn resolve_extension_py() {
+        let result = resolve_shell_argv(
+            None, "/tmp/test.py", Path::new("/tmp/test.py"), "", vec!["arg1".to_string()]
+        ).unwrap();
+        if cfg!(windows) {
+            assert_eq!(result[0], "py");
+            assert_eq!(result[1], "-3");
+            assert_eq!(result[2], "/tmp/test.py");
+            assert_eq!(result[3], "arg1");
+        } else {
+            assert_eq!(result[0], "python3");
+            assert_eq!(result[1], "/tmp/test.py");
+            assert_eq!(result[2], "arg1");
+        }
+    }
+
+    #[test]
+    fn resolve_unknown_fails() {
+        let result = resolve_shell_argv(
+            None, "/tmp/test.xyz", Path::new("/tmp/test.xyz"), "no shebang here", vec![]
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot determine interpreter"), "got: {err}");
+        assert!(err.contains("--shell"), "got: {err}");
     }
 }

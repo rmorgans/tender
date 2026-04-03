@@ -94,7 +94,7 @@ enum Commands {
     Run {
         /// Script file to run
         script: PathBuf,
-        /// Interpreter to use (default: bash, or direct if +x)
+        /// Interpreter override (default: inferred from extension or +x)
         #[arg(long)]
         shell: Option<String>,
         /// Return immediately after start (don't wait for exit)
