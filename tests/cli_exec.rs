@@ -472,13 +472,20 @@ fn exec_python_repl_cwd() {
 
     let tmp = std::env::temp_dir();
     let tmp_str = tmp.to_str().expect("temp dir should be valid UTF-8");
-    let chdir_code = format!("import os; os.chdir(r'{tmp_str}')");
+    // Use forward slashes — valid on Windows and avoids raw string edge cases
+    let chdir_code = format!("import os; os.chdir('{}')", tmp_str.replace('\\', "/"));
     let output = harness::tender(&root)
         .args(["exec", "py", "--timeout", "10", "--", &chdir_code])
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "exec failed:\nstderr: {}\nstdout: {}\ncode: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+        chdir_code,
+    );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(0));
     let cwd = result["cwd_after"].as_str().unwrap();
