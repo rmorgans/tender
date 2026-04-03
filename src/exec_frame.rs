@@ -1,3 +1,25 @@
+use base64::Engine;
+
+/// Build a framed Python exec string for injection into a Python REPL.
+///
+/// Both the user's code AND the result path are base64-encoded to avoid any
+/// escaping issues with backslashes, quotes, or special characters in paths
+/// (especially Windows paths containing `\t`, `\U`, etc.).
+///
+/// The frame wraps execution in try/except, captures stdout/stderr/cwd/traceback,
+/// and writes a JSON result file atomically (tmp + rename).
+///
+/// `result_path` is the absolute path to `{session_dir}/exec-results/{token}.json`.
+pub fn python_frame(code: &str, result_path: &str) -> String {
+    let encoded_code = base64::engine::general_purpose::STANDARD.encode(code);
+    let encoded_path = base64::engine::general_purpose::STANDARD.encode(result_path);
+    // The entire frame must be a single line for REPL injection.
+    // Python's compile() interprets \n as real newlines inside the string.
+    format!(
+        "exec(compile('import json,os,sys,contextlib,io,traceback,base64 as _b64;_out,_err,_code,_tb=io.StringIO(),io.StringIO(),0,None;_rp=_b64.b64decode(\"{encoded_path}\").decode()\\ntry:\\n with contextlib.redirect_stdout(_out),contextlib.redirect_stderr(_err):\\n  exec(compile(_b64.b64decode(\"{encoded_code}\").decode(),\"<exec>\",\"exec\"))\\nexcept SystemExit as _e:\\n _code=_e.code if _e.code is not None else 0\\nexcept:\\n _tb=traceback.format_exc();_code=1\\n_tmp=_rp+\".tmp\"\\nwith open(_tmp,\"w\") as _f:\\n json.dump(dict(exit_code=_code,cwd=os.getcwd(),stdout=_out.getvalue(),stderr=_err.getvalue(),traceback=_tb),_f)\\nos.rename(_tmp,_rp)','<tender-exec>','exec'))\n"
+    )
+}
+
 /// Build a framed shell command string for Unix shells (bash/sh).
 ///
 /// The command is escaped using shell_words::join, then appended with a sentinel
@@ -143,6 +165,37 @@ mod tests {
         );
         assert!(frame.contains("& 'Write-Output' 'a b' '$HOME' 'it''s `quoted`;'"));
         assert!(frame.ends_with('\n'));
+    }
+
+    #[test]
+    fn python_frame_encodes_code_and_path() {
+        let frame = python_frame("print('hello')", "/tmp/result.json");
+        assert!(frame.contains("b64decode"));
+        assert!(frame.ends_with('\n'));
+        // Both code and path are base64-encoded — neither appears raw
+        assert!(!frame.contains("/tmp/result.json"));
+        let encoded_code = base64::engine::general_purpose::STANDARD.encode("print('hello')");
+        let encoded_path = base64::engine::general_purpose::STANDARD.encode("/tmp/result.json");
+        assert!(frame.contains(&encoded_code));
+        assert!(frame.contains(&encoded_path));
+    }
+
+    #[test]
+    fn python_frame_handles_special_chars() {
+        // Code with quotes, newlines, backslashes — all handled by base64
+        let code = "x = 'hello'\nprint(f\"value: {x}\\n\")";
+        let frame = python_frame(code, "/tmp/result.json");
+        assert!(frame.contains("b64decode"));
+        // Frame is a single line
+        assert_eq!(frame.matches('\n').count(), 1); // trailing newline only
+    }
+
+    #[test]
+    fn python_frame_escapes_windows_paths() {
+        // Windows path with backslashes that would be problematic if not b64-encoded
+        let frame = python_frame("print(1)", r"C:\Users\test\exec-results\abc.json");
+        assert!(!frame.contains(r"C:\Users")); // path must not appear raw
+        assert!(frame.contains("b64decode"));
     }
 
     #[test]
