@@ -15,9 +15,8 @@ No active plans. See backlog for next candidates.
 | ID | File | Depends On |
 |----|------|------------|
 | agent-exec-spike | `agent-exec-spike.md` | — |
-| explicit-exec-targets | `explicit-exec-targets.md` | — |
-| duckdb-exec | `duckdb-exec.md` | explicit-exec-targets |
-| python-repl-exec | `python-repl-exec.md` | explicit-exec-targets |
+| duckdb-exec | `duckdb-exec.md` | explicit-exec-targets (complete) |
+| python-repl-exec | `python-repl-exec.md` | explicit-exec-targets (complete) |
 | pty-session-mode | `pty-session-mode.md` | — |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
 | pty-automation | `pty-automation.md` | pty-session-mode |
@@ -25,7 +24,7 @@ No active plans. See backlog for next candidates.
 
 ## completed/
 
-27 completed plans. See `completed/` directory.
+28 completed plans. See `completed/` directory.
 
 ## specs/
 
