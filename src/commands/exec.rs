@@ -144,12 +144,10 @@ pub fn cmd_exec(
                 drain_until_sentinel(&session, &token);
             }
             ExecTarget::PythonRepl => {
-                // Side-channel: clean up any stale result file, best-effort.
-                // The Python frame may still be running, but without a sentinel
-                // there's nothing to drain. The exec lock release is sufficient.
-                let result_path = session.path().join("exec-results").join(format!("{token}.json"));
-                let _ = std::fs::remove_file(&result_path);
-                let _ = std::fs::remove_file(result_path.with_extension("json.tmp"));
+                // The Python frame may still be running. Hold the exec lock
+                // until the result file appears (frame finished) or the session
+                // dies, to prevent a second exec from interleaving.
+                drain_until_side_channel(&session, &token);
             }
             ExecTarget::None => {} // unreachable after earlier bail
         }
@@ -447,6 +445,28 @@ fn wait_side_channel_result(
             anyhow::bail!("session exited while waiting for exec result");
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// After a timeout on a PythonRepl exec, hold the exec lock until the result file
+/// appears (meaning the frame finished) or the session dies. Then clean up.
+fn drain_until_side_channel(session: &SessionDir, token: &str) {
+    let result_path = session.path().join("exec-results").join(format!("{token}.json"));
+    loop {
+        if result_path.exists() {
+            // Frame finished — clean up and release lock
+            let _ = std::fs::remove_file(&result_path);
+            return;
+        }
+        if let Ok(current) = session::read_meta(session) {
+            if !matches!(current.status(), RunStatus::Running { .. }) {
+                // Session died — clean up any partial files
+                let _ = std::fs::remove_file(&result_path);
+                let _ = std::fs::remove_file(result_path.with_extension("json.tmp"));
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
