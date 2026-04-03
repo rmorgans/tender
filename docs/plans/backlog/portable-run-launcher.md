@@ -1,13 +1,19 @@
 ---
 id: portable-run-launcher
 depends_on: []
-links: []
+links:
+  - docs/plans/completed/2026-04-01-run-shebang.md
 ---
 
 # Portable Run Launcher — Cross-Platform Script Execution
 
 Make `tender run` work reliably on all platforms by replacing the
 implicit Bash fallback with explicit interpreter resolution.
+
+Supersedes the platform-specific parts of the completed run-shebang
+plan. The shebang parser, `--shell` flag, and core run semantics from
+that plan are preserved. This plan adds the extension-to-launcher
+mapping and removes the hidden Bash fallback that breaks on Windows.
 
 ## Why
 
@@ -22,33 +28,48 @@ cross-platform. The `run` command should meet the same bar.
 
 ## Contract
 
-Strict: no hidden Bash fallback on Windows, no inference from
-"looks script-like" beyond the explicit supported kinds. Unknown files
-hard-fail with clear `--shell` guidance.
+- `ExecTarget::None` unchanged — run launches a script to completion,
+  not a persistent REPL. No `--exec-target` on run.
+- No hidden Bash fallback on Windows.
+- No inference from "looks script-like" beyond the explicit supported
+  kinds.
+- Unknown files hard-fail with clear `--shell` guidance.
 
 ## Interpreter Resolution
 
 ### Precedence (highest to lowest)
 
-1. `--shell <interpreter>` — explicit override, always wins
-2. Shebang (`#!...`) — read first line, extract interpreter (Unix only;
-   Windows ignores shebangs)
-3. Extension mapping — deterministic, cross-platform
-4. Executable bit / PE header — direct execution
+1. `--shell <interpreter>` — explicit override, always wins (already
+   implemented as `shell: Option<String>` in run.rs)
+2. Executable bit (Unix) / PE header (Windows) — direct execution, no
+   interpreter needed, no shebang parsing
+3. Extension mapping — deterministic, cross-platform (new)
+4. Shebang (`#!...`) — Unix only, for non-executable files without a
+   mapped extension (already implemented)
 5. Fail with actionable error: "unknown script type, use --shell"
 
-### Extension-to-Launcher Mapping
+Note: shebang parsing is only used as a fallback for non-executable
+files without a recognised extension. If the file is directly
+executable, the OS handles shebangs natively — parsing them ourselves
+introduces edge cases (env, interpreter args, path differences) that
+direct exec avoids.
 
-| Extension | Launcher | Notes |
-|-----------|----------|-------|
-| `.sh` | `bash` | Requires bash on PATH |
-| `.ps1` | `pwsh` | Cross-platform PowerShell |
-| `.bat`, `.cmd` | `cmd /c` | Windows only |
-| `.py` | `py -3` (Windows) / `python3` (POSIX) | Same as test helper pattern |
-| `.rb` | `ruby` | |
-| `.js` | `node` | |
-| `.ts` | Platform-dependent | Needs decision: tsx, ts-node, deno? |
-| none | Direct execution if executable, else fail | |
+### Extension-to-Launcher Argv Mapping
+
+Each entry specifies the complete argv prefix, not just a launcher name.
+
+| Extension | Argv prefix (POSIX) | Argv prefix (Windows) | Notes |
+|-----------|--------------------|-----------------------|-------|
+| `.sh` | `["bash"]` | `["bash"]` | Requires bash on PATH |
+| `.ps1` | `["pwsh", "-File"]` | `["pwsh", "-File"]` | Cross-platform PowerShell |
+| `.bat`, `.cmd` | N/A | `["cmd", "/c"]` | Windows only; error on POSIX |
+| `.py` | `["python3"]` | `["py", "-3"]` | py launcher on Windows |
+| `.rb` | `["ruby"]` | `["ruby"]` | |
+| `.js` | `["node"]` | `["node"]` | |
+| none | Direct exec if executable, else fail | | |
+
+`.ts` is deliberately excluded — no single standard runner exists
+(tsx, ts-node, deno, bun). Use `--shell` explicitly.
 
 ### Windows Python Choice
 
@@ -58,7 +79,8 @@ trap where `python3` resolves to a failure stub.
 
 ### Behaviour for Unknown Files
 
-If the extension is not in the mapping and the file is not executable:
+If the extension is not in the mapping, the file is not executable,
+and no shebang is found:
 
 ```
 error: cannot determine interpreter for 'script.xyz'
@@ -68,33 +90,15 @@ error: cannot determine interpreter for 'script.xyz'
 
 No guessing, no silent fallback.
 
-## Interaction with ExecTarget
-
-`tender run` creates a session with `exec_target: None` — it runs a
-script to completion, not a persistent REPL. The interpreter resolution
-here is orthogonal to ExecTarget: run picks how to *launch* the script,
-ExecTarget controls how to *inject commands* into a running session.
-
-If `--exec-target` is set on a `run` session, the launcher mapping is
-still used for the initial script, and exec_target governs subsequent
-`tender exec` calls.
-
 ## Implementation Tasks
 
-1. Add extension-to-launcher mapping function
-2. Add shebang parser (Unix; no-op on Windows)
-3. Wire precedence chain into `run` command
-4. Replace bash fallback with hard fail for unknown types
-5. Add `--shell` flag to `run` (if not already present)
-6. Update CLI help text with supported script types
-7. Cross-platform tests:
-   - `.sh` with bash (skip on Windows without bash)
-   - `.ps1` with pwsh (skip if pwsh not available)
-   - `.py` with platform-appropriate launcher
-   - Unknown extension → clear error
-   - `--shell` override
-   - Shebang-based resolution (Unix only)
-   - Executable file → direct launch
+1. Add extension-to-launcher argv mapping function (returns `Vec<String>`)
+2. Wire precedence chain into `run` command:
+   - `--shell` → extension mapping → shebang → fail
+   - Remove implicit bash fallback for non-executable files
+3. Update error message for unknown types with `--shell` hint
+4. Update CLI help text with supported script types
+5. Cross-platform tests (see below)
 
 ## Testing Strategy
 
@@ -107,12 +111,25 @@ Bash. Each test should either:
   required interpreter is absent
 - Test the error path (unknown extension → failure message)
 
+### Test cases
+
+- `.sh` with bash (skip on Windows without bash)
+- `.ps1` with pwsh (skip if pwsh not available)
+- `.py` with platform-appropriate launcher
+- `.bat` on Windows (skip on POSIX)
+- Unknown extension → clear error with `--shell` hint
+- `--shell` override works
+- Shebang-based resolution for extensionless non-executable (Unix only)
+- Executable file → direct launch without interpreter
+
 ## Not In Scope
 
+- `--exec-target` for run sessions (run stays ExecTarget::None)
 - Automatic interpreter installation or version management
 - Virtual environment detection
 - Remote run (covered by `--host` independently)
 - Interactive script execution (that's PTY + attach)
+- `.ts` support (no standard runner; use `--shell`)
 
 ## Acceptance Criteria
 
@@ -120,7 +137,7 @@ Bash. Each test should either:
   without bash
 - `tender run script.ps1` works on any platform with pwsh
 - `tender run script.py` uses `py -3` on Windows, `python3` on POSIX
-- `tender run unknown.xyz` fails with actionable error
+- `tender run unknown.xyz` fails with actionable `--shell` hint
 - `tender run --shell ruby unknown.xyz` works
 - No test depends on Git Bash being in PATH unless explicitly testing
   bash
