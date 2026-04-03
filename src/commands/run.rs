@@ -226,7 +226,7 @@ fn resolve_shell_argv(
     } else if let Some(launcher) = script_path
         .extension()
         .and_then(|e| e.to_str())
-        .and_then(launcher_argv_for_extension)
+        .and_then(|e| launcher_argv_for_extension(&e.to_ascii_lowercase()))
     {
         // 3. Extension mapping
         cmd.extend(launcher);
@@ -427,6 +427,14 @@ mod tests {
             launcher_argv_for_extension("js"),
             Some(vec!["node".to_string()])
         );
+    }
+
+    #[test]
+    fn resolve_extension_case_insensitive() {
+        let result = resolve_shell_argv(
+            None, "/tmp/HELLO.PY", Path::new("/tmp/HELLO.PY"), "", vec![]
+        ).unwrap();
+        assert_eq!(result[0], if cfg!(windows) { "py" } else { "python3" });
     }
 
     #[test]
