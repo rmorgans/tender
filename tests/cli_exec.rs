@@ -8,10 +8,30 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Returns the Python interpreter name for the current platform.
-/// Windows has `python`, Unix has `python3`.
-fn python_cmd() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
+/// Returns the Python interpreter argv for the current platform.
+/// POSIX: `["python3", "-i"]`, Windows: `["py", "-3", "-i"]`.
+fn python_repl_argv() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["py", "-3", "-i"]
+    } else {
+        &["python3", "-i"]
+    }
+}
+
+/// Build tender start args for a Python REPL session.
+fn python_start_args(session: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["start", session, "--stdin", "--exec-target", "python-repl", "--"]
+        .iter().map(|s| s.to_string()).collect();
+    args.extend(python_repl_argv().iter().map(|s| s.to_string()));
+    args
+}
+
+/// Build tender start args for a Python session without --exec-target (for inference tests).
+fn python_start_args_no_target(session: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["start", session, "--stdin", "--"]
+        .iter().map(|s| s.to_string()).collect();
+    args.extend(python_repl_argv().iter().map(|s| s.to_string()));
+    args
 }
 
 /// exec fails if session doesn't exist.
@@ -406,7 +426,7 @@ fn exec_python_repl_basic() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
+        .args(python_start_args("py"))
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -437,7 +457,7 @@ fn exec_python_repl_exception() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
+        .args(python_start_args("py"))
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -464,7 +484,7 @@ fn exec_python_repl_cwd() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
+        .args(python_start_args("py"))
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -505,7 +525,7 @@ fn exec_python_not_inferred() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--", python_cmd(), "-i"])
+        .args(python_start_args_no_target("py"))
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -885,7 +905,7 @@ fn exec_python_result_file_cleaned() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
+        .args(python_start_args("py"))
         .assert()
         .success();
     harness::wait_running(&root, "py");
