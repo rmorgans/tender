@@ -216,6 +216,9 @@ fn run_exec(
     let framed = match meta.launch_spec().exec_target {
         ExecTarget::PosixShell => exec_frame::unix_frame(cmd, token),
         ExecTarget::PowerShell => exec_frame::powershell_frame(cmd, token),
+        ExecTarget::PythonRepl => {
+            anyhow::bail!("python-repl exec target not yet implemented")
+        }
         ExecTarget::None => {
             anyhow::bail!(
                 "session has no exec target — restart with --exec-target if this is a shell"

@@ -338,6 +338,7 @@ fn infer_exec_target(argv0: &str) -> ExecTarget {
     match stem {
         "bash" | "sh" | "zsh" | "dash" | "ash" => ExecTarget::PosixShell,
         "pwsh" | "powershell" => ExecTarget::PowerShell,
+        "python" | "python3" | "python2" => ExecTarget::PythonRepl,
         _ => ExecTarget::None,
     }
 }

@@ -37,6 +37,8 @@ pub enum ExecTarget {
     PosixShell,
     /// PowerShell (pwsh, powershell.exe). Uses powershell_frame.
     PowerShell,
+    /// Python REPL. Uses side-channel result files, supports PTY.
+    PythonRepl,
 }
 
 /// A dependency on another session's specific execution.

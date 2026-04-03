@@ -13,6 +13,9 @@ enum CliExecTarget {
     /// PowerShell (pwsh, powershell.exe)
     #[value(name = "powershell")]
     PowerShell,
+    /// Python REPL (python3, ipython)
+    #[value(name = "python-repl")]
+    PythonRepl,
     /// Exec not supported
     #[value(name = "none")]
     None,
@@ -23,6 +26,7 @@ impl From<CliExecTarget> for tender::model::spec::ExecTarget {
         match c {
             CliExecTarget::PosixShell => Self::PosixShell,
             CliExecTarget::PowerShell => Self::PowerShell,
+            CliExecTarget::PythonRepl => Self::PythonRepl,
             CliExecTarget::None => Self::None,
         }
     }
@@ -329,6 +333,7 @@ impl Commands {
                     args.extend(["--exec-target".to_string(), match et {
                         CliExecTarget::PosixShell => "posix-shell",
                         CliExecTarget::PowerShell => "powershell",
+                        CliExecTarget::PythonRepl => "python-repl",
                         CliExecTarget::None => "none",
                     }.to_string()]);
                 }
