@@ -87,6 +87,15 @@ struct ExecResult {
     truncated: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct SideChannelResult {
+    exit_code: i32,
+    cwd: String,
+    stdout: String,
+    stderr: String,
+    traceback: Option<String>,
+}
+
 pub fn cmd_exec(
     name: &str,
     cmd: Vec<String>,
@@ -105,8 +114,10 @@ pub fn cmd_exec(
         anyhow::bail!("session is not running");
     }
 
-    if meta.launch_spec().io_mode == tender::model::spec::IoMode::Pty {
-        anyhow::bail!("exec is not supported on PTY sessions");
+    if meta.launch_spec().io_mode == tender::model::spec::IoMode::Pty
+        && meta.launch_spec().exec_target != tender::model::spec::ExecTarget::PythonRepl
+    {
+        anyhow::bail!("exec is not supported on PTY sessions (except python-repl)");
     }
 
     if meta.launch_spec().stdin_mode != StdinMode::Pipe {
@@ -127,7 +138,21 @@ pub fn cmd_exec(
     // Hold the exec lock and drain until the sentinel arrives (or session dies)
     // to prevent a second exec from injecting into a busy shell.
     if result.timed_out {
-        drain_until_sentinel(&session, &token);
+        use tender::model::spec::ExecTarget;
+        match meta.launch_spec().exec_target {
+            ExecTarget::PosixShell | ExecTarget::PowerShell => {
+                drain_until_sentinel(&session, &token);
+            }
+            ExecTarget::PythonRepl => {
+                // Side-channel: clean up any stale result file, best-effort.
+                // The Python frame may still be running, but without a sentinel
+                // there's nothing to drain. The exec lock release is sufficient.
+                let result_path = session.path().join("exec-results").join(format!("{token}.json"));
+                let _ = std::fs::remove_file(&result_path);
+                let _ = std::fs::remove_file(result_path.with_extension("json.tmp"));
+            }
+            ExecTarget::None => {} // unreachable after earlier bail
+        }
     }
 
     // Write annotation event to output.log (bounded by MAX_LINE)
@@ -207,17 +232,24 @@ fn run_exec(
     let session_name = meta.session().as_str().to_string();
     let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
 
-    // 1. Capture log cursor
+    // 1. Capture log cursor (for sentinel path)
     let log_path = session.path().join("output.log");
     let cursor = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
     // 2. Frame the command according to the session's exec target.
     use tender::model::spec::ExecTarget;
-    let framed = match meta.launch_spec().exec_target {
-        ExecTarget::PosixShell => exec_frame::unix_frame(cmd, token),
-        ExecTarget::PowerShell => exec_frame::powershell_frame(cmd, token),
+    let (framed, use_side_channel) = match meta.launch_spec().exec_target {
+        ExecTarget::PosixShell => (exec_frame::unix_frame(cmd, token), false),
+        ExecTarget::PowerShell => (exec_frame::powershell_frame(cmd, token), false),
         ExecTarget::PythonRepl => {
-            anyhow::bail!("python-repl exec target not yet implemented")
+            // Ensure exec-results dir exists
+            let results_dir = session.path().join("exec-results");
+            std::fs::create_dir_all(&results_dir)?;
+            let result_path = results_dir.join(format!("{token}.json"));
+            let result_path_str = result_path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("session path is not valid UTF-8"))?;
+            let code = cmd.join("\n");
+            (exec_frame::python_frame(&code, result_path_str), true)
         }
         ExecTarget::None => {
             anyhow::bail!(
@@ -250,6 +282,24 @@ fn run_exec(
     writer.write_all(framed.as_bytes())?;
     drop(writer);
 
+    // 4. Wait for result
+    if use_side_channel {
+        wait_side_channel_result(session, &session_name, token, deadline)
+    } else {
+        wait_sentinel_result(session, &session_name, token, cursor, deadline)
+    }
+}
+
+/// Scan output.log for the sentinel line (PosixShell, PowerShell).
+fn wait_sentinel_result(
+    session: &SessionDir,
+    session_name: &str,
+    token: &str,
+    cursor: u64,
+    deadline: Option<Instant>,
+) -> anyhow::Result<ExecResult> {
+    let log_path = session.path().join("output.log");
+
     let mut stdout_lines: Vec<String> = Vec::new();
     let mut stderr_lines: Vec<String> = Vec::new();
 
@@ -258,7 +308,7 @@ fn run_exec(
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
                 return Ok(ExecResult {
-                    session: session_name,
+                    session: session_name.to_string(),
                     stdout: String::new(),
                     stderr: String::new(),
                     exit_code: -1,
@@ -281,7 +331,7 @@ fn run_exec(
         if let Some(dl) = deadline {
             if Instant::now() >= dl {
                 return Ok(ExecResult {
-                    session: session_name,
+                    session: session_name.to_string(),
                     stdout: stdout_lines.join("\n"),
                     stderr: stderr_lines.join("\n"),
                     exit_code: -1,
@@ -317,7 +367,7 @@ fn run_exec(
                     .and_then(|content| exec_frame::parse_sentinel(content, token))
                 {
                     return Ok(ExecResult {
-                        session: session_name,
+                        session: session_name.to_string(),
                         stdout: stdout_lines.join("\n"),
                         stderr: stderr_lines.join("\n"),
                         exit_code,
@@ -339,6 +389,64 @@ fn run_exec(
                 // Skip annotations and other tags
             }
         }
+    }
+}
+
+/// Poll for a side-channel result file written by the Python frame.
+fn wait_side_channel_result(
+    session: &SessionDir,
+    session_name: &str,
+    token: &str,
+    deadline: Option<Instant>,
+) -> anyhow::Result<ExecResult> {
+    let result_path = session.path().join("exec-results").join(format!("{token}.json"));
+
+    loop {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                return Ok(ExecResult {
+                    session: session_name.to_string(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: -1,
+                    cwd_after: String::new(),
+                    timed_out: true,
+                    truncated: false,
+                });
+            }
+        }
+
+        if result_path.exists() {
+            let content = std::fs::read_to_string(&result_path)?;
+            let _ = std::fs::remove_file(&result_path); // Clean up
+            let sc: SideChannelResult = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("invalid side-channel result: {e}"))?;
+
+            let mut stderr = sc.stderr;
+            if let Some(tb) = sc.traceback {
+                if !stderr.is_empty() {
+                    stderr.push('\n');
+                }
+                stderr.push_str(&tb);
+            }
+
+            return Ok(ExecResult {
+                session: session_name.to_string(),
+                stdout: sc.stdout,
+                stderr,
+                exit_code: sc.exit_code,
+                cwd_after: sc.cwd,
+                timed_out: false,
+                truncated: false,
+            });
+        }
+
+        // Check session is still alive
+        let current = session::read_meta(session)?;
+        if !matches!(current.status(), RunStatus::Running { .. }) {
+            anyhow::bail!("session exited while waiting for exec result");
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
