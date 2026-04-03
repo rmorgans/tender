@@ -95,8 +95,10 @@ fn exec_basic_command() {
     assert!(result["stdout"].as_str().unwrap().contains("hello world"));
     assert!(!result["timed_out"].as_bool().unwrap());
     let cwd = result["cwd_after"].as_str().unwrap();
+    // Git Bash on Windows returns MSYS paths like /c/Users/... which
+    // Path::is_absolute() doesn't recognise on Windows. Accept both styles.
     assert!(
-        std::path::Path::new(cwd).is_absolute(),
+        std::path::Path::new(cwd).is_absolute() || cwd.starts_with('/'),
         "cwd_after should be absolute, got: {cwd}"
     );
 
