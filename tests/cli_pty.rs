@@ -208,3 +208,76 @@ fn push_to_pty_session_delivers_input() {
 
     tender(&root).args(["kill", "pty-push"]).output().ok();
 }
+
+/// Python REPL exec works on PTY sessions.
+#[test]
+fn exec_python_pty() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args([
+            "start",
+            "py-pty",
+            "--stdin",
+            "--pty",
+            "--exec-target",
+            "python-repl",
+            "--",
+            "python3",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "py-pty");
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    let output = tender(&root)
+        .args(["exec", "py-pty", "--timeout", "10", "--", "print('pty hello')"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert!(result["stdout"].as_str().unwrap().contains("pty hello"));
+
+    let _ = tender(&root)
+        .args(["kill", "py-pty", "--force"])
+        .assert();
+}
+
+/// PTY exec is still rejected for shell targets.
+#[test]
+fn exec_pty_still_rejected_for_shells() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args([
+            "start",
+            "pty-shell",
+            "--stdin",
+            "--pty",
+            "--exec-target",
+            "posix-shell",
+            "--",
+            "bash",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "pty-shell");
+
+    tender(&root)
+        .args(["exec", "pty-shell", "--", "echo", "test"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not supported on PTY"));
+
+    let _ = tender(&root)
+        .args(["kill", "pty-shell", "--force"])
+        .assert();
+}
