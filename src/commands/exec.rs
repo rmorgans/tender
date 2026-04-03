@@ -523,9 +523,15 @@ fn drain_until_side_channel(session: &SessionDir, token: &str) {
     }
 }
 
-/// After the sentinel has been found, briefly re-scan the log for any 'E' (stderr)
-/// lines that arrived after the sentinel due to pipe read ordering. Waits up to
-/// 100ms for trailing lines to appear, then returns any stderr content found.
+/// After the sentinel has been found, re-scan the log for any 'E' (stderr)
+/// lines that arrived after the sentinel.
+///
+/// The sidecar reads stdout and stderr from separate pipes on separate threads,
+/// writing both to output.log with 'O' and 'E' tags. Line ordering between
+/// tags is not guaranteed: a child can write to stderr and then stdout nearly
+/// simultaneously, and the sidecar may flush the stdout ('O') sentinel line
+/// to the log before the stderr ('E') error line. This function accommodates
+/// that race by waiting up to 100ms after the sentinel for trailing stderr.
 fn drain_trailing_stderr(session: &SessionDir, cursor: u64) -> String {
     let log_path = session.path().join("output.log");
     let Ok(file) = std::fs::File::open(&log_path) else {
