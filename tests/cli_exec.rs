@@ -286,3 +286,82 @@ fn exec_concurrent_busy() {
         .args(["kill", "shell", "--force"])
         .assert();
 }
+
+/// exec with explicit --exec-target posix-shell.
+#[test]
+fn exec_explicit_posix_target() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--exec-target", "posix-shell", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "explicit"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert!(result["stdout"].as_str().unwrap().contains("explicit"));
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// exec on a session with no exec target fails with clear message.
+#[test]
+fn exec_none_target_rejected() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+    // sleep is not a shell — infers ExecTarget::None
+    harness::tender(&root)
+        .args(["start", "sleeper", "--stdin", "--", "sleep", "60"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "sleeper");
+
+    harness::tender(&root)
+        .args(["exec", "sleeper", "--", "echo", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no exec target"));
+
+    let _ = harness::tender(&root).args(["kill", "sleeper", "--force"]).assert();
+}
+
+/// bash infers PosixShell, exec works without --exec-target.
+#[test]
+fn exec_infers_posix_from_bash() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "inferred"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["stdout"].as_str().unwrap().contains("inferred"));
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// Invalid --exec-target value fails at start (clap rejects it).
+#[test]
+fn start_invalid_exec_target() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--exec-target", "fish", "--", "bash"])
+        .assert()
+        .failure();
+}
