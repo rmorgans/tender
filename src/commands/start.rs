@@ -338,6 +338,7 @@ fn infer_exec_target(argv0: &str) -> ExecTarget {
     match stem {
         "bash" | "sh" | "zsh" | "dash" | "ash" => ExecTarget::PosixShell,
         "pwsh" | "powershell" => ExecTarget::PowerShell,
+        "duckdb" => ExecTarget::DuckDb,
         // Python is not inferred — pipe mode requires `-i` flag to work as a
         // REPL, and PTY mode works but the user should opt in explicitly.
         // Use --exec-target python-repl.

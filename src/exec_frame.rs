@@ -63,6 +63,29 @@ fn powershell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "''"))
 }
 
+/// Build a framed SQL exec string for injection into a DuckDB session.
+///
+/// Results flow through stdout (`.mode json`) and are captured in the output
+/// log, just like shell exec. No `.output` file redirection — that dot-command
+/// has path-escaping fragility that breaks on Windows backslashes and paths
+/// with spaces.
+///
+/// We deliberately do NOT use `.bail on` — it would exit the DuckDB process
+/// on error, killing the session. Errors are detected from stderr lines in
+/// the output log. The sentinel always fires with exit code 0; the caller
+/// must check stderr to detect failures.
+///
+/// Token must be hex-only (as produced by `generate_token`).
+pub fn duckdb_frame(sql: &str, token: &str) -> String {
+    debug_assert!(
+        token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "token must be hex-only, got: {token}"
+    );
+    format!(
+        ".mode json\n.nullvalue null\n{sql}\n.print __TENDER_EXEC__ {token} 0 .\n"
+    )
+}
+
 /// Parse a sentinel line, extracting exit code and cwd.
 /// Returns None if the line is not a sentinel or token doesn't match.
 pub fn parse_sentinel(line: &str, expected_token: &str) -> Option<(i32, String)> {
@@ -196,6 +219,35 @@ mod tests {
         let frame = python_frame("print(1)", r"C:\Users\test\exec-results\abc.json");
         assert!(!frame.contains(r"C:\Users")); // path must not appear raw
         assert!(frame.contains("b64decode"));
+    }
+
+    #[test]
+    fn duckdb_frame_basic_query() {
+        let frame = duckdb_frame("SELECT 42 as answer;", "abc123");
+        assert!(frame.starts_with(".mode json\n"));
+        assert!(!frame.contains(".bail on"), "frame must not use .bail on — it kills the session");
+        assert!(!frame.contains(".output"), "frame must not use .output — path escaping is fragile");
+        assert!(frame.contains(".nullvalue null\n"));
+        assert!(frame.contains("SELECT 42 as answer;\n"));
+        assert!(frame.contains("__TENDER_EXEC__ abc123 0 .\n"));
+        assert!(frame.ends_with('\n'));
+    }
+
+    #[test]
+    fn duckdb_frame_multi_statement() {
+        let sql = "SELECT 1;\nSELECT 2;";
+        let frame = duckdb_frame(sql, "def456");
+        assert!(frame.contains("SELECT 1;\nSELECT 2;\n"));
+        assert!(frame.contains("__TENDER_EXEC__ def456 0 ."));
+    }
+
+    #[test]
+    fn duckdb_sentinel_parses_with_dot_cwd() {
+        let result = parse_sentinel("__TENDER_EXEC__ abc123 0 .", "abc123");
+        assert!(result.is_some());
+        let (exit_code, cwd) = result.unwrap();
+        assert_eq!(exit_code, 0);
+        assert_eq!(cwd, ".");
     }
 
     #[test]

@@ -120,6 +120,12 @@ pub fn cmd_exec(
         anyhow::bail!("exec is not supported on PTY sessions (except python-repl)");
     }
 
+    if meta.launch_spec().exec_target == tender::model::spec::ExecTarget::DuckDb
+        && meta.launch_spec().io_mode == tender::model::spec::IoMode::Pty
+    {
+        anyhow::bail!("DuckDB exec requires pipe transport, not PTY");
+    }
+
     if meta.launch_spec().stdin_mode != StdinMode::Pipe {
         anyhow::bail!("session was not started with --stdin");
     }
@@ -148,6 +154,10 @@ pub fn cmd_exec(
                 // until the result file appears (frame finished) or the session
                 // dies, to prevent a second exec from interleaving.
                 drain_until_side_channel(&session, &token);
+            }
+            ExecTarget::DuckDb => {
+                // DuckDB results flow through stdout — drain sentinel same as shells.
+                drain_until_sentinel(&session, &token);
             }
             ExecTarget::None => {} // unreachable after earlier bail
         }
@@ -236,9 +246,22 @@ fn run_exec(
 
     // 2. Frame the command according to the session's exec target.
     use tender::model::spec::ExecTarget;
-    let (framed, use_side_channel) = match meta.launch_spec().exec_target {
-        ExecTarget::PosixShell => (exec_frame::unix_frame(cmd, token), false),
-        ExecTarget::PowerShell => (exec_frame::powershell_frame(cmd, token), false),
+
+    enum WaitMode {
+        /// Shell-style: sentinel in stdout, results in stdout/stderr log lines.
+        Sentinel,
+        /// Like Sentinel, but after finding the sentinel, drain trailing stderr
+        /// and set exit_code=1 if any stderr was captured. DuckDB's sentinel
+        /// hardcodes exit code 0 (SQL has no $?), so errors must be detected
+        /// from stderr presence.
+        SentinelWithStderrCheck,
+        /// Python-style: poll for a result file written atomically by the frame.
+        SideChannel,
+    }
+
+    let (framed, wait_mode) = match meta.launch_spec().exec_target {
+        ExecTarget::PosixShell => (exec_frame::unix_frame(cmd, token), WaitMode::Sentinel),
+        ExecTarget::PowerShell => (exec_frame::powershell_frame(cmd, token), WaitMode::Sentinel),
         ExecTarget::PythonRepl => {
             // Ensure exec-results dir exists
             let results_dir = session.path().join("exec-results");
@@ -247,7 +270,11 @@ fn run_exec(
             let result_path_str = result_path.to_str()
                 .ok_or_else(|| anyhow::anyhow!("session path is not valid UTF-8"))?;
             let code = cmd.join("\n");
-            (exec_frame::python_frame(&code, result_path_str), true)
+            (exec_frame::python_frame(&code, result_path_str), WaitMode::SideChannel)
+        }
+        ExecTarget::DuckDb => {
+            let sql = cmd.join("\n");
+            (exec_frame::duckdb_frame(&sql, token), WaitMode::SentinelWithStderrCheck)
         }
         ExecTarget::None => {
             anyhow::bail!(
@@ -281,10 +308,36 @@ fn run_exec(
     drop(writer);
 
     // 4. Wait for result
-    if use_side_channel {
-        wait_side_channel_result(session, &session_name, token, deadline)
-    } else {
-        wait_sentinel_result(session, &session_name, token, cursor, deadline)
+    match wait_mode {
+        WaitMode::SideChannel => {
+            wait_side_channel_result(session, &session_name, token, deadline)
+        }
+        WaitMode::Sentinel => {
+            wait_sentinel_result(session, &session_name, token, cursor, deadline)
+        }
+        WaitMode::SentinelWithStderrCheck => {
+            let mut result = wait_sentinel_result(session, &session_name, token, cursor, deadline)?;
+
+            // DuckDB's sentinel hardcodes exit code 0 (SQL has no $?).
+            // Detect errors from stderr. Stderr lines may arrive in the log
+            // after the sentinel due to pipe read ordering, so always drain
+            // trailing stderr to catch races and partial-success cases
+            // (e.g. "SELECT 1; SELECT * FROM bad;").
+            let trailing_stderr = drain_trailing_stderr(session, cursor);
+            if !trailing_stderr.is_empty() {
+                if result.stderr.is_empty() {
+                    result.stderr = trailing_stderr;
+                } else {
+                    result.stderr.push('\n');
+                    result.stderr.push_str(&trailing_stderr);
+                }
+            }
+            if !result.stderr.is_empty() {
+                result.exit_code = 1;
+            }
+
+            Ok(result)
+        }
     }
 }
 
@@ -468,6 +521,66 @@ fn drain_until_side_channel(session: &SessionDir, token: &str) {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// After the sentinel has been found, briefly re-scan the log for any 'E' (stderr)
+/// lines that arrived after the sentinel due to pipe read ordering. Waits up to
+/// 100ms for trailing lines to appear, then returns any stderr content found.
+fn drain_trailing_stderr(session: &SessionDir, cursor: u64) -> String {
+    let log_path = session.path().join("output.log");
+    let Ok(file) = std::fs::File::open(&log_path) else {
+        return String::new();
+    };
+    let mut reader = BufReader::new(file);
+    let _ = reader.seek(SeekFrom::Start(cursor));
+
+    let mut stderr_lines: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut saw_sentinel = false;
+
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                if saw_sentinel {
+                    // Already past the sentinel and no more data — give a small
+                    // window for stderr to arrive, then stop.
+                    std::thread::sleep(Duration::from_millis(20));
+                    buf.clear();
+                    if reader.read_line(&mut buf).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    // Fall through to parse the line
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+        if let Ok(parsed) = serde_json::from_str::<LogLine>(trimmed) {
+            match parsed.tag.as_str() {
+                "O" if parsed.content_text().is_some_and(|c| c.contains("__TENDER_EXEC__")) => {
+                    saw_sentinel = true;
+                }
+                "E" if saw_sentinel => {
+                    if let Some(content) = parsed.content_text() {
+                        stderr_lines.push(content.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    stderr_lines.join("\n")
 }
 
 /// After a timeout, drain output.log until the sentinel arrives or the session dies.

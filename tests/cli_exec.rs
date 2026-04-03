@@ -497,6 +497,364 @@ fn exec_python_not_inferred() {
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
 
+/// DuckDB inferred from argv[0].
+#[test]
+fn exec_infers_duckdb() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "db", "--stdin", "--", "duckdb"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Verify the session was created with DuckDb exec target
+    let status_output = harness::tender(&root)
+        .args(["status", "db"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(
+        status["launch_spec"]["exec_target"].as_str(),
+        Some("DuckDb")
+    );
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec: basic SELECT query returns structured JSON in stdout.
+#[test]
+fn exec_duckdb_basic_select() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args([
+            "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args([
+            "exec", "db", "--timeout", "10", "--", "SELECT 42 as answer;",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert!(!result["timed_out"].as_bool().unwrap());
+    assert_eq!(result["cwd_after"].as_str(), Some("."));
+
+    // Query results flow through stdout (captured from the output log)
+    let stdout = result["stdout"].as_str().expect("stdout should be present");
+    assert!(
+        stdout.contains("42"),
+        "stdout should contain query result with 42, got: {stdout}"
+    );
+
+    // No exec-results directory — DuckDB doesn't use side-channel files
+    let results_dir = root
+        .path()
+        .join(".tender/sessions/default/db/exec-results");
+    assert!(
+        !results_dir.exists(),
+        "exec-results/ should not exist for DuckDB"
+    );
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec: SQL error reports exit_code 1 but keeps the session alive.
+#[test]
+fn exec_duckdb_sql_error() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args([
+            "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Invalid SQL — error goes to stderr, sentinel still fires, exit_code = 1.
+    let output = harness::tender(&root)
+        .args([
+            "exec",
+            "db",
+            "--timeout",
+            "10",
+            "--",
+            "SELECT * FROM nonexistent_table_xyz;",
+        ])
+        .output()
+        .unwrap();
+
+    // tender exec mirrors the inner exit code — exits 1 on SQL error.
+    // JSON result is still printed to stdout.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "tender exec should exit 1 (mirroring SQL error)"
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("stdout should contain JSON result even on error");
+    assert_eq!(result["exit_code"].as_i64(), Some(1));
+    assert!(!result["timed_out"].as_bool().unwrap());
+    let stderr = result["stderr"].as_str().unwrap_or("");
+    assert!(
+        stderr.contains("nonexistent_table_xyz"),
+        "stderr should contain the error table name, got: {stderr}"
+    );
+
+    // Session should still be running — errors don't kill DuckDB
+    harness::tender(&root)
+        .args(["status", "db"])
+        .assert()
+        .success();
+
+    // Verify the session can still handle another query after error
+    let output2 = harness::tender(&root)
+        .args([
+            "exec", "db", "--timeout", "10", "--", "SELECT 'recovered' as status;",
+        ])
+        .output()
+        .unwrap();
+    assert!(output2.status.success());
+    let result2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
+    assert_eq!(result2["exit_code"].as_i64(), Some(0));
+    let stdout2 = result2["stdout"].as_str().unwrap_or("");
+    assert!(
+        stdout2.contains("recovered"),
+        "second query should succeed after error: {stdout2}"
+    );
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec: multiple statements produce concatenated results.
+#[test]
+fn exec_duckdb_multi_statement() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args([
+            "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args([
+            "exec",
+            "db",
+            "--timeout",
+            "10",
+            "--",
+            "SELECT 1 as a;\nSELECT 2 as b;",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+
+    // Both query results should be in stdout
+    let stdout = result["stdout"].as_str().expect("stdout should be present");
+    assert!(stdout.contains('1'), "stdout should contain first query result");
+    assert!(stdout.contains('2'), "stdout should contain second query result");
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec with explicit --exec-target duckdb.
+#[test]
+fn exec_duckdb_explicit_target() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args([
+            "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args([
+            "exec",
+            "db",
+            "--timeout",
+            "10",
+            "--",
+            "SELECT 'hello' as greeting;",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec: mixed success — first statement succeeds, second fails.
+/// Must report exit_code 1 even though stdout has partial results.
+#[test]
+fn exec_duckdb_mixed_success_reports_error() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args([
+            "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+        ])
+        .assert()
+        .success();
+    harness::wait_running(&root, "db");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args([
+            "exec",
+            "db",
+            "--timeout",
+            "10",
+            "--",
+            "SELECT 1 as ok;\nSELECT * FROM nonexistent_table_xyz;",
+        ])
+        .output()
+        .unwrap();
+
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("stdout should contain JSON result");
+    assert_eq!(
+        result["exit_code"].as_i64(),
+        Some(1),
+        "mixed success should report exit_code 1"
+    );
+    // stdout should still have the first query's results
+    let stdout = result["stdout"].as_str().unwrap_or("");
+    assert!(stdout.contains('1'), "stdout should contain first query result: {stdout}");
+    // stderr should have the error from the second query
+    let stderr = result["stderr"].as_str().unwrap_or("");
+    assert!(
+        stderr.contains("nonexistent_table_xyz"),
+        "stderr should contain the error: {stderr}"
+    );
+
+    // Session should still be alive
+    harness::tender(&root)
+        .args(["status", "db"])
+        .assert()
+        .success();
+
+    let _ = harness::tender(&root)
+        .args(["kill", "db", "--force"])
+        .assert();
+}
+
+/// DuckDB exec: paths with spaces work correctly (no .output path escaping needed).
+#[test]
+fn exec_duckdb_path_with_spaces() {
+    let _lock = lock();
+    // Create a temp dir whose path includes spaces
+    let parent = tempfile::TempDir::new().unwrap();
+    let spaced_dir = parent.path().join("path with spaces");
+    std::fs::create_dir_all(&spaced_dir).unwrap();
+
+    // Use the spaced directory as HOME so session paths contain spaces
+    let mut cmd = assert_cmd::Command::cargo_bin("tender").unwrap();
+    cmd.env("HOME", &spaced_dir);
+    cmd.args([
+        "start", "db", "--stdin", "--exec-target", "duckdb", "--", "duckdb",
+    ]);
+    cmd.assert().success();
+
+    // Wait for running
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut status_cmd = assert_cmd::Command::cargo_bin("tender").unwrap();
+        status_cmd.env("HOME", &spaced_dir);
+        status_cmd.args(["status", "db"]);
+        let out = status_cmd.output().unwrap();
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("Running") {
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for db to start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut exec_cmd = assert_cmd::Command::cargo_bin("tender").unwrap();
+    exec_cmd.env("HOME", &spaced_dir);
+    exec_cmd.args([
+        "exec", "db", "--timeout", "10", "--", "SELECT 42 as answer;",
+    ]);
+    let output = exec_cmd.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec with spaces in path failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    let stdout = result["stdout"].as_str().unwrap_or("");
+    assert!(
+        stdout.contains("42"),
+        "stdout should contain query result: {stdout}"
+    );
+
+    let mut kill_cmd = assert_cmd::Command::cargo_bin("tender").unwrap();
+    kill_cmd.env("HOME", &spaced_dir);
+    kill_cmd.args(["kill", "db", "--force"]);
+    let _ = kill_cmd.output();
+}
+
 /// Side-channel result file is cleaned up after exec.
 #[test]
 fn exec_python_result_file_cleaned() {

@@ -39,6 +39,8 @@ pub enum ExecTarget {
     PowerShell,
     /// Python REPL. Uses side-channel result files, supports PTY.
     PythonRepl,
+    /// DuckDB SQL. JSON results via stdout, sentinel completion, pipe transport.
+    DuckDb,
 }
 
 /// A dependency on another session's specific execution.

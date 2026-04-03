@@ -28,3 +28,22 @@ fn launch_spec_python_repl_deserializes() {
         tender::model::spec::ExecTarget::PythonRepl
     );
 }
+
+#[test]
+fn launch_spec_duckdb_deserializes() {
+    let json = r#"{"argv":["duckdb"],"stdin_mode":"Pipe","exec_target":"DuckDb"}"#;
+    let spec: tender::model::spec::LaunchSpec = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        spec.exec_target,
+        tender::model::spec::ExecTarget::DuckDb
+    );
+}
+
+#[test]
+fn launch_spec_duckdb_serializes() {
+    let mut spec = tender::model::spec::LaunchSpec::new(vec!["duckdb".into()]).unwrap();
+    spec.exec_target = tender::model::spec::ExecTarget::DuckDb;
+    spec.stdin_mode = tender::model::spec::StdinMode::Pipe;
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(json.contains("\"DuckDb\""), "json: {json}");
+}

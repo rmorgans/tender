@@ -16,6 +16,9 @@ enum CliExecTarget {
     /// Python REPL (python3, ipython)
     #[value(name = "python-repl")]
     PythonRepl,
+    /// DuckDB SQL
+    #[value(name = "duckdb")]
+    DuckDb,
     /// Exec not supported
     #[value(name = "none")]
     None,
@@ -27,6 +30,7 @@ impl From<CliExecTarget> for tender::model::spec::ExecTarget {
             CliExecTarget::PosixShell => Self::PosixShell,
             CliExecTarget::PowerShell => Self::PowerShell,
             CliExecTarget::PythonRepl => Self::PythonRepl,
+            CliExecTarget::DuckDb => Self::DuckDb,
             CliExecTarget::None => Self::None,
         }
     }
@@ -334,6 +338,7 @@ impl Commands {
                         CliExecTarget::PosixShell => "posix-shell",
                         CliExecTarget::PowerShell => "powershell",
                         CliExecTarget::PythonRepl => "python-repl",
+                        CliExecTarget::DuckDb => "duckdb",
                         CliExecTarget::None => "none",
                     }.to_string()]);
                 }
