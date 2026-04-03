@@ -1,7 +1,6 @@
 ---
 id: duckdb-exec
-depends_on:
-  - explicit-exec-targets
+depends_on: []
 links: []
 ---
 

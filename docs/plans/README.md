@@ -15,7 +15,7 @@ No active plans. See backlog for next candidates.
 | ID | File | Depends On |
 |----|------|------------|
 | agent-exec-spike | `agent-exec-spike.md` | — |
-| duckdb-exec | `duckdb-exec.md` | explicit-exec-targets (complete) |
+| duckdb-exec | `duckdb-exec.md` | — |
 | pty-session-mode | `pty-session-mode.md` | — |
 | fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
 | pty-automation | `pty-automation.md` | pty-session-mode |
