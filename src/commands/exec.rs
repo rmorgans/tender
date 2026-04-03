@@ -211,13 +211,16 @@ fn run_exec(
     let log_path = session.path().join("output.log");
     let cursor = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
-    // 2. Frame the command according to the session shell.
-    let framed = match shell_kind(meta) {
-        ShellKind::PowerShell => exec_frame::powershell_frame(cmd, token),
-        ShellKind::Cmd => {
-            anyhow::bail!("exec does not support cmd.exe sessions; use PowerShell or a POSIX shell")
+    // 2. Frame the command according to the session's exec target.
+    use tender::model::spec::ExecTarget;
+    let framed = match meta.launch_spec().exec_target {
+        ExecTarget::PosixShell => exec_frame::unix_frame(cmd, token),
+        ExecTarget::PowerShell => exec_frame::powershell_frame(cmd, token),
+        ExecTarget::None => {
+            anyhow::bail!(
+                "session has no exec target — restart with --exec-target if this is a shell"
+            )
         }
-        ShellKind::AssumedPosix => exec_frame::unix_frame(cmd, token),
     };
 
     // 3. Send through stdin transport (with retry on ConnectionRefused)
@@ -382,66 +385,3 @@ fn drain_until_sentinel(session: &SessionDir, token: &str) {
     }
 }
 
-/// Shell family for exec framing. Determined by sniffing argv[0] of the
-/// session's launch spec. Non-PowerShell, non-cmd.exe sessions are treated
-/// as POSIX-compatible by heuristic — not guaranteed for fish, nu, etc.
-/// If this becomes a real problem, the fix is storing an explicit shell
-/// family in LaunchSpec at session start instead of sniffing at exec time.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ShellKind {
-    PowerShell,
-    Cmd,
-    AssumedPosix,
-}
-
-fn shell_kind(meta: &tender::model::meta::Meta) -> ShellKind {
-    shell_kind_from_argv0(meta.launch_spec().argv().first().map(|s| s.as_str()))
-}
-
-fn shell_kind_from_argv0(argv0: Option<&str>) -> ShellKind {
-    let Some(argv0) = argv0 else {
-        return ShellKind::AssumedPosix;
-    };
-    let lower = argv0.to_lowercase();
-    if lower.contains("powershell") || lower.contains("pwsh") {
-        ShellKind::PowerShell
-    } else if lower.ends_with("cmd.exe") || lower == "cmd" || lower.ends_with("\\cmd") {
-        ShellKind::Cmd
-    } else {
-        ShellKind::AssumedPosix
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ShellKind, shell_kind_from_argv0};
-
-    #[test]
-    fn detects_powershell_shells() {
-        assert_eq!(
-            shell_kind_from_argv0(Some("powershell.exe")),
-            ShellKind::PowerShell
-        );
-        assert_eq!(
-            shell_kind_from_argv0(Some(r"C:\Program Files\PowerShell\7\pwsh.exe")),
-            ShellKind::PowerShell
-        );
-    }
-
-    #[test]
-    fn detects_cmd_shells() {
-        assert_eq!(shell_kind_from_argv0(Some("cmd")), ShellKind::Cmd);
-        assert_eq!(shell_kind_from_argv0(Some("cmd.exe")), ShellKind::Cmd);
-        assert_eq!(
-            shell_kind_from_argv0(Some(r"C:\Windows\System32\cmd.exe")),
-            ShellKind::Cmd
-        );
-    }
-
-    #[test]
-    fn leaves_other_shells_alone() {
-        assert_eq!(shell_kind_from_argv0(Some("bash")), ShellKind::AssumedPosix);
-        assert_eq!(shell_kind_from_argv0(Some("zsh")), ShellKind::AssumedPosix);
-        assert_eq!(shell_kind_from_argv0(None), ShellKind::AssumedPosix);
-    }
-}
