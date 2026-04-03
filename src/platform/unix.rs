@@ -274,6 +274,10 @@ impl Platform for UnixPlatform {
         }
     }
 
+    fn pty_resize_fd(child: &SupervisedChild) -> Option<File> {
+        child.pty_master_write.as_ref().and_then(|f| f.try_clone().ok())
+    }
+
     fn child_kill_handle(child: &SupervisedChild) -> ChildKillHandle {
         ChildKillHandle {
             identity: child.identity,

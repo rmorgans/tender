@@ -221,6 +221,10 @@ impl Platform for WindowsPlatform {
             .map(|s| Box::new(s) as Box<dyn io::Write + Send>)
     }
 
+    fn pty_resize_fd(_child: &SupervisedChild) -> Option<File> {
+        None // No PTY support on Windows in slice one
+    }
+
     fn child_kill_handle(child: &SupervisedChild) -> ChildKillHandle {
         ChildKillHandle {
             identity: child.identity,

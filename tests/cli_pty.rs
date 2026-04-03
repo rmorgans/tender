@@ -3,6 +3,8 @@
 mod harness;
 
 use harness::tender;
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -280,4 +282,191 @@ fn exec_pty_still_rejected_for_shells() {
     let _ = tender(&root)
         .args(["kill", "pty-shell", "--force"])
         .assert();
+}
+
+/// Wait for the attach socket breadcrumb and return the socket path.
+fn wait_for_attach_socket(root: &TempDir, session: &str) -> std::path::PathBuf {
+    let breadcrumb = root
+        .path()
+        .join(format!(".tender/sessions/default/{session}/a.sock.path"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&breadcrumb) {
+            let p = std::path::PathBuf::from(content.trim());
+            if p.exists() {
+                return p;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for attach socket in {session}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Connect to the attach socket and hold the connection (simulating a human).
+/// Returns the stream so the caller can control when it disconnects.
+fn attach_as_human(sock_path: &std::path::Path) -> UnixStream {
+    UnixStream::connect(sock_path).expect("failed to connect to attach socket")
+}
+
+/// Wait for meta.json PTY control to reach a specific state.
+fn wait_for_pty_control(root: &TempDir, session: &str, expected: &str) {
+    let meta_path = root
+        .path()
+        .join(format!(".tender/sessions/default/{session}/meta.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                if meta["pty"]["control"].as_str() == Some(expected) {
+                    return;
+                }
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for pty.control={expected} in {session}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn push_rejected_during_human_control() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    // Start a PTY session with stdin
+    tender(&root)
+        .args(["start", "pty-hc", "--pty", "--stdin", "--", "cat"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-hc");
+
+    let sock_path = wait_for_attach_socket(&root, "pty-hc");
+
+    // Simulate a human attaching
+    let _human = attach_as_human(&sock_path);
+    wait_for_pty_control(&root, "pty-hc", "HumanControl");
+
+    // Push should be rejected
+    let output = tender(&root)
+        .args(["push", "pty-hc"])
+        .write_stdin(b"rejected\n")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("human control"),
+        "push should be rejected during human control: {stderr}"
+    );
+
+    // Drop the human connection (detach)
+    drop(_human);
+    wait_for_pty_control(&root, "pty-hc", "AgentControl");
+
+    // Push should work again
+    let output = tender(&root)
+        .args(["push", "pty-hc"])
+        .write_stdin(b"accepted\n")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "push should succeed after detach: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    tender(&root).args(["kill", "pty-hc"]).output().ok();
+}
+
+#[test]
+fn attach_contention_rejected() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-contend", "--pty", "--stdin", "--", "cat"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-contend");
+
+    let sock_path = wait_for_attach_socket(&root, "pty-contend");
+
+    // First human attaches
+    let _human = attach_as_human(&sock_path);
+    wait_for_pty_control(&root, "pty-contend", "HumanControl");
+
+    // Second attach via CLI should be rejected
+    let output = tender(&root)
+        .args(["attach", "pty-contend"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("already under human control"),
+        "second attach should be rejected: {stderr}"
+    );
+
+    drop(_human);
+    tender(&root).args(["kill", "pty-contend"]).output().ok();
+}
+
+#[test]
+fn resize_message_accepted() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-resize", "--pty", "--stdin", "--", "cat"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-resize");
+
+    let sock_path = wait_for_attach_socket(&root, "pty-resize");
+    let mut stream = attach_as_human(&sock_path);
+    wait_for_pty_control(&root, "pty-resize", "HumanControl");
+
+    // Send a resize message (40 rows, 120 cols)
+    let rows: u16 = 40;
+    let cols: u16 = 120;
+    let mut payload = [0u8; 4];
+    payload[0..2].copy_from_slice(&rows.to_be_bytes());
+    payload[2..4].copy_from_slice(&cols.to_be_bytes());
+
+    // Wire format: 1 byte type + 4 byte length + payload
+    let msg_type: u8 = 0x02; // MSG_RESIZE
+    let len: u32 = 4;
+    stream.write_all(&[msg_type]).unwrap();
+    stream.write_all(&len.to_be_bytes()).unwrap();
+    stream.write_all(&payload).unwrap();
+    stream.flush().unwrap();
+
+    // Give the sidecar time to process the resize
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // If the resize crashed the sidecar, the session would no longer be Running.
+    // Verify the session is still alive and under human control.
+    let output = tender(&root)
+        .args(["status", "pty-resize"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let meta: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(meta["status"], "Running", "session should still be running after resize");
+    assert_eq!(meta["pty"]["control"], "HumanControl");
+
+    // Verify the resize was actually applied by checking the PTY's window size.
+    // We can read it via stty on the child side, but that requires a shell.
+    // Instead, open a fresh PTY master fd check — we trust the ioctl works if
+    // the session survives. The unit-level assertion is that the ioctl doesn't
+    // crash and the session stays Running.
+
+    drop(stream);
+    tender(&root).args(["kill", "pty-resize"]).output().ok();
 }

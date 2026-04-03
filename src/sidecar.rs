@@ -553,6 +553,13 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     // --- Stdin forwarding (conditional) ---
     let stdin_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Get a dup'd fd for PTY resize before child_stdin takes the write half.
+    let mut pty_resize_fd: Option<std::fs::File> = if is_pty {
+        Current::pty_resize_fd(&child)
+    } else {
+        None
+    };
+
     // For PTY sessions: wrap the write side in Arc<Mutex> for shared access.
     // Both the FIFO forwarding thread and the future attach listener need to
     // write to the PTY master.
@@ -583,12 +590,14 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         let pty_write_clone = pty_write_handle.as_ref().unwrap().clone();
         let attach_sink_clone = Arc::clone(&attach_sink);
         let session_path = session_dir.to_path_buf();
+        let resize_fd = pty_resize_fd.take();
         std::thread::spawn(move || {
             run_attach_listener(
                 &sock_path,
                 pty_write_clone,
                 attach_sink_clone,
                 &session_path,
+                resize_fd,
             );
         });
     }
@@ -970,6 +979,7 @@ fn run_attach_listener(
     pty_write: Arc<Mutex<Box<dyn Write + Send>>>,
     attach_sink: AttachSink,
     session_dir: &Path,
+    resize_fd: Option<std::fs::File>,
 ) {
     use crate::attach_proto;
     use std::os::unix::net::UnixListener;
@@ -1012,9 +1022,9 @@ fn run_attach_listener(
                 }
                 Ok((attach_proto::MSG_RESIZE, payload)) => {
                     if let Some((rows, cols)) = attach_proto::parse_resize(&payload) {
-                        // TODO: ioctl TIOCSWINSZ -- needs PTY master fd
-                        // For now, resize is noted but not applied in slice one
-                        let _ = (rows, cols);
+                        if let Some(ref fd) = resize_fd {
+                            apply_pty_resize(fd, rows, cols);
+                        }
                     }
                 }
                 Ok((attach_proto::MSG_DETACH, _)) | Err(_) => break,
@@ -1027,6 +1037,22 @@ fn run_attach_listener(
 
         // Update meta to AgentControl
         update_pty_control(session_dir, "AgentControl");
+    }
+}
+
+#[cfg(unix)]
+fn apply_pty_resize(fd: &std::fs::File, rows: u16, cols: u16) {
+    use std::os::unix::io::AsRawFd;
+    let ws = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: fd is a valid PTY master fd. TIOCSWINSZ with a valid winsize
+    // pointer is safe on any terminal fd.
+    unsafe {
+        libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
     }
 }
 

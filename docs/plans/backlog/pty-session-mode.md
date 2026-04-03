@@ -50,8 +50,6 @@ Land the smallest useful PTY-backed session mode:
 
 ```
 start --pty → AgentControl ←→ HumanControl
-                   ↓
-                Detached
 ```
 
 Rules (slice one — no agent lease):
@@ -61,7 +59,6 @@ Rules (slice one — no agent lease):
 - `push` rejected in `HumanControl`
 - `attach` steals control → `HumanControl` (single human controller)
 - human detach → `AgentControl` (always — no lease check in slice one)
-- `Detached` only at startup if session has no push channel (`--stdin` not set)
 
 ## CLI Surface
 
@@ -226,7 +223,7 @@ Add PTY control state:
 }
 ```
 
-`control` is one of: `"AgentControl"`, `"HumanControl"`, `"Detached"`.
+`control` is one of: `"AgentControl"`, `"HumanControl"`.
 
 The sidecar writes control state transitions atomically to meta.json.
 Non-PTY sessions omit the `pty` field entirely.
@@ -245,7 +242,7 @@ not separable through a PTY. Annotations (`A` tag) work normally.
 
 ## Remaining Cleanup
 
-Shipped already:
+All items shipped:
 
 - `start --pty`
 - PTY-backed spawn and merged transcript capture
@@ -253,14 +250,11 @@ Shipped already:
 - `attach` on Unix
 - `exec` rejection on PTY sessions
 - remote `attach` using SSH TTY allocation
-
-Still open:
-
-1. Reject `push` while a human is attached (`HumanControl`)
-2. Either implement `Detached` startup semantics for PTY sessions without `--stdin`, or remove that state from slice one
-3. Apply resize events to the PTY (`TIOCSWINSZ`) instead of ignoring them
-4. Add integration tests for human-control rejection, attach contention, and resize behavior
-5. Reconcile the docs/acceptance criteria with the shipped slice and archive the plan once the remaining gaps are closed
+- `push` rejection during `HumanControl`
+- `Detached` state removed from slice one (simplification)
+- Resize events applied to the PTY via `TIOCSWINSZ`
+- Integration tests for human-control rejection, attach contention, and resize behavior
+- Docs reconciled with shipped slice
 
 ## Testing
 

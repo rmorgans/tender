@@ -134,6 +134,11 @@ pub trait Platform {
     /// Same take-once semantics.
     fn child_stdin(child: &mut Self::SupervisedChild) -> Option<Box<dyn io::Write + Send>>;
 
+    /// Get a dup'd file descriptor for applying PTY resize (TIOCSWINSZ).
+    /// Must be called before `child_stdin` takes the write half.
+    /// Returns None for non-PTY children or on platforms without PTY support.
+    fn pty_resize_fd(child: &Self::SupervisedChild) -> Option<File>;
+
     // --- Kill ---
 
     /// Extract a lightweight kill handle from the supervised child.

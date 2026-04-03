@@ -1,4 +1,5 @@
 use tender::model::ids::{Namespace, SessionName};
+use tender::model::pty::PtyControl;
 use tender::model::spec::StdinMode;
 use tender::model::state::RunStatus;
 use tender::platform::{Current, Platform};
@@ -16,6 +17,13 @@ pub fn cmd_push(name: &str, namespace: &Namespace) -> anyhow::Result<()> {
     // Push requires Running state explicitly
     if !matches!(meta.status(), RunStatus::Running { .. }) {
         anyhow::bail!("session is not running");
+    }
+
+    // Reject push while a human is attached to a PTY session
+    if let Some(pty) = meta.pty() {
+        if pty.control == PtyControl::HumanControl {
+            anyhow::bail!("session is under human control");
+        }
     }
 
     if meta.launch_spec().stdin_mode != StdinMode::Pipe {
