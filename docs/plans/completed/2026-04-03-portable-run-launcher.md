@@ -7,6 +7,8 @@ links:
 
 # Portable Run Launcher — Cross-Platform Script Execution
 
+> **Status: Complete.** Extension-based launcher resolution implemented and tested. Full suite green on macOS (22 tests) and Windows (19 tests, 3 Unix-only skipped). Commits `84667c6`, `44bc08f`.
+
 Make `tender run` work reliably on all platforms by replacing the
 implicit Bash fallback with explicit interpreter resolution.
 
