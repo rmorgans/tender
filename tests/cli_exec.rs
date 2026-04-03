@@ -365,3 +365,26 @@ fn start_invalid_exec_target() {
         .assert()
         .failure();
 }
+
+/// Different --exec-target creates a session conflict (different spec hash).
+#[test]
+fn exec_target_changes_session_identity() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // Start with posix-shell
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--exec-target", "posix-shell", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+
+    // Same name, different exec-target → conflict
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--exec-target", "powershell", "--", "bash"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("session conflict"));
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}

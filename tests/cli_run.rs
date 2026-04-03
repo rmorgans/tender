@@ -4,6 +4,14 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+use std::sync::Mutex;
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn tender(root: &TempDir) -> Command {
     harness::tender(root)
 }
@@ -303,4 +311,33 @@ fn run_replace_reruns_script() {
         .assert()
         .success()
         .stdout(predicate::str::contains("rerun-output"));
+}
+
+/// tender run sessions have ExecTarget::None — exec is rejected.
+#[test]
+fn run_session_rejects_exec() {
+    let _lock = lock();
+    let root = TempDir::new().unwrap();
+
+    // Create a long-running script so the session stays Running
+    let script = write_script(root.path(), "server.sh", "#!/bin/bash\nsleep 60\n");
+
+    // Run detached with --stdin so exec transport exists
+    tender(&root)
+        .args(["run", "--detach", "--stdin", script.to_str().unwrap()])
+        .timeout(std::time::Duration::from_secs(5))
+        .assert()
+        .success();
+
+    // Session name is derived from filename without extension
+    harness::wait_running(&root, "server");
+
+    // Exec should fail because run always sets ExecTarget::None
+    tender(&root)
+        .args(["exec", "server", "--", "echo", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no exec target"));
+
+    let _ = tender(&root).args(["kill", "server", "--force"]).assert();
 }
