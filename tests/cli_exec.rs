@@ -8,6 +8,12 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Returns the Python interpreter name for the current platform.
+/// Windows has `python`, Unix has `python3`.
+fn python_cmd() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 /// exec fails if session doesn't exist.
 #[test]
 fn exec_session_not_found() {
@@ -68,7 +74,11 @@ fn exec_basic_command() {
     assert_eq!(result["exit_code"].as_i64(), Some(0));
     assert!(result["stdout"].as_str().unwrap().contains("hello world"));
     assert!(!result["timed_out"].as_bool().unwrap());
-    assert!(result["cwd_after"].as_str().unwrap().starts_with('/'));
+    let cwd = result["cwd_after"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(cwd).is_absolute(),
+        "cwd_after should be absolute, got: {cwd}"
+    );
 
     let _ = harness::tender(&root)
         .args(["kill", "shell", "--force"])
@@ -396,7 +406,7 @@ fn exec_python_repl_basic() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", "python3", "-i"])
+        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -411,7 +421,11 @@ fn exec_python_repl_basic() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(0));
     assert!(result["stdout"].as_str().unwrap().contains("hello from python"));
-    assert!(result["cwd_after"].as_str().unwrap().starts_with('/'));
+    let cwd = result["cwd_after"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(cwd).is_absolute(),
+        "cwd_after should be absolute, got: {cwd}"
+    );
 
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
@@ -423,7 +437,7 @@ fn exec_python_repl_exception() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", "python3", "-i"])
+        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -450,31 +464,33 @@ fn exec_python_repl_cwd() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", "python3", "-i"])
+        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
         .assert()
         .success();
     harness::wait_running(&root, "py");
     std::thread::sleep(std::time::Duration::from_millis(500));
 
+    let tmp = std::env::temp_dir();
+    let tmp_str = tmp.to_str().expect("temp dir should be valid UTF-8");
+    let chdir_code = format!("import os; os.chdir(r'{tmp_str}')");
     let output = harness::tender(&root)
-        .args(["exec", "py", "--timeout", "10", "--", "import os; os.chdir('/tmp')"])
+        .args(["exec", "py", "--timeout", "10", "--", &chdir_code])
         .output()
         .unwrap();
 
     assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["exit_code"].as_i64(), Some(0));
-    // macOS /tmp is a symlink to /private/tmp
+    let cwd = result["cwd_after"].as_str().unwrap();
     assert!(
-        result["cwd_after"].as_str().unwrap().contains("tmp"),
-        "cwd should contain tmp, got: {}",
-        result["cwd_after"]
+        std::path::Path::new(cwd).is_absolute(),
+        "cwd should be absolute after chdir, got: {cwd}"
     );
 
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
 
-/// python3 is NOT inferred as PythonRepl — requires explicit --exec-target.
+/// python/python3 is NOT inferred as PythonRepl — requires explicit --exec-target.
 /// Pipe mode needs `-i` flag, so inference would be misleading.
 #[test]
 fn exec_python_not_inferred() {
@@ -482,7 +498,7 @@ fn exec_python_not_inferred() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--", "python3", "-i"])
+        .args(["start", "py", "--stdin", "--", python_cmd(), "-i"])
         .assert()
         .success();
     harness::wait_running(&root, "py");
@@ -862,7 +878,7 @@ fn exec_python_result_file_cleaned() {
     let root = tempfile::TempDir::new().unwrap();
 
     harness::tender(&root)
-        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", "python3", "-i"])
+        .args(["start", "py", "--stdin", "--exec-target", "python-repl", "--", python_cmd(), "-i"])
         .assert()
         .success();
     harness::wait_running(&root, "py");
