@@ -17,7 +17,7 @@ No active plans. See backlog for next candidates.
 | agent-exec-spike | `agent-exec-spike.md` | — |
 | duckdb-exec | `duckdb-exec.md` | — |
 | pty-session-mode | `pty-session-mode.md` | — |
-| fleet-migration | `fleet-migration.md` | remote-ssh-transport (complete) |
+| fleet-migration | `fleet-migration.md` | — |
 | pty-automation | `pty-automation.md` | pty-session-mode |
 | skill-claude-code | `skill-claude-code.md` | all other backlog items |
 
