@@ -450,6 +450,55 @@ fn host_flag_attach_uses_tty_allocation() {
     assert!(!args.contains(&"-T"), "attach should not use -T: {args:?}");
 }
 
+// -- Task 6 (exec-target): --exec-target forwarding --
+
+#[test]
+fn host_flag_forwards_exec_target() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = fake_ssh_echo();
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args([
+            "--host",
+            "user@box",
+            "start",
+            "shell",
+            "--stdin",
+            "--exec-target",
+            "posix-shell",
+            "--",
+            "bash",
+        ])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_remote_argv(&stdout);
+
+    assert_eq!(parsed[0], "tender");
+    assert!(parsed.contains(&"start".to_string()), "parsed: {parsed:?}");
+    assert!(parsed.contains(&"shell".to_string()), "parsed: {parsed:?}");
+    assert!(
+        parsed.contains(&"--stdin".to_string()),
+        "parsed: {parsed:?}"
+    );
+    assert!(
+        parsed.contains(&"--exec-target".to_string()),
+        "--exec-target should be forwarded: {parsed:?}"
+    );
+    assert!(
+        parsed.contains(&"posix-shell".to_string()),
+        "posix-shell value should be forwarded: {parsed:?}"
+    );
+    assert!(parsed.contains(&"bash".to_string()), "parsed: {parsed:?}");
+    assert!(
+        !parsed.contains(&"--host".to_string()),
+        "parsed: {parsed:?}"
+    );
+}
+
 // -- Task 11: Allowlist rejection --
 
 #[test]
