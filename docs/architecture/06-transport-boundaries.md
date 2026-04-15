@@ -63,4 +63,8 @@ What stays in-process:
 Current remote-command scope:
 
 - supported over `--host`: `start`, `status`, `list`, `log`, `push`, `kill`, `wait`, `watch`, `attach`
-- currently local-only: `run`, `exec`, `wrap`, `prune`
+- local-only: `run`, `exec`, `wrap`, `prune`
+
+Why `exec` is local-only: it needs coordinated access to the session's FIFO, `exec.lock`, `output.log` scan, and side-channel result files (`exec-results/<token>.json` for Python REPL). That's shared-filesystem IPC, not a one-shot RPC. `ssh -T` cannot represent it without building a second lifecycle protocol, which the design explicitly rejects.
+
+The workaround is first-class: `ssh host 'tender exec <session> -- <cmd>'`. The remote `tender` does the local IPC on the remote host exactly as it would locally. Same holds for `run`, `wrap`, `prune`.

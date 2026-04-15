@@ -19,14 +19,23 @@ Every call above is a separate subprocess from the agent's side. The *shell* liv
 
 > `tender exec` takes argv, not a shell snippet. For multi-step shell commands, use separate `exec` calls or wrap explicitly with `bash -c '...'`.
 
-The same contract works remotely. Put `--host` on the Tender command itself; do not manually nest `ssh host 'tender ...'` around every call.
+The same contract works remotely. Put `--host` on the Tender command itself for lifecycle and observation — that replaces a hand-rolled `ssh host 'tender start/status/log/…'` wrapper:
 
 ```bash
 tender --host data-box start --stdin ddb -- duckdb /tmp/extract.duckdb
-tender --host data-box exec  ddb -- "INSTALL httpfs;"
-tender --host data-box exec  ddb -- "SELECT count(*) FROM read_parquet('s3://bucket/*.parquet');"
-tender --host data-box log   ddb -f
+tender --host data-box status ddb
+tender --host data-box log    ddb -f
+tender --host data-box kill   ddb
 ```
+
+`--host` carries `start`, `status`, `list`, `log`, `push`, `kill`, `wait`, `watch`, and `attach`. **`exec` is local-only** — it needs coordinated access to the session's FIFO, lock, and log scan that `ssh -T` can't tunnel. Use ssh in the one place it's still required:
+
+```bash
+ssh data-box 'tender exec ddb -- "INSTALL httpfs;"'
+ssh data-box 'tender exec ddb -- "SELECT count(*) FROM read_parquet('\''s3://bucket/*.parquet'\'');"'
+```
+
+Same rule applies to `run`, `wrap`, `prune` — all local-only by design, all fine via a one-line ssh wrapper.
 
 The same model also works for REPL and database lanes — Python, IPython, DuckDB, and a known-limited PowerShell target — not just shells:
 
