@@ -39,7 +39,10 @@ impl From<CliExecTarget> for tender::model::spec::ExecTarget {
 #[derive(Parser)]
 #[command(name = "tender", about = "Agent process sitter")]
 struct Cli {
-    /// Route command through SSH to a remote host (e.g. user@box)
+    /// Route command through SSH to a remote host (e.g. user@box).
+    ///
+    /// Supported remote commands: start, status, list, log, push, kill,
+    /// wait, watch, attach. Local-only: run, exec, wrap, prune.
     #[arg(long, global = true)]
     host: Option<String>,
 
@@ -517,7 +520,14 @@ fn main() {
     if let Some(ref host) = cli.host {
         let cmd_name = cli.command.name();
         if !tender::ssh::is_remote_supported(cmd_name) {
-            eprintln!("command '{cmd_name}' is not supported over SSH (--host)");
+            eprintln!(
+                "command '{cmd_name}' is not supported over SSH (--host).\n\
+                 Supported remote commands: {}.\n\
+                 Local-only commands (run, exec, wrap, prune) rely on local FIFO,\n\
+                 process context, or filesystem state that cannot tunnel through ssh -T.\n\
+                 For exec against a remote session, ssh to the host and run tender there.",
+                tender::ssh::REMOTE_COMMANDS.join(", ")
+            );
             std::process::exit(1);
         }
         let args = cli.command.remote_args();

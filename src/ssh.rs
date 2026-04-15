@@ -17,8 +17,13 @@ pub enum SshError {
     Abnormal,
 }
 
-/// Commands that are supported over SSH transport in the first slice.
-const REMOTE_COMMANDS: &[&str] = &[
+/// Commands that are supported over SSH transport.
+///
+/// Local-only commands (`run`, `exec`, `wrap`, `prune`) are rejected when
+/// `--host` is set. `exec` and `wrap` rely on local FIFO/process context
+/// that does not tunnel through `ssh -T`; `run` reads a local script file;
+/// `prune` walks the local session root.
+pub const REMOTE_COMMANDS: &[&str] = &[
     "start", "status", "list", "log", "push", "kill", "wait", "watch", "attach",
 ];
 
