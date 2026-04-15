@@ -19,6 +19,15 @@ Every call above is a separate subprocess from the agent's side. The *shell* liv
 
 > `tender exec` takes argv, not a shell snippet. For multi-step shell commands, use separate `exec` calls or wrap explicitly with `bash -c '...'`.
 
+The same contract works remotely. Put `--host` on the Tender command itself; do not manually nest `ssh host 'tender ...'` around every call.
+
+```bash
+tender --host data-box start --stdin ddb -- duckdb /tmp/extract.duckdb
+tender --host data-box exec  ddb -- "INSTALL httpfs;"
+tender --host data-box exec  ddb -- "SELECT count(*) FROM read_parquet('s3://bucket/*.parquet');"
+tender --host data-box log   ddb -f
+```
+
 The same model also works for REPL and database lanes — Python, IPython, DuckDB, and a known-limited PowerShell target — not just shells:
 
 ```bash
@@ -104,6 +113,21 @@ Core commands today include:
 - `wrap`
 
 These operate on named sessions and stable run identities rather than on raw process trees.
+
+## Following Along
+
+You do not need to build polling loops around `ssh`, `tail`, and `sleep`. Tender already has the read side:
+
+```bash
+tender status dev
+tender log    dev --tail 50
+tender log    dev -f
+tender log    dev -s 5m
+tender watch  --events --logs
+tender wait   dev --timeout 600
+```
+
+Every command above also works remotely with `--host user@box`.
 
 ## Design Direction
 
