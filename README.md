@@ -70,5 +70,6 @@ That makes Tender a good foundation for:
 
 ## Docs
 
+- Architecture overview: [docs/architecture/README.md](docs/architecture/README.md)
 - Design spec: [docs/plans/specs/tender-agent-process-sitter.md](docs/plans/specs/tender-agent-process-sitter.md)
 - Planning index: [docs/plans/README.md](docs/plans/README.md)
