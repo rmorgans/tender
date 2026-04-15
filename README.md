@@ -29,6 +29,47 @@ tender exec  py -- 'print(df.describe())'             # df still loaded
 
 In-memory REPL state — imported modules, loaded DataFrames, opened connections — survives across every `exec`. A DuckDB analyst session, a PyTorch notebook-equivalent, an IPython exploration — all as durable as a shell.
 
+<details>
+<summary><b>DuckDB</b> — persistent SQL session with structured output</summary>
+
+```bash
+tender start --stdin ddb -- duckdb :memory:          # auto-inferred: duckdb
+tender exec  ddb -- "CREATE TABLE t AS SELECT range AS id, range * 2 AS val FROM range(5);"
+tender exec  ddb -- "SELECT count(*), sum(val) FROM t;"
+# → stdout: [{"count_star()":5,"sum(val)":"20"}]
+```
+
+Tables, views, attached databases, loaded extensions — all persist across execs. Output arrives as structured JSON rows, not a formatted table, so agents parse it directly.
+
+</details>
+
+<details>
+<summary><b>IPython</b> — rich Python REPL with persistent namespace</summary>
+
+```bash
+tender start --stdin ipy --exec-target python-repl -- ipython --no-banner --no-confirm-exit
+tender exec  ipy -- 'from statistics import mean; xs = list(range(10))'
+tender exec  ipy -- 'print(mean(xs), sum(xs))'
+# → stdout: 4.5 45
+```
+
+Imports, function definitions, large loaded datasets stay in memory. Start with `python3 -i` for stdlib Python, or `ipython` for the richer REPL — both use the same `python-repl` exec target and side-channel result protocol.
+
+</details>
+
+<details>
+<summary><b>PowerShell</b> — Windows-native and cross-platform via <code>pwsh</code></summary>
+
+```bash
+tender start --stdin ps -- pwsh -NoLogo                # auto-inferred: powershell
+tender exec  ps -- '$items = @(1..10) | ForEach-Object { $_ * 2 }'
+tender exec  ps -- '$items | Measure-Object -Sum | Select-Object Count, Sum'
+```
+
+PowerShell variables, imported modules, and loaded `.ps1` dot-sourced state persist. The exec protocol uses PowerShell-specific sentinel framing. Works identically on Windows (`powershell.exe` / `pwsh`) and cross-platform (`pwsh`).
+
+</details>
+
 ## The Core Idea
 
 ```text
