@@ -17,6 +17,8 @@ printf 'y\n' | tender push dev            # answer an interactive prompt
 
 Every call above is a separate subprocess from the agent's side. The *shell* lives inside Tender and outlives all of them.
 
+> `tender exec` takes argv, not a shell snippet. For multi-step shell commands, use separate `exec` calls or wrap explicitly with `bash -c '...'`.
+
 ## The Core Idea
 
 ```text
