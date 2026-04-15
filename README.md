@@ -19,6 +19,16 @@ Every call above is a separate subprocess from the agent's side. The *shell* liv
 
 > `tender exec` takes argv, not a shell snippet. For multi-step shell commands, use separate `exec` calls or wrap explicitly with `bash -c '...'`.
 
+The same model works for REPLs — Python, IPython, PowerShell, DuckDB — not just shells:
+
+```bash
+tender start --stdin py -- python3 -i                 # auto-inferred: python-repl
+tender exec  py -- 'import pandas as pd; df = pd.read_csv("data.csv")'
+tender exec  py -- 'print(df.describe())'             # df still loaded
+```
+
+In-memory REPL state — imported modules, loaded DataFrames, opened connections — survives across every `exec`. A DuckDB analyst session, a PyTorch notebook-equivalent, an IPython exploration — all as durable as a shell.
+
 ## The Core Idea
 
 ```text
