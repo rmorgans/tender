@@ -203,6 +203,9 @@ enum Commands {
         any: bool,
     },
     /// Execute a command in a running shell session
+    ///
+    /// Takes argv, not a shell snippet. For multi-step commands, use separate
+    /// exec calls or wrap explicitly with `bash -c '...'`.
     Exec {
         /// Session name
         name: String,
