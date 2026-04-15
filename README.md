@@ -19,7 +19,7 @@ Every call above is a separate subprocess from the agent's side. The *shell* liv
 
 > `tender exec` takes argv, not a shell snippet. For multi-step shell commands, use separate `exec` calls or wrap explicitly with `bash -c '...'`.
 
-The same model works for REPLs — Python, IPython, PowerShell, DuckDB — not just shells:
+The same model also works for REPL and database lanes — Python, IPython, DuckDB, and a known-limited PowerShell target — not just shells:
 
 ```bash
 tender start --stdin py -- python3 -i                 # auto-inferred: python-repl
@@ -62,11 +62,11 @@ Imports, function definitions, large loaded datasets stay in memory. Start with 
 
 ```bash
 tender start --stdin ps -- pwsh -NoLogo                # auto-inferred: powershell
-tender exec  ps -- '$items = @(1..10) | ForEach-Object { $_ * 2 }'
-tender exec  ps -- '$items | Measure-Object -Sum | Select-Object Count, Sum'
+tender exec  ps -- Get-Date
+tender exec  ps -- Get-Location
 ```
 
-PowerShell variables, imported modules, and loaded `.ps1` dot-sourced state persist. The exec protocol uses PowerShell-specific sentinel framing. Works identically on Windows (`powershell.exe` / `pwsh`) and cross-platform (`pwsh`).
+PowerShell variables, imported modules, and loaded `.ps1` dot-sourced state persist. The current exec framing is **known-limited** compared with the shell, Python REPL, and DuckDB lanes: complex expressions and clean stdout capture are not yet reliable. Use it today for simple cmdlets; track the framing cleanup in [`docs/plans/backlog/powershell-exec-framing.md`](docs/plans/backlog/powershell-exec-framing.md).
 
 </details>
 

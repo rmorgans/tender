@@ -19,6 +19,7 @@ No active plans. See backlog for next candidates.
 | pty-session-mode | `pty-session-mode.md` | — |
 | fleet-migration | `fleet-migration.md` | — |
 | pty-automation | `pty-automation.md` | pty-session-mode |
+| powershell-exec-framing | `powershell-exec-framing.md` | — |
 | skill-claude-code | `skill-claude-code.md` | all other backlog items |
 
 ## completed/
