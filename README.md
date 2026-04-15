@@ -1,34 +1,38 @@
 # Tender
 
-Tender is an agent process sitter: a cross-platform CLI for supervised runs.
+Coding agents run every shell command in a fresh subprocess. Shell state — cwd, activated venvs, running REPLs, dev servers — dies between tool calls. Logs live in the agent's context and vanish on crash or compaction. Long-running processes hit timeouts and lose partial output. Interactive prompts deadlock because backgrounded processes can't accept stdin.
 
-It is designed to be the execution substrate under agent workflows, hook wrappers, and future frontends. Tender owns run lifecycle, durable session state, logs, annotations, composition, and remote execution. It is not a terminal UI, not a multiplexer, and not a replacement for tools that render panes, tabs, or desktop notifications.
+Tender fixes that. It supervises shells and long-lived processes as durable, named sessions. The agent's one-shot CLI calls become thin clients against a supervisor that owns the process. State persists across tool calls. Logs survive on disk. Multiple agents — Claude, Codex, or anything else with shell access — can share the same session because no agent owns it.
 
-## What Tender Is For
+## A Concrete Day One
 
-- starting long-lived supervised sessions
-- following logs and waiting on terminal state
-- pushing stdin into supervised sessions
-- running structured commands inside persistent pipe-backed shell sessions with `exec`
-- attaching to PTY-backed sessions for live terminal control
-- wrapping hooks and writing durable annotation events
-- chaining runs with `--after`
-- exposing the same semantic model locally and, later, over SSH
+```bash
+tender start --stdin dev -- bash          # supervised shell, durable
+tender exec  dev -- cd repo
+tender exec  dev -- . .venv/bin/activate
+tender exec  dev -- pytest -x             # cwd + venv still active
+tender log   dev --tail 50                # on-disk, survives crashes
+printf 'y\n' | tender push dev            # answer an interactive prompt
+```
 
-## What Tender Is Not
+Every call above is a separate subprocess from the agent's side. The *shell* lives inside Tender and outlives all of them.
 
-- a GUI terminal
-- a tmux replacement
-- a PTY-first workflow tool
-- a second lifecycle model for remote hosts
-
-The core idea is simple:
+## The Core Idea
 
 ```text
 Tender = stateless CLI + durable session record + per-session supervisor + OS-native kill/wait
 ```
 
 The sidecar is the supervisor. The CLI is a transactional client. `meta.json` and `output.log` are the durable truth for a run.
+
+## What Tender Is Not
+
+- **Not an AI agent.** It does not plan, reason, or choose tools.
+- **Not an LLM orchestration framework.** No model routing, token tracking, or prompt handling.
+- **Not a terminal UI or tmux replacement.** It supervises sessions; render or attach with whatever you want.
+- **Not a sandbox or security boundary.** Isolation stays with Claude, Codex, Docker, SSH.
+- **Not for every shell command.** One-shot subprocesses don't need a supervisor — keep using plain Bash.
+- **Not a second remote lifecycle.** SSH is just another access path to the same session model.
 
 ## Current Surface
 
