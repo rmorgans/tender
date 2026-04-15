@@ -519,10 +519,10 @@ fn exec_python_repl_cwd() {
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
 
-/// python/python3 is NOT inferred as PythonRepl — requires explicit --exec-target.
-/// Pipe mode needs `-i` flag, so inference would be misleading.
+/// python/python3/ipython (and Windows `py`) infer PythonRepl when started
+/// as an interactive Python session.
 #[test]
-fn exec_python_not_inferred() {
+fn exec_python_inferred() {
     let _lock = lock();
     let root = tempfile::TempDir::new().unwrap();
 
@@ -532,12 +532,20 @@ fn exec_python_not_inferred() {
         .success();
     harness::wait_running(&root, "py");
 
-    // Without --exec-target, python3 infers None → exec rejected
-    harness::tender(&root)
+    let output = harness::tender(&root)
         .args(["exec", "py", "--", "print(1+1)"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("no exec target"));
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "exec failed:\nstderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert_eq!(result["stdout"].as_str().unwrap().trim(), "2");
 
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
