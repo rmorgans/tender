@@ -4,6 +4,8 @@ This directory maps the current Tender system as implemented on `main`.
 
 It is architecture-level documentation: process boundaries, session storage, lifecycle state, PTY control, key flows, and transport boundaries. It intentionally does not duplicate every struct field or every helper function.
 
+For the review doctrine that should shape new features, see [../design-principles.md](../design-principles.md).
+
 Read these in order:
 
 1. [01-system-context.md](01-system-context.md) — what the running system is, who talks to it, and where responsibility sits

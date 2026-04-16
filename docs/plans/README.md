@@ -21,6 +21,7 @@ No active plans. See backlog for next candidates.
 | exec-annotation-ergonomics | `exec-annotation-ergonomics.md` | — |
 | pty-automation | `pty-automation.md` | pty-session-mode |
 | powershell-exec-framing | `powershell-exec-framing.md` | — |
+| provenance-on-lifecycle-transitions | `provenance-on-lifecycle-transitions.md` | — |
 | skill-claude-code | `skill-claude-code.md` | all other backlog items |
 
 ## completed/
