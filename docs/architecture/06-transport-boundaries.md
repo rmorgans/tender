@@ -62,6 +62,8 @@ What stays in-process:
 
 Current remote-command scope:
 
+This split follows Theme 5: Separate Control Plane From Work Plane; see [../design-principles.md](../design-principles.md).
+
 - supported over `--host`: `start`, `status`, `list`, `log`, `push`, `kill`, `wait`, `watch`, `attach`
 - local-only: `run`, `exec`, `wrap`, `prune`
 

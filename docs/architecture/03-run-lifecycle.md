@@ -30,6 +30,8 @@ stateDiagram-v2
 
 Authority rules:
 
+This ownership boundary follows Theme 2: One Authority Per Fact; see [../design-principles.md](../design-principles.md).
+
 - Normal lifecycle writes happen in the sidecar:
   - `Starting -> Running`
   - `Starting -> SpawnFailed`

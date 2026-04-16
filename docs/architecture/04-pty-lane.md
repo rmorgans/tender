@@ -48,6 +48,8 @@ Important exception:
 
 Planned but not yet implemented:
 
+This planned extension should follow Theme 3: State Machine First, Protocol Second; see [../design-principles.md](../design-principles.md).
+
 - lease-backed exclusive PTY ownership
 - token-authorized push headers
 - PTY observe mode

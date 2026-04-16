@@ -29,6 +29,8 @@ flowchart TD
     Session --> CaptureErr["capture_errors.log\nBest-effort diagnostics"]
 ```
 
+This split follows Theme 4: Durable Truth, Derived Views; see [../design-principles.md](../design-principles.md). `meta.json` and `output.log` are the durable truth; `status`, `list`, `log`, `watch`, and any future `graph`/`check` commands are projections over them, not new state.
+
 Durable by design:
 
 - `meta.json`
