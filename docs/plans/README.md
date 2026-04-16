@@ -37,3 +37,4 @@ Long-lived design documents (not queue items).
 |------|-------------|
 | `tender-agent-process-sitter.md` | Full design spec |
 | `decision-process-sitter-not-framework.md` | Decision: no native LLM protocol support |
+| `sidecar-control-protocol.md` | Target architecture: portable sidecar control RPC (not scheduled) |
