@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
+use super::provenance::TransitionProvenance;
 use super::pty::{PtyControl, PtyMeta};
 use super::spec::LaunchSpec;
 use super::state::RunStatus;
@@ -26,6 +27,8 @@ pub struct Meta {
     warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pty: Option<PtyMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transition_provenance: Option<TransitionProvenance>,
 }
 
 impl Meta {
@@ -52,6 +55,7 @@ impl Meta {
             restart_count: 0,
             warnings: vec![],
             pty: None,
+            transition_provenance: None,
         }
     }
 
@@ -132,10 +136,21 @@ impl Meta {
         }
     }
 
+    /// Provenance of the most recent lifecycle transition, if recorded.
+    /// Older meta files written before this field existed return `None`.
+    #[must_use]
+    pub fn transition_provenance(&self) -> Option<&TransitionProvenance> {
+        self.transition_provenance.as_ref()
+    }
+
     // --- Mutable access for transition module only ---
 
     pub(super) fn status_mut(&mut self) -> &mut RunStatus {
         &mut self.status
+    }
+
+    pub(super) fn set_transition_provenance(&mut self, prov: TransitionProvenance) {
+        self.transition_provenance = Some(prov);
     }
 }
 
@@ -157,6 +172,8 @@ impl<'de> Deserialize<'de> for Meta {
             warnings: Vec<String>,
             #[serde(default)]
             pty: Option<PtyMeta>,
+            #[serde(default)]
+            transition_provenance: Option<TransitionProvenance>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -179,6 +196,7 @@ impl<'de> Deserialize<'de> for Meta {
             restart_count: raw.restart_count,
             warnings: raw.warnings,
             pty: raw.pty,
+            transition_provenance: raw.transition_provenance,
         })
     }
 }

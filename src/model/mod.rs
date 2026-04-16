@@ -1,6 +1,7 @@
 pub mod dep_fail;
 pub mod ids;
 pub mod meta;
+pub mod provenance;
 pub mod pty;
 pub mod spec;
 pub mod state;

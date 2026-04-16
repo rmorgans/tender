@@ -3,6 +3,7 @@ use thiserror::Error;
 use super::dep_fail::DepFailReason;
 use super::ids::{EpochTimestamp, ProcessIdentity};
 use super::meta::Meta;
+use super::provenance::{Evidence, TransitionProvenance};
 use super::state::{ExitReason, RunStatus};
 
 #[derive(Debug, Error)]
@@ -39,6 +40,10 @@ impl Meta {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::Running { child };
+                self.set_transition_provenance(TransitionProvenance::direct(&[
+                    Evidence::SidecarWrite,
+                    Evidence::ChildSpawned,
+                ]));
                 Ok(())
             }
             RunStatus::Running { .. } => Err(TransitionError::Illegal {
@@ -60,6 +65,10 @@ impl Meta {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::SpawnFailed { ended_at };
+                self.set_transition_provenance(TransitionProvenance::direct(&[
+                    Evidence::SidecarWrite,
+                    Evidence::SpawnFailedSyscall,
+                ]));
                 Ok(())
             }
             RunStatus::Running { .. } => Err(TransitionError::Illegal {
@@ -88,6 +97,10 @@ impl Meta {
                     how,
                     ended_at,
                 };
+                self.set_transition_provenance(TransitionProvenance::direct(&[
+                    Evidence::SidecarWrite,
+                    Evidence::ChildExitObserved,
+                ]));
                 Ok(())
             }
             RunStatus::Starting => Err(TransitionError::Illegal {
@@ -109,6 +122,10 @@ impl Meta {
         match self.status() {
             RunStatus::Starting => {
                 *self.status_mut() = RunStatus::DependencyFailed { ended_at, reason };
+                self.set_transition_provenance(TransitionProvenance::direct(&[
+                    Evidence::SidecarWrite,
+                    Evidence::DependencyFailed,
+                ]));
                 Ok(())
             }
             RunStatus::Running { .. } => Err(TransitionError::Illegal {
@@ -134,6 +151,10 @@ impl Meta {
                     child: None,
                     ended_at,
                 };
+                self.set_transition_provenance(TransitionProvenance::inferred(&[
+                    Evidence::LockReleased,
+                    Evidence::NonTerminalMeta,
+                ]));
                 Ok(())
             }
             RunStatus::Running { child } => {
@@ -142,11 +163,114 @@ impl Meta {
                     child: Some(child),
                     ended_at,
                 };
+                self.set_transition_provenance(TransitionProvenance::inferred(&[
+                    Evidence::LockReleased,
+                    Evidence::NonTerminalMeta,
+                ]));
                 Ok(())
             }
             _ => Err(TransitionError::AlreadyTerminal {
                 from: status_name(self.status()),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use crate::model::ids::{
+        EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName,
+    };
+    use crate::model::provenance::Evidence;
+    use crate::model::spec::LaunchSpec;
+
+    fn fresh_meta() -> Meta {
+        Meta::new_starting(
+            SessionName::new("t").unwrap(),
+            RunId::new(),
+            Generation::first(),
+            LaunchSpec::new(vec!["bash".to_owned()]).unwrap(),
+            ProcessIdentity {
+                pid: std::num::NonZero::new(1).unwrap(),
+                start_time_ns: 0,
+            },
+            EpochTimestamp::from_secs(0),
+        )
+    }
+
+    fn child() -> ProcessIdentity {
+        ProcessIdentity {
+            pid: std::num::NonZero::new(2).unwrap(),
+            start_time_ns: 0,
+        }
+    }
+
+    #[test]
+    fn running_is_direct_with_child_spawned() {
+        let mut m = fresh_meta();
+        m.transition_running(child()).unwrap();
+        let p = m.transition_provenance().unwrap();
+        assert!(p.is_direct());
+        let TransitionProvenance::Direct { evidence } = p else { unreachable!() };
+        assert!(evidence.contains(&Evidence::SidecarWrite));
+        assert!(evidence.contains(&Evidence::ChildSpawned));
+    }
+
+    #[test]
+    fn spawn_failed_is_direct_with_syscall_evidence() {
+        let mut m = fresh_meta();
+        m.transition_spawn_failed(EpochTimestamp::from_secs(1)).unwrap();
+        let p = m.transition_provenance().unwrap();
+        assert!(p.is_direct());
+        let TransitionProvenance::Direct { evidence } = p else { unreachable!() };
+        assert!(evidence.contains(&Evidence::SpawnFailedSyscall));
+    }
+
+    #[test]
+    fn exited_is_direct_with_child_exit_observed() {
+        let mut m = fresh_meta();
+        m.transition_running(child()).unwrap();
+        m.transition_exited(ExitReason::ExitedOk, EpochTimestamp::from_secs(2))
+            .unwrap();
+        let p = m.transition_provenance().unwrap();
+        assert!(p.is_direct());
+        let TransitionProvenance::Direct { evidence } = p else { unreachable!() };
+        assert!(evidence.contains(&Evidence::ChildExitObserved));
+    }
+
+    #[test]
+    fn dependency_failed_is_direct_with_dependency_evidence() {
+        let mut m = fresh_meta();
+        m.transition_dependency_failed(
+            EpochTimestamp::from_secs(1),
+            DepFailReason::Failed,
+        )
+        .unwrap();
+        let p = m.transition_provenance().unwrap();
+        assert!(p.is_direct());
+        let TransitionProvenance::Direct { evidence } = p else { unreachable!() };
+        assert!(evidence.contains(&Evidence::DependencyFailed));
+    }
+
+    #[test]
+    fn sidecar_lost_is_inferred_with_lock_and_non_terminal_evidence() {
+        let mut m = fresh_meta();
+        m.transition_running(child()).unwrap();
+        m.reconcile_sidecar_lost(EpochTimestamp::from_secs(3))
+            .unwrap();
+        let p = m.transition_provenance().unwrap();
+        assert!(p.is_inferred());
+        let TransitionProvenance::Inferred { evidence } = p else { unreachable!() };
+        assert!(evidence.contains(&Evidence::LockReleased));
+        assert!(evidence.contains(&Evidence::NonTerminalMeta));
+    }
+
+    #[test]
+    fn sidecar_lost_from_starting_also_inferred() {
+        let mut m = fresh_meta();
+        m.reconcile_sidecar_lost(EpochTimestamp::from_secs(1))
+            .unwrap();
+        assert!(m.transition_provenance().unwrap().is_inferred());
     }
 }
