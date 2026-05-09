@@ -37,27 +37,32 @@ pub fn unix_frame(argv: &[String], token: &str) -> String {
     )
 }
 
-/// Build a framed command string for PowerShell.
+/// Build a framed PowerShell exec string for injection into a PowerShell session.
 ///
-/// argv is joined with spaces and executed as raw PowerShell code (NOT as
-/// `& 'argv0' 'argv1' ...`). This makes arbitrary expressions work —
-/// variable assignment, pipelines, multi-statement snippets — at the cost
-/// of putting argv quoting on the caller. Same trade-off as DuckDB exec,
-/// where the SQL payload is treated as opaque text rather than tokenized.
+/// Both the user's code AND the result path are base64-encoded to avoid any
+/// escaping issues with backslashes, quotes, or special characters in paths
+/// (especially Windows paths containing `\t`, `\U`, etc.) and in the user
+/// payload (single quotes, here-strings, etc.).
 ///
-/// For simple-cmdlet usage like `tender exec ps -- echo hello`, argv joins
-/// to `echo hello` which PowerShell evaluates as a positional cmdlet call —
-/// equivalent to the old `& 'echo' 'hello'` for the common case.
+/// The frame runs the decoded code via `[scriptblock]::Create($code)` (which
+/// makes arbitrary expressions / pipelines / multi-statement snippets work),
+/// partitions the merged success+error stream by object type to separate
+/// stderr from stdout, and writes a JSON result file atomically (tmp + Move).
 ///
-/// Token must be hex-only (as produced by `generate_token`).
-pub fn powershell_frame(argv: &[String], token: &str) -> String {
-    debug_assert!(
-        token.bytes().all(|b| b.is_ascii_hexdigit()),
-        "token must be hex-only, got: {token}"
-    );
-    let payload = argv.join(" ");
+/// `result_path` is the absolute path to `{session_dir}/exec-results/{token}.json`.
+///
+/// The frame is one logical line terminated with **two** newlines. The blank
+/// line is required: PowerShell's interactive REPL (both Windows PowerShell 5.1
+/// and PS Core 7+) buffers complex multi-statement input on a sustained stdin
+/// pipe and waits for a blank line to flush the parser before executing —
+/// even when the syntax is already complete. With a single `\n` the line is
+/// echoed but never runs. See PowerShell/PowerShell#3223 for the upstream
+/// discussion of this pseudo-interactive behavior.
+pub fn powershell_frame(code: &str, result_path: &str) -> String {
+    let encoded_code = base64::engine::general_purpose::STANDARD.encode(code);
+    let encoded_path = base64::engine::general_purpose::STANDARD.encode(result_path);
     format!(
-        "$LASTEXITCODE = $null; {payload}; $__tender_s = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}; Write-Output ('__TENDER_EXEC__ {token} ' + $__tender_s + ' ' + (Get-Location).Path)\n"
+        "$_b = [Convert]::FromBase64String('{encoded_code}'); $_code = [System.Text.Encoding]::UTF8.GetString($_b); $_rp = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}')); $_tmp = \"$_rp.tmp\"; $_outBuf = New-Object System.Text.StringBuilder; $_errBuf = New-Object System.Text.StringBuilder; $_exit = 0; $LASTEXITCODE = $null; try {{ & ([scriptblock]::Create($_code)) 2>&1 | ForEach-Object {{ if ($_ -is [System.Management.Automation.ErrorRecord]) {{ [void]$_errBuf.AppendLine($_.ToString()) }} else {{ [void]$_outBuf.AppendLine(($_ | Out-String).TrimEnd()) }} }}; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ $_exit = $LASTEXITCODE }} elseif ($_errBuf.Length -gt 0) {{ $_exit = 1 }} }} catch {{ [void]$_errBuf.AppendLine($_.Exception.Message); $_exit = 1 }}; $_payload = @{{ exit_code = $_exit; cwd = (Get-Location).Path; stdout = $_outBuf.ToString(); stderr = $_errBuf.ToString() }} | ConvertTo-Json -Compress; [System.IO.File]::WriteAllText($_tmp, $_payload); [System.IO.File]::Move($_tmp, $_rp)\n\n"
     )
 }
 
@@ -164,33 +169,49 @@ mod tests {
     }
 
     #[test]
-    fn powershell_frame_simple_command() {
-        let frame = powershell_frame(&["echo".into(), "hello".into()], "abc123");
-        assert!(frame.starts_with("$LASTEXITCODE = $null; echo hello;"));
-        assert!(frame.contains("__TENDER_EXEC__ abc123"));
-        assert!(frame.contains("$LASTEXITCODE"));
-        assert!(frame.contains("(Get-Location).Path"));
-        assert!(frame.ends_with('\n'));
+    fn powershell_side_channel_frame_encodes_code_and_path() {
+        let frame = powershell_frame("$x = 1; $x + 1", "/tmp/result.json");
+        assert!(frame.contains("FromBase64String"));
+        // Both code and path are base64-encoded — neither appears raw
+        assert!(!frame.contains("$x = 1; $x + 1"));
+        assert!(!frame.contains("/tmp/result.json"));
+        let encoded_code = base64::engine::general_purpose::STANDARD.encode("$x = 1; $x + 1");
+        let encoded_path = base64::engine::general_purpose::STANDARD.encode("/tmp/result.json");
+        assert!(frame.contains(&encoded_code));
+        assert!(frame.contains(&encoded_path));
     }
 
     #[test]
-    fn powershell_frame_runs_arbitrary_expression() {
-        // The new framing treats argv as raw PowerShell code. A
-        // single-statement expression must round-trip verbatim — no `&`
-        // prefix, no automatic single-quote wrapping (which is what made
-        // the previous frame fail on real PS expressions).
-        let frame = powershell_frame(&["$x = 1; $x + 1".into()], "abc123");
-        assert!(frame.starts_with("$LASTEXITCODE = $null; $x = 1; $x + 1;"));
-        assert!(frame.contains("__TENDER_EXEC__ abc123"));
-        assert!(frame.ends_with('\n'));
+    fn powershell_side_channel_frame_handles_special_chars() {
+        // Code with quotes, here-strings, backticks, $variables, multiline —
+        // all handled by base64.
+        let code = "$x = 'hello'; @\"\nvalue: $x\n\"@; `n";
+        let frame = powershell_frame(code, "/tmp/result.json");
+        assert!(frame.contains("FromBase64String"));
+        // Raw payload must not leak — these chars would break single-quoted PS strings.
+        assert!(!frame.contains("@\""));
+        assert!(!frame.contains("`n"));
     }
 
     #[test]
-    fn powershell_frame_runs_pipeline() {
-        let frame =
-            powershell_frame(&["1..3 | ForEach-Object { $_ * 10 }".into()], "abc123");
-        assert!(frame.contains("1..3 | ForEach-Object { $_ * 10 }"));
-        assert!(!frame.contains("'1..3"), "argv must not be wrapped in single quotes");
+    fn powershell_side_channel_frame_handles_windows_paths() {
+        // Windows path with backslashes and `\U` (which Python r-strings hate)
+        // round-trips because we base64-encode the path.
+        let frame = powershell_frame("$x + 1", r"C:\Users\rick\exec-results\abc.json");
+        assert!(!frame.contains(r"C:\Users")); // path must not appear raw
+        assert!(frame.contains("FromBase64String"));
+        let encoded_path = base64::engine::general_purpose::STANDARD
+            .encode(r"C:\Users\rick\exec-results\abc.json");
+        assert!(frame.contains(&encoded_path));
+    }
+
+    #[test]
+    fn powershell_frame_is_double_newline_terminated() {
+        // The frame MUST end with `\n\n`. A single `\n` leaves the PS REPL
+        // waiting for more input; the blank line forces it to flush the
+        // parser and execute. See PowerShell/PowerShell#3223.
+        let frame = powershell_frame("$x + 1", "/tmp/r.json");
+        assert!(frame.ends_with("\n\n"), "frame must end with two newlines");
     }
 
     #[test]

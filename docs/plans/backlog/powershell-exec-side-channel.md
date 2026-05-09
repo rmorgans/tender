@@ -10,6 +10,8 @@ links:
 
 # PowerShell Exec — Side-Channel Result Transport
 
+**Status: implemented.** See "Implementation Notes" below for the two empirical findings that diverged from the original design.
+
 Move PowerShell exec result reporting off the captured stdout stream and onto a side-channel result file (the existing `PythonRepl` pattern) so user-visible stdout is clean — no prompt prefix, no echoed framing line, no PowerShell terminal escapes.
 
 ## Why
@@ -192,3 +194,30 @@ If the PowerShell child dies before writing the result file, `wait_side_channel_
 - ~20 lines changed in the parent plan doc
 
 Total: roughly one focused commit, ~4–6 hours including the VM verification loop.
+
+## Implementation Notes (2026-05-10)
+
+Final implementation matches the plan shape: a single-line inline frame pushed to PS stdin, with a side-channel JSON result file. **One** behavioral fix beyond the original design is required: the inline frame must be terminated with two newlines (`\n\n`), not one.
+
+### The blank-line requirement
+
+PowerShell's interactive REPL — both Windows PowerShell 5.1 and PS Core 7+ — buffers complex multi-statement input (try/catch, if/elseif/else chains, hashtables, multi-line pipelines) on a sustained stdin pipe and waits for a **blank line** to flush the parser before executing, even when the syntax is already complete. With a single trailing `\n` the line is echoed to the session log but **never executed** — silently. With `\n\n` the same content runs immediately.
+
+This is documented upstream as [PowerShell/PowerShell#3223](https://github.com/PowerShell/PowerShell/issues/3223): *"the end of the multi-line command is never detected, causing it to be quietly ignored… Inserting an empty line after the multi-line command fixes the problem."* The behavior is the same on Windows PS 5.1 and pwsh 7.6.
+
+The frame in [`exec_frame::powershell_frame`] therefore ends with `"…[Move]…)\n\n"`. That single change is the entire deviation from the plan.
+
+### A red herring along the way
+
+Initial diagnosis (since corrected) blamed line length: a 962-byte inline frame ending in `\n` hung, while a 912-byte simple line worked. Bisecting on length led to a file-based pivot (frame on disk + short `& '<path>'` invocation). After verifying that **the same long inline frame runs cleanly on both Windows PS and pwsh when terminated with `\n\n`**, the file-based path was reverted in favor of the simpler inline approach the plan called for. The "long line" symptom was actually "complex multi-statement input without trailing blank line."
+
+### Other tightening
+
+- Test-session start args: `powershell -NoProfile` (interactive REPL). `-Command -` would buffer all stdin until EOF — incompatible with multiple execs against one persistent session.
+- Exit-code logic uses `if $_errBuf.Length -gt 0 { $_exit = 1 }` to detect ErrorRecord captures, since `$?` is reset to True by the success of the trailing `ForEach-Object` iteration.
+- Object rendering: `($_ | Out-String).TrimEnd()` per item (vs the proposed `Out-String -Stream`) avoids extra blank lines when objects render to multi-line strings.
+- pwsh.exe is interchangeable with powershell.exe for this use case — same blank-line requirement, same frame, same result envelope. Choice of host is an operational decision, not a tender concern.
+
+### Verified end-to-end on Win 11 ARM64
+
+All six plan acceptance scenarios pass against `tender exec ps -- <code>` on a `powershell -NoProfile` session: clean stdout, arbitrary expressions (`$x = 1; $x + 1` → `"2"`), pipelines (`1..3 | ForEach-Object { $_ * 10 }` → `"10\r\n20\r\n30\r\n"`), state persistence, stderr separation (`Write-Error 'oops'` → `stderr: "oops\r\n", exit 1`), and `cwd_after` tracking (`Set-Location C:\\` → `"C:\\"`).

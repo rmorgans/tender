@@ -908,6 +908,195 @@ fn exec_duckdb_path_with_spaces() {
     let _ = kill_cmd.output();
 }
 
+// ---------------------------------------------------------------------------
+// PowerShell side-channel exec — Windows-gated.
+// ---------------------------------------------------------------------------
+//
+// These tests start a `powershell -NoProfile` session with --exec-target
+// powershell and verify the side-channel result file path: stdout in the
+// envelope is clean (no prompt, no echoed framing), stderr is partitioned
+// from stdout, exit codes propagate, state persists across exec calls, and
+// cwd_after tracks Set-Location.
+
+#[cfg(windows)]
+fn powershell_start_args(session: &str) -> Vec<String> {
+    // Plain `powershell -NoProfile` enters interactive REPL mode and reads
+    // commands from the persistent stdin pipe. `-Command -` would buffer
+    // until EOF and only execute once — incompatible with multiple execs.
+    ["start", session, "--stdin", "--exec-target", "powershell", "--",
+     "powershell", "-NoProfile"]
+        .iter().map(|s| s.to_string()).collect()
+}
+
+/// PowerShell exec: simple echo produces clean stdout — no prompt prefix,
+/// no echoed framing, just the user's output.
+///
+/// Multi-element argv joins with `\n` (matching Python REPL semantics),
+/// so we pass the cmdlet+args as a single argument to keep it on one line.
+#[cfg(windows)]
+#[test]
+fn exec_powershell_clean_stdout() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(powershell_start_args("ps"))
+        .assert()
+        .success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "echo hello-world"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    let stdout = result["stdout"].as_str().unwrap();
+    assert!(!stdout.contains("PS "), "stdout must not contain prompt: {stdout:?}");
+    assert!(!stdout.contains("__TENDER_EXEC__"), "stdout must not contain framing");
+    assert!(!stdout.contains("FromBase64String"), "stdout must not contain frame source");
+    assert_eq!(stdout.trim(), "hello-world");
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
+/// PowerShell exec: arbitrary expression — `$x = 1; $x + 1` → stdout `2`.
+#[cfg(windows)]
+#[test]
+fn exec_powershell_arbitrary_expression() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root).args(powershell_start_args("ps")).assert().success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "$x = 1; $x + 1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert_eq!(result["stdout"].as_str().unwrap().trim(), "2");
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
+/// PowerShell exec: pipeline emits each item on its own line.
+#[cfg(windows)]
+#[test]
+fn exec_powershell_pipeline() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root).args(powershell_start_args("ps")).assert().success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--",
+               "1..3 | ForEach-Object { $_ * 10 }"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    let stdout = result["stdout"].as_str().unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines, vec!["10", "20", "30"], "pipeline output unexpected: {stdout:?}");
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
+/// PowerShell exec: variables persist across exec calls (same REPL session).
+#[cfg(windows)]
+#[test]
+fn exec_powershell_state_persists_across_calls() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root).args(powershell_start_args("ps")).assert().success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    // Set a variable
+    harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "$global:tender_test_var = 42"])
+        .assert()
+        .success();
+
+    // Read it back in a separate exec
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "$global:tender_test_var"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert_eq!(result["stdout"].as_str().unwrap().trim(), "42");
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
+/// PowerShell exec: Write-Error goes to stderr field, not stdout.
+#[cfg(windows)]
+#[test]
+fn exec_powershell_stderr_separated() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root).args(powershell_start_args("ps")).assert().success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "Write-Error 'oops'"])
+        .output()
+        .unwrap();
+
+    // Write-Error sets $? = false, so frame reports exit 1; CLI propagates.
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["stderr"].as_str().unwrap().contains("oops"),
+            "stderr should contain error: {:?}", result["stderr"]);
+    assert!(!result["stdout"].as_str().unwrap().contains("oops"),
+            "stderr must not leak into stdout: {:?}", result["stdout"]);
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
+/// PowerShell exec: Set-Location is reflected in cwd_after on next call.
+#[cfg(windows)]
+#[test]
+fn exec_powershell_cwd_after() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root).args(powershell_start_args("ps")).assert().success();
+    harness::wait_running(&root, "ps");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    // Change directory to C:\
+    let output = harness::tender(&root)
+        .args(["exec", "ps", "--timeout", "15", "--", "Set-Location C:\\"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exec failed: {}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cwd = result["cwd_after"].as_str().unwrap();
+    assert!(cwd.eq_ignore_ascii_case("C:\\") || cwd.eq_ignore_ascii_case("C:/"),
+            "cwd_after should reflect Set-Location, got: {cwd:?}");
+
+    let _ = harness::tender(&root).args(["kill", "ps", "--force"]).assert();
+}
+
 /// Side-channel result file is cleaned up after exec.
 #[test]
 fn exec_python_result_file_cleaned() {

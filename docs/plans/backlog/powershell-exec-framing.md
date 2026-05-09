@@ -11,10 +11,10 @@ Fix the PowerShell `exec` target so it can execute arbitrary PowerShell expressi
 
 ## Status
 
-The plan splits cleanly into two halves:
+Both halves are now done. See `powershell-exec-side-channel.md` for the second half's design and acceptance criteria.
 
-- **Framing half — DONE** in commit `3f6ff2b` (`fix(exec): PowerShell frame supports arbitrary expressions`). Argv is now joined and inlined as raw PowerShell code rather than wrapped with `& 'cmd' 'arg'`. Variable assignment, pipelines, and multi-statement payloads work; state persists across exec calls.
-- **Transcript-noise half — DEFERRED** to `powershell-exec-side-channel.md`. The captured `stdout` field still contains prompt + echoed framing line because PowerShell's pipe-stdin host emits both. Suppressing them via session-setup proved fragile; the side-channel result-file approach (mirroring `PythonRepl`) is the robust path.
+- **Framing half — DONE** in commit `3f6ff2b` (`fix(exec): PowerShell frame supports arbitrary expressions`). Argv was joined and inlined as raw PowerShell code rather than wrapped with `& 'cmd' 'arg'`. Variable assignment, pipelines, and multi-statement payloads worked; state persisted across exec calls. The PowerShell frame at that point still captured stdout via the sentinel-in-log path.
+- **Transcript-noise half — DONE** in the side-channel commit. The `powershell_frame` signature changed from `(argv, token) -> String` to `(code, result_path) -> String` (mirroring `python_frame`). The frame now base64-encodes both inputs, executes user code via `[scriptblock]::Create($code)`, partitions stream-2 `ErrorRecord` objects from real stdout via `2>&1 | ForEach-Object`, and writes a JSON result file atomically (`tmp + Move`). `commands/exec.rs` routes PowerShell through `WaitMode::SideChannel` and `drain_until_side_channel`. Stdout in the result envelope contains only user code output — no prompt, no echoed framing line.
 
 ## Why
 

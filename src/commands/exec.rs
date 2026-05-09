@@ -146,13 +146,13 @@ pub fn cmd_exec(
     if result.timed_out {
         use tender::model::spec::ExecTarget;
         match meta.launch_spec().exec_target {
-            ExecTarget::PosixShell | ExecTarget::PowerShell => {
+            ExecTarget::PosixShell => {
                 drain_until_sentinel(&session, &token);
             }
-            ExecTarget::PythonRepl => {
-                // The Python frame may still be running. Hold the exec lock
-                // until the result file appears (frame finished) or the session
-                // dies, to prevent a second exec from interleaving.
+            ExecTarget::PowerShell | ExecTarget::PythonRepl => {
+                // Frame may still be running. Hold the exec lock until the result
+                // file appears (frame finished) or the session dies, to prevent
+                // a second exec from interleaving.
                 drain_until_side_channel(&session, &token);
             }
             ExecTarget::DuckDb => {
@@ -261,7 +261,15 @@ fn run_exec(
 
     let (framed, wait_mode) = match meta.launch_spec().exec_target {
         ExecTarget::PosixShell => (exec_frame::unix_frame(cmd, token), WaitMode::Sentinel),
-        ExecTarget::PowerShell => (exec_frame::powershell_frame(cmd, token), WaitMode::Sentinel),
+        ExecTarget::PowerShell => {
+            let results_dir = session.path().join("exec-results");
+            std::fs::create_dir_all(&results_dir)?;
+            let result_path = results_dir.join(format!("{token}.json"));
+            let result_path_str = result_path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("session path is not valid UTF-8"))?;
+            let code = cmd.join("\n");
+            (exec_frame::powershell_frame(&code, result_path_str), WaitMode::SideChannel)
+        }
         ExecTarget::PythonRepl => {
             // Ensure exec-results dir exists
             let results_dir = session.path().join("exec-results");
@@ -305,6 +313,7 @@ fn run_exec(
         }
     };
     writer.write_all(framed.as_bytes())?;
+    writer.flush()?;
     drop(writer);
 
     // 4. Wait for result
