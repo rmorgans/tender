@@ -477,6 +477,53 @@ fn set_handle_inheritable(
 
 // --- Sidecar spawn (raw CreateProcessW) ---
 
+/// Whether the calling process's job (if any) permits child breakaway.
+///
+/// Returns true when:
+/// - The calling process is not in a job at all (breakaway flag is a no-op).
+/// - The calling process is in a job whose limits include
+///   `JOB_OBJECT_LIMIT_BREAKAWAY_OK`.
+///
+/// Returns false when the parent's job exists but forbids breakaway, or when
+/// the kernel queries fail. False is the safe default: the sidecar will
+/// inherit the parent's job (and lifetime) — a degradation, but better than
+/// failing the spawn outright with ERROR_ACCESS_DENIED.
+fn parent_job_allows_breakaway() -> bool {
+    use windows_sys::Win32::System::JobObjects::{
+        IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe {
+        // BOOL is defined as i32 in windows-sys.
+        let mut in_job: i32 = 0;
+        // SAFETY: GetCurrentProcess is a pseudo-handle, always valid.
+        // Second arg null = "the job containing the calling process".
+        if IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) == 0 {
+            return false;
+        }
+        if in_job == 0 {
+            return true; // not in any job — breakaway flag is a no-op, harmless
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        let mut returned: u32 = 0;
+        // SAFETY: null hJob means "the job associated with the calling process".
+        let ok = QueryInformationJobObject(
+            std::ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            &mut returned,
+        );
+        if ok == 0 {
+            return false;
+        }
+        (info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK) != 0
+    }
+}
+
 /// Spawn the sidecar with explicit handle whitelisting.
 ///
 /// Uses STARTUPINFOEXW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST so the sidecar
@@ -492,10 +539,11 @@ fn spawn_sidecar_raw(
 ) -> io::Result<u32> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-        InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-        STARTUPINFOEXW, UpdateProcThreadAttribute,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTUPINFOEXW,
+        UpdateProcThreadAttribute,
     };
 
     let ready_handle: HANDLE = ready_writer.as_raw_handle() as *mut _;
@@ -570,10 +618,23 @@ fn spawn_sidecar_raw(
     si_ex.lpAttributeList = attr_list;
 
     // --- Create process ---
-    let creation_flags = CREATE_NEW_PROCESS_GROUP
+    // CREATE_BREAKAWAY_FROM_JOB lets the sidecar escape any job object the
+    // parent (e.g. OpenSSH-Server's per-session job with KILL_ON_JOB_CLOSE)
+    // assigned us to. Without it, DETACHED_PROCESS only severs the *console*,
+    // not the *job* — and the sidecar dies on parent disconnect.
+    //
+    // Detect-then-spawn: ask the kernel whether the parent job allows
+    // breakaway. If we set CREATE_BREAKAWAY_FROM_JOB on a job that doesn't
+    // permit it, CreateProcessW fails with ERROR_ACCESS_DENIED — and we'd
+    // have to retry with a buffer that CreateProcessW may have mutated
+    // in-place. Detecting upfront avoids that.
+    let mut creation_flags = CREATE_NEW_PROCESS_GROUP
         | DETACHED_PROCESS
         | EXTENDED_STARTUPINFO_PRESENT
         | CREATE_UNICODE_ENVIRONMENT;
+    if parent_job_allows_breakaway() {
+        creation_flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
 
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
