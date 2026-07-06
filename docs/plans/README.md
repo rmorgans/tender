@@ -10,20 +10,19 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 | ID | File | Depends On |
 |----|------|------------|
-| event-emit-primitive | `00_event-emit-primitive.md` | powershell-exec-side-channel |
+| remote-exec-host-parity | `00_remote-exec-host-parity.md` | — |
+| event-emit-primitive | `01_event-emit-primitive.md` | — |
 
 ## backlog/ — Future Work
 
 | ID | File | Depends On |
 |----|------|------------|
-| agent-exec-spike | `agent-exec-spike.md` | — |
-| duckdb-exec | `duckdb-exec.md` | — |
-| pty-session-mode | `pty-session-mode.md` | — |
-| fleet-migration | `fleet-migration.md` | — |
+| fleet-migration | `fleet-migration.md` | remote-ssh-transport |
 | exec-annotation-ergonomics | `exec-annotation-ergonomics.md` | — |
 | pty-automation | `pty-automation.md` | pty-session-mode |
 | powershell-exec-framing | `powershell-exec-framing.md` | — |
-| provenance-on-lifecycle-transitions | `provenance-on-lifecycle-transitions.md` | — |
+| hermes-block-runtime-integration | `hermes-block-runtime-integration.md` | event-emit-primitive |
+| boo-integration | `boo-integration.md` | — |
 | boundary-metadata | `boundary-metadata.md` | — |
 | content-addressable-storage | `content-addressable-storage.md` | event-emit-primitive |
 | egui-block-terminal | `egui-block-terminal.md` | event-emit-primitive, content-addressable-storage |
@@ -33,7 +32,7 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 
 ## completed/
 
-30 completed plans. See `completed/` directory.
+36 completed plans. See `completed/` directory (`ls` is the source of truth for the count).
 
 ## specs/
 
@@ -46,3 +45,5 @@ Long-lived design documents (not queue items).
 | `persistence-architecture.md` | Storage layering: event log (source of truth) + in-memory index + blob store. No transactional DB. |
 | `decision-process-sitter-not-framework.md` | Decision: no native LLM protocol support (extended by `tender-as-block-runtime.md`) |
 | `sidecar-control-protocol.md` | Target architecture: portable sidecar control RPC (not scheduled) |
+| `ecosystem-landscape.md` | Where tender sits vs boo/libghostty/Warp + the four work lanes (core / satellites / storage / interop) |
+| `event-protocol.md` | **Schema owner** for the structured event stream: daemonless files-first envelope, ordering contract, cursors, watch/wrap migration |
