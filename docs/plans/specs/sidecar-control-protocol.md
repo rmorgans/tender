@@ -146,7 +146,7 @@ These are the operations that would migrate from file-based IPC to control RPC i
 
 PTY automation is designed against file-based lease IPC and does not depend on this protocol. If the control protocol is built later, lease operations are natural migration candidates — but PTY automation should ship first on the current file-based design.
 
-### Provenance (`backlog/provenance-on-lifecycle-transitions.md`)
+### Provenance (`completed/2026-04-16-provenance-on-lifecycle-transitions.md`)
 
 Already shipped. The provenance model (Direct vs Inferred) applies equally to file-based and RPC-based writes. No interaction.
 

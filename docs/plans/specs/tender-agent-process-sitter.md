@@ -260,6 +260,18 @@ tender wrap --session claude-1 --namespace ws-1 --source claude_hook -- <hook-co
 
 **`wrap` is the public annotation primitive. There is no public `emit` command.**
 
+> **Superseded 2026-07-06:** the no-public-`emit` policy, the watch
+> envelope, and the annotation-ingestion event model in this section are
+> superseded by [event-protocol.md](event-protocol.md), which adds a public
+> `tender emit` (daemonless O_APPEND to the per-session event log, granular
+> exit codes, `--best-effort`) alongside `wrap`, now sugar over the same
+> append. The forgery concern below is answered differently: reserved
+> `kind` prefixes (`run.` etc.) are rejected for user-supplied kinds, so
+> lifecycle truth still cannot be forged; arbitrary events are attributed
+> via `source`/`writer` rather than prevented. The provenance argument for
+> `wrap` stands — wrap events carry observed execution data — it is no
+> longer exclusive.
+
 Why `wrap` over `emit`:
 
 - **Provenance.** `wrap` observed the actual execution — stdin payload, stdout response, stderr, exit code. `emit` would only carry "some process asserted this happened."
