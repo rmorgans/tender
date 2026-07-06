@@ -5,11 +5,24 @@ depends_on:
   - skill-claude-code
 links:
   - ../specs/tender-as-block-runtime.md
-  - ../active/00_event-emit-primitive.md
+  - ../active/01_event-emit-primitive.md
   - ../backlog/skill-claude-code.md
 ---
 
 # Hermes Block-Runtime Integration
+
+> **Superseded 2026-07-06 — rewrite pending.** Everything below predates
+> [event-protocol.md](../specs/event-protocol.md): `tender event emit`,
+> `watch --json`, `parent_block_id`, the custom envelope, UUIDv4 ids, and
+> the "running Tender daemon" requirement no longer exist. The rewrite is a
+> thin consumer: hook scripts run
+> `tender emit --kind hook.hermes.<event> --source hermes.hook --data-stdin --best-effort`
+> inside a supervised session; the bridge/UI reads
+> `tender events --follow --kind hook.hermes.` (protocol slice 2). The
+> namespace bug (emitting to `hermes-${SESSION_ID}` while every consumer
+> reads `hermes`) dies with the rewrite. Retained value: the Hermes-side
+> hook inventory and consent mechanism, pending verification against Hermes
+> docs.
 
 Make Hermes a first-class event producer for Tender's block-runtime stream.
 No changes to either codebase — config + a thin shell bridge only.
@@ -79,7 +92,7 @@ Layer 0: Agent          (Hermes owns)
 
 ## Required: Tender Side
 
-1. `tender event emit` ships (active: `00_event-emit-primitive.md`)
+1. `tender event emit` ships (active: `01_event-emit-primitive.md`)
 2. A running Tender daemon on the local host or `--host` path
 
 ## Required: Hermes Side
