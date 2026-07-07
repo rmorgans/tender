@@ -337,10 +337,16 @@ Fallen-behind follower → cursor-gone 44, defined recovery.
 Sliced in
 [`2026-07-07-event-emit-primitive.md`](../completed/2026-07-07-event-emit-primitive.md)
 (slice 1 = envelope + append + sidecar WAL lifecycle events + emit + replay —
-**shipped 2026-07-07, PR #4**; follow/cursors, blocks/sugar, log lifecycle,
-and reach follow remain). Slice 2 (follow, cursors, re-backed watch) is
-planned in
-[`01_event-follow-cursors.md`](../active/01_event-follow-cursors.md). The
+**shipped 2026-07-07, PR #4**). Slice 2 (follow, cursors, re-backed watch —
+**shipped 2026-07-07, PR #7**) landed via
+[`2026-07-07-event-follow-cursors.md`](../completed/2026-07-07-event-follow-cursors.md):
+`--follow`/`--from-now`/`--since`/`--last`, cursor tokens with exact resume
+and cursor-gone exit 44, `--cursors` bookmarks, `--include-logs`
+projection, and watch re-backed by the event log with its output shape
+frozen. Next planned slice is slice 3 (exec/wrap integration: `exec.*`
+kinds, `TENDER_BLOCK_ID`/`TENDER_PARENT_EVENT_ID`, `callback.finished`,
+`pty.control_changed`) — no active plan yet. Blocks/sugar beyond that, log
+lifecycle (slice 4), and reach follow (slice 5) remain unscheduled. The
 `--replace` events carry-forward is deliberately deferred and gated on a
 demonstrated consumer need (the judges split on it; shipped replace
 semantics stand until the block terminal demands cross-generation history —

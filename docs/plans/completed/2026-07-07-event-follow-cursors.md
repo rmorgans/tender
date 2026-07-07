@@ -3,10 +3,18 @@ id: event-follow-cursors
 depends_on: []
 links:
   - ../specs/event-protocol.md
-  - ../completed/2026-07-07-event-emit-primitive.md
+  - 2026-07-07-event-emit-primitive.md
 ---
 
 # Event Protocol Slice 2 — follow, cursors, re-backed watch
+
+**Shipped 2026-07-07** via PR #7 (main@0b0aa7c). All acceptance criteria
+below are test-covered (`cli_events_cursor`, `cli_events_follow`,
+`cli_events_logs`, `cli_events_warmstart`, `cli_watch_rebacked`,
+`events_read`, and cursor-token round-trip properties in
+`proptest_invariants`). Shipped as planned — no schema or semantics
+deviations; cursor errors landed as a `#[non_exhaustive]` `CursorError` in
+the shared lib core. Slices 3–5 remain unscheduled.
 
 Implements slice 2 of [specs/event-protocol.md](../specs/event-protocol.md)
 (the schema owner — envelope/storage/ordering decisions live there, not
@@ -15,7 +23,7 @@ resume (Kubernetes semantics on files, §5.2), and `tender watch` is
 internally re-backed by the event log with its output shape frozen (§5.3).
 Slice 1 (envelope, append, WAL lifecycle events, emit, replay) shipped
 2026-07-07 via PR #4 — see
-[completed/2026-07-07-event-emit-primitive.md](../completed/2026-07-07-event-emit-primitive.md).
+[2026-07-07-event-emit-primitive.md](2026-07-07-event-emit-primitive.md).
 
 Still daemonless: follow is polling at the shipped 100 ms constant; the
 disk is the buffer; no notify hints in this slice (poll remains the
