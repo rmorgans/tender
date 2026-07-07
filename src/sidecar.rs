@@ -367,6 +367,27 @@ impl LifecycleEvents {
         }
     }
 
+    /// Like `new`, but with a freshly minted writer identity — for sidecar
+    /// threads that append concurrently with the lifecycle writer (the
+    /// attach listener). The protocol is multi-writer by design: each
+    /// writer keeps its own contiguous `seq` chain (spec §1).
+    fn with_fresh_writer(
+        session_dir: &Path,
+        namespace: &Namespace,
+        session: &SessionName,
+        run_id: RunId,
+        generation: Generation,
+    ) -> Self {
+        Self {
+            session_dir: session_dir.to_path_buf(),
+            writer: EventWriter::new(session_dir),
+            namespace: namespace.clone(),
+            session: session.clone(),
+            run_id,
+            generation,
+        }
+    }
+
     /// Append the lifecycle event for meta's CURRENT status. Never fails the
     /// run: an append failure becomes a meta warning and the record is
     /// salvaged to lost+found — supervision must not die, and the history
@@ -716,6 +737,13 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         let attach_sink_clone = Arc::clone(&attach_sink);
         let session_path = session_dir.to_path_buf();
         let resize_fd = pty_resize_fd.take();
+        let facts = LifecycleEvents::with_fresh_writer(
+            session_dir,
+            &namespace,
+            &session_name,
+            run_id,
+            generation,
+        );
         std::thread::spawn(move || {
             run_attach_listener(
                 &sock_path,
@@ -723,6 +751,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
                 attach_sink_clone,
                 &session_path,
                 resize_fd,
+                facts,
             );
         });
     }
@@ -1114,6 +1143,7 @@ fn run_attach_listener(
     attach_sink: AttachSink,
     session_dir: &Path,
     resize_fd: Option<std::fs::File>,
+    mut facts: LifecycleEvents,
 ) {
     use crate::attach_proto;
     use std::os::unix::net::UnixListener;
@@ -1142,6 +1172,13 @@ fn run_attach_listener(
         // Set attach sink -- capture thread starts teeing output
         *attach_sink.lock().unwrap() = Some(Box::new(write_half));
 
+        // Durable control fact before the meta flip (WAL order, spec §3.6).
+        // Minimal by design: who owns the PTY's input, nothing else —
+        // screen-state semantics are adapter territory (plan boundary note).
+        facts.append_fact(
+            "pty.control_changed",
+            serde_json::json!({"control": "HumanControl", "trigger": "attach"}),
+        );
         // Update meta to HumanControl
         update_pty_control(session_dir, "HumanControl");
 
@@ -1169,6 +1206,10 @@ fn run_attach_listener(
         // Clear attach sink -- capture thread stops teeing
         *attach_sink.lock().unwrap() = None;
 
+        facts.append_fact(
+            "pty.control_changed",
+            serde_json::json!({"control": "AgentControl", "trigger": "detach"}),
+        );
         // Update meta to AgentControl
         update_pty_control(session_dir, "AgentControl");
     }

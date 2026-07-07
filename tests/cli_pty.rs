@@ -470,3 +470,64 @@ fn resize_message_accepted() {
     drop(stream);
     tender(&root).args(["kill", "pty-resize"]).output().ok();
 }
+
+// --- Slice 3: pty.control_changed events (plan scope 6) ---
+
+/// Attach then detach emits two pty.control_changed events — the shipped
+/// PtyControl vocabulary, exactly the two pinned data fields, appended
+/// before the corresponding meta flip, from the attach thread's own writer.
+#[test]
+fn attach_detach_emit_control_changed_events() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    tender(&root)
+        .args(["start", "pty-ev", "--pty", "--stdin", "--", "cat"])
+        .output()
+        .unwrap();
+    harness::wait_running(&root, "pty-ev");
+    let sock_path = wait_for_attach_socket(&root, "pty-ev");
+
+    let human = attach_as_human(&sock_path);
+    wait_for_pty_control(&root, "pty-ev", "HumanControl");
+    // WAL order: once meta shows the flip, the event must already be stored.
+    let events = harness::read_events(&root, "pty-ev");
+    assert!(
+        events.iter().any(|e| e["kind"] == "pty.control_changed"),
+        "event lands before the meta control write"
+    );
+
+    drop(human);
+    wait_for_pty_control(&root, "pty-ev", "AgentControl");
+
+    let events = harness::read_events(&root, "pty-ev");
+    let changed: Vec<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "pty.control_changed")
+        .collect();
+    assert_eq!(changed.len(), 2);
+    assert_eq!(
+        changed[0]["data"],
+        serde_json::json!({"control": "HumanControl", "trigger": "attach"}),
+        "minimal by design — a control fact, not a screen event"
+    );
+    assert_eq!(
+        changed[1]["data"],
+        serde_json::json!({"control": "AgentControl", "trigger": "detach"})
+    );
+    for event in &changed {
+        assert_eq!(event["source"], "tender.sidecar");
+    }
+
+    // The attach thread owns its own writer (multi-writer by design).
+    let started = events.iter().find(|e| e["kind"] == "run.started").unwrap();
+    assert_ne!(
+        changed[0]["writer"], started["writer"],
+        "not the lifecycle writer"
+    );
+    assert_eq!(changed[0]["writer"], changed[1]["writer"]);
+    assert_eq!(changed[0]["seq"], 1);
+    assert_eq!(changed[1]["seq"], 2);
+
+    tender(&root).args(["kill", "pty-ev"]).output().ok();
+}
