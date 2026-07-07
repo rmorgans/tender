@@ -11,6 +11,7 @@ Filename prefix sets priority. `ls active/` is the ordered queue.
 | ID | File | Depends On |
 |----|------|------------|
 | remote-exec-host-parity | `00_remote-exec-host-parity.md` | — |
+| event-exec-wrap-integration | `01_event-exec-wrap-integration.md` | — |
 
 ## backlog/ — Future Work
 
