@@ -176,7 +176,7 @@ None of these are Tender's responsibility to ship. They are *enabled* by the pro
 |--------------|--------------|
 | [boundary-metadata](../backlog/boundary-metadata.md) | Blocks gain a `boundary` field via `LaunchSpec.boundary`. No conflict. |
 | [provenance-on-lifecycle-transitions](../completed/2026-04-16-provenance-on-lifecycle-transitions.md) | The `transition_provenance` becomes a first-class field on every emitted lifecycle event. Aligns. |
-| [skill-claude-code](../backlog/skill-claude-code.md) | The skill should teach hooks → `tender event emit` as the primary integration pattern for Claude Code. |
+| [skill-agent-block-runtime](../backlog/skill-agent-block-runtime.md) | The skill should teach hooks → `tender emit` as the primary integration pattern for hook-capable agents. |
 | [pty-automation](../backlog/pty-automation.md) | Orthogonal — automation is layer 3 control; events are layer 3 observation. |
 
 No backlog item is contradicted. Several are amplified.
@@ -196,7 +196,7 @@ Ordered by leverage-to-effort. Each is or becomes its own backlog/active item.
 
 1. **Complete in-flight Phase 2A.3 PowerShell exec work.** Foundation. No change in scope.
 2. **`--namespace` semantic completion** (`tender start --namespace …`, `tender exec --namespace …`, `tender list --namespace …`, `tender watch --namespace`). Already partly shipped; finish the surface. Namespace is the correlation key for everything downstream.
-3. **`tender event emit` primitive** — see active queue item `01_event-emit-primitive.md`. ~150 lines of Rust. Adds: subcommand, reserved env vars, event schema with `schema_version: 1`, JSON-on-stdin ingestion. No new deps.
+3. **`tender emit` primitive** — shipped 2026-07-07 (PR #4) as event protocol slice 1; see `completed/2026-07-07-event-emit-primitive.md`. Shipped shape follows [event-protocol.md](event-protocol.md) (`tender emit`, envelope `v:1`, no stdin daemon), not the sketch that stood here.
 4. **`tender watch --namespace --json` NDJSON multiplexed event stream.** Documented and stabilised. This is the consumer-facing protocol. Specify event shape and ordering guarantees.
 5. **`on_exit` callback delivery** finished (already partly designed — see [slice2-on-exit](../completed/2026-03-28-slice2-on-exit.md) — but lifecycle-hook callbacks emit through the event stream now, not as a separate channel).
 6. **Tag v0.3.0, ship Homebrew formula.** Production readiness milestone for downstream consumers.
