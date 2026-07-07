@@ -3,9 +3,11 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tender::model::ids::{Namespace, SessionName, Source};
+use tender::events::{self, EventDraft, EventWriter};
+use tender::model::event::{Event, Kind, KindError, Uuid7};
+use tender::model::ids::{Namespace, RunId, SessionName, Source};
 use tender::platform::{Current, Platform};
-use tender::session::{self, SessionRoot};
+use tender::session::{self, SessionDir, SessionRoot};
 
 /// Re-export shared constants for local use.
 const MAX_FIELD_BYTES: usize = tender::annotation::MAX_FIELD_BYTES;
@@ -21,6 +23,30 @@ pub fn cmd_wrap(
     event: &str,
     cmd: Vec<String>,
 ) -> anyhow::Result<()> {
+    // Argument validation before any side effect (spec §1/§6): a reserved
+    // --event is a loud config error (exit 6, child never runs). A
+    // grammar-invalid one (legacy dotless names like "pre-tool-use") keeps
+    // the pre-slice-3 behavior — A-line only, no stored event, no env
+    // chain — because annotations are free-form while stored events are
+    // kinds.
+    let kind = match Kind::new_user(event) {
+        Ok(kind) => Some(kind),
+        Err(KindError::ReservedPrefix(prefix)) => {
+            eprintln!(
+                "tender wrap: --event '{event}' uses the reserved prefix '{prefix}' \
+                 (tender-owned schema)"
+            );
+            std::process::exit(6);
+        }
+        Err(_) => {
+            eprintln!(
+                "tender wrap: --event '{event}' is not a valid event kind; \
+                 writing annotation only (no stored event)"
+            );
+            None
+        }
+    };
+
     let run_id = std::env::var("TENDER_RUN_ID").map_err(|_| {
         anyhow::anyhow!("TENDER_RUN_ID not set — wrap must run inside a tender-supervised process")
     })?;
@@ -43,7 +69,19 @@ pub fn cmd_wrap(
     if cmd.is_empty() {
         anyhow::bail!("no command specified");
     }
-    let env = BTreeMap::new();
+
+    // Pre-minted identity (spec §2): TENDER_PARENT_EVENT_ID names the event
+    // wrap WILL write after the child exits, so hook-spawned emits chain to
+    // it; TENDER_BLOCK_ID is wrap's own fresh block.
+    let causality = kind
+        .is_some()
+        .then(|| (Uuid7::new(), Uuid7::new(), events::env_parent_chain()));
+
+    let mut env = BTreeMap::new();
+    if let Some((event_id, block_id, _)) = &causality {
+        env.insert("TENDER_BLOCK_ID".to_owned(), block_id.to_string());
+        env.insert("TENDER_PARENT_EVENT_ID".to_owned(), event_id.to_string());
+    }
     let mut child = Current::spawn_child(&cmd, true, None, &env)
         .map_err(|e| anyhow::anyhow!("failed to spawn '{}': {e}", cmd[0]))?;
     let kill_handle = Current::child_kill_handle(&child);
@@ -69,8 +107,31 @@ pub fn cmd_wrap(
     let _ = io::stdout().write_all(&stdout_bytes);
     let _ = io::stderr().write_all(&stderr_bytes);
 
+    // Dual-write (spec §0): the authoritative event first, then the A-line
+    // projection linked to it by event_id. Both best-effort — the child's
+    // exit code always passes through.
+    let stored_event = match (&kind, &causality) {
+        (Some(kind), Some((event_id, block_id, parent_id))) => append_wrap_event(
+            &session_dir,
+            namespace,
+            &session_name,
+            &run_id,
+            kind.clone(),
+            source,
+            *event_id,
+            *block_id,
+            *parent_id,
+            &stdin_buf,
+            &stdout_bytes,
+            &stderr_bytes,
+            exit_code,
+            &cmd,
+        ),
+        _ => None,
+    };
+
     // Build and write annotation
-    let payloads = build_annotation_payloads(
+    let mut payloads = build_annotation_payloads(
         source,
         event,
         &run_id,
@@ -80,6 +141,14 @@ pub fn cmd_wrap(
         exit_code,
         &cmd,
     );
+    if let Some((_, block_id, _)) = &causality {
+        for payload in &mut payloads {
+            payload["block_id"] = serde_json::json!(block_id.to_string());
+            if let Some(event) = &stored_event {
+                payload["event_id"] = serde_json::json!(event.id.to_string());
+            }
+        }
+    }
 
     let log_path = session_dir.path().join("output.log");
     let mut wrote = false;
@@ -103,6 +172,66 @@ pub fn cmd_wrap(
 
     // Exit with child's exit code
     std::process::exit(exit_code.unwrap_or(1));
+}
+
+/// Best-effort append of wrap's hook event with its pre-minted id — the
+/// authoritative half of the dual-write (spec §0, data shape = spec
+/// example (b)). Failures warn on stderr; the A-line and the child's exit
+/// code are unaffected.
+#[allow(clippy::too_many_arguments)]
+fn append_wrap_event(
+    session_dir: &SessionDir,
+    namespace: &Namespace,
+    session: &SessionName,
+    run_id_env: &str,
+    kind: Kind,
+    source: &Source,
+    event_id: Uuid7,
+    block_id: Uuid7,
+    parent_id: Option<Uuid7>,
+    stdin_buf: &[u8],
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+    exit_code: Option<i32>,
+    cmd: &[String],
+) -> Option<Event> {
+    let run_id_value = serde_json::Value::String(run_id_env.to_owned());
+    let Ok(run_id) = serde_json::from_value::<RunId>(run_id_value) else {
+        eprintln!("tender wrap: TENDER_RUN_ID is not a valid run id; skipping stored event");
+        return None;
+    };
+    let generation = std::env::var("TENDER_GENERATION")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
+    let data = serde_json::json!({
+        "hook_stdin": try_parse_json_or_string(stdin_buf),
+        "hook_stdout": try_parse_json_or_string(stdout_bytes),
+        "hook_stderr": String::from_utf8_lossy(stderr_bytes).into_owned(),
+        "hook_exit_code": exit_code,
+        "command": cmd,
+        "truncated": false,
+    });
+    let draft = EventDraft {
+        id: Some(event_id),
+        kind,
+        namespace: namespace.clone(),
+        session: session.clone(),
+        run_id,
+        generation,
+        source: source.clone(),
+        block_id: Some(block_id),
+        parent_id,
+        data: Some(data),
+        preview: None,
+    };
+    match EventWriter::new(session_dir.path()).append(draft, false) {
+        Ok(event) => Some(event),
+        Err(e) => {
+            eprintln!("tender wrap: event append failed: {e}");
+            None
+        }
+    }
 }
 
 fn build_annotation_payloads(
