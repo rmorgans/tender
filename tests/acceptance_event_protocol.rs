@@ -257,3 +257,233 @@ fn duckdb_reads_events_as_typed_rows() {
     assert_eq!(rows[0]["seq"], 1);
     assert!(rows[0]["run_id"].is_string());
 }
+
+// --- Slice 3 acceptance (docs/plans/active/00_event-exec-wrap-integration.md) ---
+
+/// An exec payload running `tender emit` lands in the exec block (frame
+/// env propagation), and after the block the session shell is unpolluted —
+/// probed via a raw `tender push` (a follow-up exec exports its own var).
+#[cfg(unix)]
+#[test]
+fn exec_payload_emit_chains_and_env_unsets() {
+    let root = TempDir::new().unwrap();
+    tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let bin = assert_cmd::cargo::cargo_bin("tender");
+    tender(&root)
+        .args([
+            "exec",
+            "shell",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{} emit --kind build.step --data '{{}}' --best-effort",
+                shell_words::quote(bin.to_str().unwrap())
+            ),
+        ])
+        .assert()
+        .success();
+
+    let events = harness::read_events(&root, "shell");
+    let started = events
+        .iter()
+        .find(|e| e["kind"] == "exec.started")
+        .expect("exec.started");
+    let step = events
+        .iter()
+        .find(|e| e["kind"] == "build.step")
+        .expect("payload emit stored");
+    assert_eq!(
+        step["block_id"], started["block_id"],
+        "payload emit lands in the exec block"
+    );
+    assert_eq!(
+        step["parent_id"], started["block_id"],
+        "block is the ambient parent"
+    );
+
+    // Probe the shell env after the block via raw push.
+    tender(&root)
+        .args(["push", "shell"])
+        .write_stdin("echo probe_${TENDER_BLOCK_ID:-unset}\n")
+        .assert()
+        .success();
+    let log_path = root.path().join(".tender/sessions/default/shell/output.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if content.contains("probe_unset") {
+            break;
+        }
+        assert!(
+            !content.contains("probe_01"),
+            "TENDER_BLOCK_ID leaked past the block"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe output never arrived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let _ = tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// exec with ≥1 MiB stdout: the full data spills to a content-addressed
+/// blob while the inline preview keeps exit_code/cwd_after queryable.
+#[cfg(unix)]
+#[test]
+fn exec_one_mib_stdout_spills_with_structured_preview() {
+    let root = TempDir::new().unwrap();
+    tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = tender(&root)
+        .args([
+            "exec",
+            "shell",
+            "--timeout",
+            "60",
+            "--",
+            "sh",
+            "-c",
+            // The trailing echo matters: without a final newline the
+            // sentinel would share the payload's line and never parse.
+            "head -c 1048576 /dev/zero | tr '\\0' 'x'; echo",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = harness::read_events(&root, "shell");
+    let result = events
+        .iter()
+        .find(|e| e["kind"] == "exec.result")
+        .expect("exec.result");
+
+    assert_eq!(result["truncated"], true);
+    let data_ref = &result["data_ref"];
+    let sha = data_ref["sha256"].as_str().expect("valid data_ref");
+    assert_eq!(sha.len(), 64);
+
+    // The blob holds the full result data.
+    let blob_path = root
+        .path()
+        .join(".tender/sessions/default/shell")
+        .join(data_ref["path"].as_str().unwrap());
+    let full: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&blob_path).unwrap()).unwrap();
+    assert!(full["stdout"].as_str().unwrap().len() >= 1024 * 1024);
+    assert_eq!(full["exit_code"], 0);
+
+    // The inline preview is structured: exit_code/cwd_after queryable
+    // without fetching the blob (spec example (d)).
+    let preview = &result["data"];
+    assert_eq!(preview["exit_code"], 0);
+    assert!(preview["cwd_after"].is_string());
+    assert_eq!(preview["timed_out"], false);
+    assert_eq!(preview["truncated"], true);
+    assert!(preview["stdout_preview"].as_str().unwrap().starts_with('x'));
+    assert!(preview.get("stdout").is_none(), "preview renames the field");
+
+    let _ = tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// The plan's validation scenario: a wrapped hook whose script emits — the
+/// causal tree rebuilds in one DuckDB pass over the three foreign keys.
+/// Self-skips when duckdb is not installed.
+#[test]
+fn wrap_hook_causal_tree_rebuilds_in_duckdb() {
+    if std::process::Command::new("duckdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: duckdb not on PATH");
+        return;
+    }
+
+    let root = TempDir::new().unwrap();
+    tender(&root)
+        .args(["start", "agent", "--", "sleep", "60"])
+        .assert()
+        .success();
+    wait_running(&root, "agent");
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join(".tender/sessions/default/agent/meta.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let run_id = meta["run_id"].as_str().unwrap();
+
+    let bin = assert_cmd::cargo::cargo_bin("tender");
+    tender(&root)
+        .env("TENDER_RUN_ID", run_id)
+        .env("TENDER_SESSION", "agent")
+        .env("TENDER_NAMESPACE", "default")
+        .args([
+            "wrap",
+            "--session",
+            "agent",
+            "--source",
+            "claude.hook",
+            "--event",
+            "hook.post_tool_use",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{} emit --kind hook.note --data '{{\"note\":1}}' --best-effort",
+                shell_words::quote(bin.to_str().unwrap())
+            ),
+        ])
+        .assert()
+        .success();
+
+    let glob = root
+        .path()
+        .join(".tender/sessions/default/agent/events/*.jsonl");
+    let query = format!(
+        "SELECT parent.kind AS parent_kind, \
+                child.block_id = parent.block_id AS same_block \
+         FROM read_json('{g}') child JOIN read_json('{g}') parent \
+           ON child.parent_id = parent.id \
+         WHERE child.kind = 'hook.note'",
+        g = glob.display()
+    );
+    let out = std::process::Command::new("duckdb")
+        .args(["-json", "-c", &query])
+        .output()
+        .expect("duckdb runs");
+    assert!(
+        out.status.success(),
+        "duckdb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(rows.len(), 1, "one causal edge: note → hook event");
+    assert_eq!(rows[0]["parent_kind"], "hook.post_tool_use");
+    // duckdb -json renders booleans as strings.
+    assert!(
+        rows[0]["same_block"] == "true" || rows[0]["same_block"] == true,
+        "note shares the hook's block, got: {}",
+        rows[0]["same_block"]
+    );
+
+    let _ = tender(&root).args(["kill", "agent", "--force"]).assert();
+}

@@ -109,7 +109,7 @@ impl EventWriter {
             prepare_data(&self.session_dir, draft.data, draft.preview);
         let event = Event {
             v: ENVELOPE_VERSION,
-            id: draft.id.unwrap_or_else(Uuid7::new),
+            id: draft.id.unwrap_or_default(), // Default mints a fresh v7
             ts: EventTimestamp::now(),
             kind: draft.kind,
             namespace: draft.namespace,
@@ -146,7 +146,7 @@ pub fn stamp_orphan_event(draft: EventDraft) -> Event {
     };
     Event {
         v: ENVELOPE_VERSION,
-        id: draft.id.unwrap_or_else(Uuid7::new),
+        id: draft.id.unwrap_or_default(), // Default mints a fresh v7
         ts: EventTimestamp::now(),
         kind: draft.kind,
         namespace: draft.namespace,

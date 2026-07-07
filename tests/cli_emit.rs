@@ -205,8 +205,8 @@ fn emit_parent_flag_beats_env_chain() {
 
     let explicit = uuid::Uuid::now_v7().to_string();
     tender(&root)
-        .env("TENDER_BLOCK_ID", &uuid::Uuid::now_v7().to_string())
-        .env("TENDER_PARENT_EVENT_ID", &uuid::Uuid::now_v7().to_string())
+        .env("TENDER_BLOCK_ID", uuid::Uuid::now_v7().to_string())
+        .env("TENDER_PARENT_EVENT_ID", uuid::Uuid::now_v7().to_string())
         .args([
             "emit",
             "--kind",
