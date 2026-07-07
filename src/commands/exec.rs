@@ -165,7 +165,7 @@ pub fn cmd_exec(
     );
 
     let token = exec_frame::generate_token();
-    let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
+    let result = run_exec(&session, &meta, &cmd, &token, timeout, block_id)?;
 
     // If timed out, the in-shell command may still be running.
     // Hold the exec lock and drain until the sentinel arrives (or session dies)
@@ -328,6 +328,7 @@ fn run_exec(
     cmd: &[String],
     token: &str,
     timeout: Option<u64>,
+    block_id: Uuid7,
 ) -> anyhow::Result<ExecResult> {
     let session_name = meta.session().as_str().to_string();
     let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
@@ -352,7 +353,13 @@ fn run_exec(
     }
 
     let (framed, wait_mode) = match meta.launch_spec().exec_target {
-        ExecTarget::PosixShell => (exec_frame::unix_frame(cmd, token), WaitMode::Sentinel),
+        // PosixShell is the only target with env propagation this slice
+        // (plan scope 2) — REPL/PowerShell frames are deferred until a
+        // consumer demands it.
+        ExecTarget::PosixShell => (
+            exec_frame::unix_frame(cmd, token, &block_id.to_string()),
+            WaitMode::Sentinel,
+        ),
         ExecTarget::PowerShell => {
             let results_dir = session.path().join("exec-results");
             std::fs::create_dir_all(&results_dir)?;

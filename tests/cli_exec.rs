@@ -1317,3 +1317,32 @@ fn exec_event_append_is_best_effort() {
 
     let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
 }
+
+/// The PosixShell frame exports TENDER_BLOCK_ID for the payload's duration:
+/// the payload sees exactly the block_id its exec events carry.
+#[test]
+fn exec_payload_sees_block_id_env() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "printenv", "TENDER_BLOCK_ID"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let seen = envelope["stdout"].as_str().unwrap().trim().to_owned();
+
+    let events = harness::read_events(&root, "shell");
+    let result = events.iter().find(|e| e["kind"] == "exec.result").unwrap();
+    assert_eq!(seen, result["block_id"].as_str().unwrap());
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
