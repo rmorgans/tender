@@ -338,7 +338,9 @@ Sliced in
 [`2026-07-07-event-emit-primitive.md`](../completed/2026-07-07-event-emit-primitive.md)
 (slice 1 = envelope + append + sidecar WAL lifecycle events + emit + replay —
 **shipped 2026-07-07, PR #4**; follow/cursors, blocks/sugar, log lifecycle,
-and reach follow remain). The
+and reach follow remain). Slice 2 (follow, cursors, re-backed watch) is
+planned in
+[`01_event-follow-cursors.md`](../active/01_event-follow-cursors.md). The
 `--replace` events carry-forward is deliberately deferred and gated on a
 demonstrated consumer need (the judges split on it; shipped replace
 semantics stand until the block terminal demands cross-generation history —
