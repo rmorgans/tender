@@ -4,7 +4,7 @@ use std::thread;
 use anyhow::Context;
 use tender::directive::{self, Directives};
 use tender::log::{LogQuery, follow_log};
-use tender::model::ids::{EpochTimestamp, Namespace};
+use tender::model::ids::Namespace;
 use tender::model::state::{ExitReason, RunStatus};
 use tender::session;
 
@@ -151,12 +151,9 @@ fn foreground_wait(session: &session::SessionDir) -> anyhow::Result<()> {
     let mut meta: tender::model::meta::Meta = serde_json::from_str(&content)?;
 
     // Reconciliation: if the sidecar crashed between the follow thread's last
-    // check and now (unlikely but possible).
-    if !meta.status().is_terminal() && !session::is_locked(session).unwrap_or(true) {
-        if meta.reconcile_sidecar_lost(EpochTimestamp::now()).is_ok() {
-            let _ = session::write_meta_atomic(session, &meta);
-        }
-    }
+    // check and now (unlikely but possible). Best-effort — heals from the
+    // event log or infers SidecarLost (spec §3.6).
+    let _ = tender::reconcile::reconcile_sidecar_gone(session, &mut meta);
 
     // Propagate exit code.
     match meta.status() {

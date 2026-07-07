@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use tender::model::ids::{EpochTimestamp, Namespace, SessionName};
+use tender::model::ids::{Namespace, SessionName};
 use tender::model::meta::Meta;
 use tender::model::state::{ExitReason, RunStatus};
 use tender::session::{self, SessionRoot};
@@ -69,11 +69,10 @@ pub fn cmd_wait(
 
             let mut meta = session::read_meta(session_dir)?;
 
-            // Reconciliation: non-terminal + lock not held -> sidecar crashed
-            if !meta.status().is_terminal() && !session::is_locked(session_dir)? {
-                meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
-                session::write_meta_atomic(session_dir, &meta)?;
-            }
+            // Reconciliation: non-terminal + lock not held -> sidecar gone.
+            // Heals from the event log when the sidecar's own terminal event
+            // exists; infers SidecarLost otherwise (spec §3.6).
+            tender::reconcile::reconcile_sidecar_gone(session_dir, &mut meta)?;
 
             if meta.status().is_terminal() {
                 terminal_metas.insert(name.clone(), meta);

@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 
+use crate::events::{self, EventDraft, EventWriter};
 use crate::model::dep_fail::DepFailReason;
-use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName};
+use crate::model::event::Uuid7;
+use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName, Source};
 use crate::model::meta::Meta;
 use crate::model::pty::PtyMeta;
 use crate::model::spec::{IoMode, LaunchSpec, StdinMode};
@@ -328,6 +330,90 @@ fn wait_for_dependencies(
     }
 }
 
+/// Appends the sidecar's lifecycle events to the session event log.
+/// Writer identity is the run id; `seq` is contiguous across the run.
+///
+/// WAL order (spec §3.6): call `emit` after the meta transition but BEFORE
+/// `write_meta_atomic`, with `durable: true` for terminal transitions. This
+/// is an ORDERING guarantee against the crash window — a sidecar that dies
+/// between the two writes leaves the event, never the meta. It is not an
+/// IO-failure guarantee: if the append itself fails, supervision continues
+/// (meta stays the current-state authority), the failure is recorded as a
+/// meta warning, and the record is salvaged to lost+found.
+struct LifecycleEvents {
+    session_dir: PathBuf,
+    writer: EventWriter,
+    namespace: Namespace,
+    session: SessionName,
+    run_id: RunId,
+    generation: Generation,
+}
+
+impl LifecycleEvents {
+    fn new(
+        session_dir: &Path,
+        namespace: &Namespace,
+        session: &SessionName,
+        run_id: RunId,
+        generation: Generation,
+    ) -> Self {
+        Self {
+            session_dir: session_dir.to_path_buf(),
+            writer: EventWriter::with_writer(session_dir, Uuid7::from(run_id)),
+            namespace: namespace.clone(),
+            session: session.clone(),
+            run_id,
+            generation,
+        }
+    }
+
+    /// Append the lifecycle event for meta's CURRENT status. Never fails the
+    /// run: an append failure becomes a meta warning and the record is
+    /// salvaged to lost+found — supervision must not die, and the history
+    /// record must not silently vanish, because the event log is unwritable.
+    fn emit(&mut self, meta: &mut Meta, durable: bool) {
+        let draft = EventDraft {
+            kind: events::lifecycle_kind(meta.status()),
+            namespace: self.namespace.clone(),
+            session: self.session.clone(),
+            run_id: self.run_id,
+            generation: Some(self.generation.as_u64()),
+            source: Source::trusted("tender.sidecar").expect("tender.sidecar is grammatical"),
+            block_id: None,
+            parent_id: None,
+            data: Some(events::lifecycle_data(meta.status(), "direct")),
+        };
+        if let Err(e) = self.writer.append(draft.clone(), durable) {
+            meta.add_warning(format!("event log append failed: {e}"));
+            self.salvage_to_lost_found(draft);
+        }
+    }
+
+    /// Last-resort preservation when the session's event log is unwritable:
+    /// the fully-addressed record lands in `~/.tender/lost+found/events.jsonl`
+    /// (spec §7 machinery) instead of vanishing. Best-effort by design.
+    fn salvage_to_lost_found(&self, draft: EventDraft) {
+        let Some(tender_root) = self
+            .session_dir
+            .ancestors()
+            .find(|p| p.ends_with("sessions"))
+            .and_then(Path::parent)
+        else {
+            return;
+        };
+        let event = events::stamp_orphan_event(draft);
+        let _ = events::append_lost_found(tender_root, &event);
+    }
+}
+
+/// Test-only crash injection for WAL-ordering tests. Compiled into debug
+/// builds only; release sidecars ignore the variable entirely.
+fn test_abort_point(point: &str) {
+    if cfg!(debug_assertions) && std::env::var("TENDER_TEST_ABORT").as_deref() == Ok(point) {
+        std::process::abort();
+    }
+}
+
 /// A Write wrapper around Arc<Mutex<Box<dyn Write + Send>>>.
 /// Allows multiple owners to write to the same underlying sink.
 struct SharedWriter(Arc<Mutex<Box<dyn Write + Send>>>);
@@ -401,13 +487,19 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     };
 
     let mut meta = Meta::new_starting(
-        session_name,
+        session_name.clone(),
         run_id,
         generation,
         launch_spec,
         sidecar_identity,
         EpochTimestamp::now(),
     );
+
+    // The event log records history from the very first state, even though
+    // meta only hits disk at Starting for dependency waits (WAL: event first).
+    let mut lifecycle =
+        LifecycleEvents::new(session_dir, &namespace, &session_name, run_id, generation);
+    lifecycle.emit(&mut meta, false);
 
     // Re-set CLOEXEC on the ready fd before spawning the child.
     // The sidecar inherited this fd with CLOEXEC cleared (so it survived the sidecar's exec),
@@ -452,18 +544,21 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             DepWaitOutcome::Failed(msg) => {
                 meta.add_warning(msg);
                 meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::Failed)?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
             DepWaitOutcome::TimedOut(msg) => {
                 meta.add_warning(msg);
                 meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::TimedOut)?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
             DepWaitOutcome::Killed(msg) => {
                 meta.add_warning(msg);
                 meta.transition_dependency_failed(EpochTimestamp::now(), DepFailReason::Killed)?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
@@ -473,6 +568,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
                     EpochTimestamp::now(),
                     DepFailReason::KilledForced,
                 )?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 return Ok(());
             }
@@ -493,6 +589,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             Err(e) => {
                 meta.add_warning(format!("spawn failed: {e}"));
                 meta.transition_spawn_failed(EpochTimestamp::now())?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 if !has_deps {
                     signal_meta_snapshot(ready, &meta)?;
@@ -511,6 +608,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             Err(e) => {
                 meta.add_warning(format!("spawn failed: {e}"));
                 meta.transition_spawn_failed(EpochTimestamp::now())?;
+                lifecycle.emit(&mut meta, true);
                 session::write_meta_atomic(&session, &meta)?;
                 if !has_deps {
                     signal_meta_snapshot(ready, &meta)?;
@@ -531,6 +629,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
             let _ = Current::kill_child(&handle, true);
             let _ = Current::child_wait(&mut child);
             meta.transition_spawn_failed(EpochTimestamp::now())?;
+            lifecycle.emit(&mut meta, true);
             session::write_meta_atomic(&session, &meta)?;
             if !has_deps {
                 signal_meta_snapshot(ready, &meta)?;
@@ -607,6 +706,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     if is_pty {
         meta.set_pty(PtyMeta::new());
     }
+    lifecycle.emit(&mut meta, false);
     session::write_meta_atomic(&session, &meta)?;
     if !has_deps {
         signal_meta_snapshot(ready, &meta)?;
@@ -693,8 +793,13 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
     }
 
     // --- Write terminal state (run state machine ends here) ---
+    // WAL order: the durable terminal event precedes the terminal meta write,
+    // so terminal meta always implies a logged terminal event (spec §3.6).
     let exit_reason_debug = format!("{exit_reason:?}");
     meta.transition_exited(exit_reason, EpochTimestamp::now())?;
+    test_abort_point("before_terminal_event");
+    lifecycle.emit(&mut meta, true);
+    test_abort_point("before_terminal_meta");
     session::write_meta_atomic(&session, &meta)?;
 
     // --- Release lock: session is now available for --replace ---

@@ -22,6 +22,9 @@ pub enum Evidence {
     LockReleased,
     /// Reconciliation: meta.json shows a non-terminal status with no live writer.
     NonTerminalMeta,
+    /// Reconciliation: the sidecar's own terminal event was found in the
+    /// event log; meta was healed from it (spec §3.6).
+    EventLogTerminal,
 }
 
 /// Provenance of a lifecycle transition.

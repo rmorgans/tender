@@ -1,4 +1,4 @@
-use tender::model::ids::{EpochTimestamp, Namespace, ProcessIdentity, SessionName};
+use tender::model::ids::{Namespace, ProcessIdentity, SessionName};
 use tender::platform::{Current, Platform, ProcessStatus};
 use tender::session::{self, SessionError, SessionRoot};
 
@@ -27,11 +27,10 @@ pub fn cmd_status(name: &str, namespace: &Namespace) -> anyhow::Result<()> {
 
     let mut meta = session::read_meta(&session)?;
 
-    // Reconciliation: non-terminal + lock not held -> sidecar crashed
-    if !meta.status().is_terminal() && !session::is_locked(&session)? {
-        meta.reconcile_sidecar_lost(EpochTimestamp::now())?;
-        session::write_meta_atomic(&session, &meta)?;
-    }
+    // Reconciliation: non-terminal + lock not held -> sidecar gone.
+    // Heals from the event log when the sidecar's own terminal event
+    // exists; infers SidecarLost otherwise (spec §3.6).
+    tender::reconcile::reconcile_sidecar_gone(&session, &mut meta)?;
 
     let json = serde_json::to_string_pretty(&meta)?;
     println!("{json}");

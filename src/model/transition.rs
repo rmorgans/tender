@@ -174,6 +174,60 @@ impl Meta {
             }),
         }
     }
+
+    /// Reconciliation healing: apply a terminal state recorded by the
+    /// sidecar's own event-log record (spec §3.6). The observation was the
+    /// sidecar's — the CLI only replays it into meta — so provenance is
+    /// Direct with EventLogTerminal evidence, not Inferred.
+    pub fn heal_terminal_from_event(
+        &mut self,
+        healed: HealedTerminal,
+        ended_at: EpochTimestamp,
+    ) -> Result<(), TransitionError> {
+        match (self.status(), healed) {
+            (RunStatus::Running { child }, HealedTerminal::Exited(how)) => {
+                let child = *child;
+                *self.status_mut() = RunStatus::Exited {
+                    child,
+                    how,
+                    ended_at,
+                };
+            }
+            (RunStatus::Starting, HealedTerminal::SpawnFailed) => {
+                *self.status_mut() = RunStatus::SpawnFailed { ended_at };
+            }
+            (RunStatus::Starting, HealedTerminal::DependencyFailed(reason)) => {
+                *self.status_mut() = RunStatus::DependencyFailed { ended_at, reason };
+            }
+            (status, _) if status.is_terminal() => {
+                return Err(TransitionError::AlreadyTerminal {
+                    from: status_name(status),
+                });
+            }
+            (status, _) => {
+                // Shape mismatch (e.g. meta Starting but event says Exited):
+                // the caller falls back to inferring SidecarLost.
+                return Err(TransitionError::Illegal {
+                    from: status_name(status),
+                    to: "healed terminal",
+                });
+            }
+        }
+        self.set_transition_provenance(TransitionProvenance::direct(&[
+            Evidence::EventLogTerminal,
+        ]));
+        Ok(())
+    }
+}
+
+/// A terminal outcome parsed from the sidecar's own event-log record, used
+/// to heal meta when the sidecar died between the event append and the meta
+/// write (the WAL crash window, spec §3.6).
+#[derive(Debug, Clone)]
+pub enum HealedTerminal {
+    Exited(ExitReason),
+    SpawnFailed,
+    DependencyFailed(DepFailReason),
 }
 
 #[cfg(test)]

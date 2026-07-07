@@ -1,10 +1,12 @@
 pub mod annotation;
 pub mod attach_proto;
 pub mod directive;
+pub mod events;
 pub mod exec_frame;
 pub mod log;
 pub mod model;
 pub mod platform;
+pub mod reconcile;
 pub mod session;
 pub mod sidecar;
 pub mod ssh;
