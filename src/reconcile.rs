@@ -124,6 +124,7 @@ fn append_sidecar_lost_event(session: &SessionDir, meta: &Meta) {
         return;
     };
     let draft = EventDraft {
+        id: None,
         kind: events::lifecycle_kind(meta.status()),
         namespace,
         session: meta.session().clone(),
@@ -133,6 +134,7 @@ fn append_sidecar_lost_event(session: &SessionDir, meta: &Meta) {
         block_id: None,
         parent_id: None,
         data: Some(events::lifecycle_data(meta.status(), "inferred")),
+        preview: None,
     };
     let mut writer = EventWriter::new(session.path());
     let _ = writer.append(draft, true);

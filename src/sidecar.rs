@@ -373,6 +373,7 @@ impl LifecycleEvents {
     /// record must not silently vanish, because the event log is unwritable.
     fn emit(&mut self, meta: &mut Meta, durable: bool) {
         let draft = EventDraft {
+            id: None,
             kind: events::lifecycle_kind(meta.status()),
             namespace: self.namespace.clone(),
             session: self.session.clone(),
@@ -382,6 +383,7 @@ impl LifecycleEvents {
             block_id: None,
             parent_id: None,
             data: Some(events::lifecycle_data(meta.status(), "direct")),
+            preview: None,
         };
         if let Err(e) = self.writer.append(draft.clone(), durable) {
             meta.add_warning(format!("event log append failed: {e}"));

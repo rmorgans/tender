@@ -38,9 +38,14 @@ pub const MAX_INLINE_DATA_BYTES: usize = 16 * 1024;
 pub const MAX_PREVIEW_BYTES: usize = 4 * 1024;
 
 /// The fields a caller supplies; `EventWriter::append` stamps the rest
-/// (`v`, `id`, `ts`, `writer`, `seq`) and handles oversize spill.
+/// (`v`, `id` unless pre-minted, `ts`, `writer`, `seq`) and handles
+/// oversize spill.
 #[derive(Debug, Clone)]
 pub struct EventDraft {
+    /// Caller-supplied pre-minted event id; `None` = stamp at append.
+    /// wrap pre-mints so `TENDER_PARENT_EVENT_ID` can name the event it
+    /// will write (spec §2).
+    pub id: Option<Uuid7>,
     pub kind: Kind,
     pub namespace: Namespace,
     pub session: SessionName,
@@ -50,6 +55,10 @@ pub struct EventDraft {
     pub block_id: Option<Uuid7>,
     pub parent_id: Option<Uuid7>,
     pub data: Option<serde_json::Value>,
+    /// Caller-supplied structured preview, used instead of the generic
+    /// head-of-JSON preview when `data` spills (spec §3.4). A preview
+    /// that itself exceeds `MAX_PREVIEW_BYTES` degrades to generic.
+    pub preview: Option<serde_json::Value>,
 }
 
 /// Appends events to one session's `events/` dir with a stable writer
@@ -96,10 +105,11 @@ impl EventWriter {
     pub fn append(&mut self, draft: EventDraft, durable: bool) -> io::Result<Event> {
         let seq = self.next_seq;
         self.next_seq += 1;
-        let (data, data_ref, truncated) = prepare_data(&self.session_dir, draft.data);
+        let (data, data_ref, truncated) =
+            prepare_data(&self.session_dir, draft.data, draft.preview);
         let event = Event {
             v: ENVELOPE_VERSION,
-            id: Uuid7::new(),
+            id: draft.id.unwrap_or_else(Uuid7::new),
             ts: EventTimestamp::now(),
             kind: draft.kind,
             namespace: draft.namespace,
@@ -129,14 +139,14 @@ pub fn stamp_orphan_event(draft: EventDraft) -> Event {
         None => (None, None),
         Some(value) => match serde_json::to_vec(&value) {
             Ok(bytes) if bytes.len() > MAX_INLINE_DATA_BYTES => {
-                (Some(preview_of(&bytes)), Some(true))
+                (Some(effective_preview(draft.preview, &bytes)), Some(true))
             }
             _ => (Some(value), None),
         },
     };
     Event {
         v: ENVELOPE_VERSION,
-        id: Uuid7::new(),
+        id: draft.id.unwrap_or_else(Uuid7::new),
         ts: EventTimestamp::now(),
         kind: draft.kind,
         namespace: draft.namespace,
@@ -161,6 +171,7 @@ pub fn stamp_orphan_event(draft: EventDraft) -> Event {
 fn prepare_data(
     session_dir: &Path,
     data: Option<serde_json::Value>,
+    preview: Option<serde_json::Value>,
 ) -> (Option<serde_json::Value>, Option<DataRef>, Option<bool>) {
     let Some(data) = data else {
         return (None, None, None);
@@ -173,11 +184,19 @@ fn prepare_data(
         return (Some(data), None, None);
     }
 
-    let preview = preview_of(&serialized);
+    let preview = effective_preview(preview, &serialized);
     match write_blob(session_dir, &serialized) {
         Ok(data_ref) => (Some(preview), Some(data_ref), Some(true)),
         Err(_) => (Some(preview), None, Some(true)),
     }
+}
+
+/// The caller's structured preview when it fits `MAX_PREVIEW_BYTES`,
+/// else the generic head-of-JSON preview of the full payload.
+fn effective_preview(supplied: Option<serde_json::Value>, serialized: &[u8]) -> serde_json::Value {
+    supplied
+        .filter(|p| serde_json::to_vec(p).is_ok_and(|bytes| bytes.len() <= MAX_PREVIEW_BYTES))
+        .unwrap_or_else(|| preview_of(serialized))
 }
 
 /// A ≤4 KiB preview object for a spilled payload: the head of the

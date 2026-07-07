@@ -96,6 +96,7 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
         // environment still has a fully-addressed event — preserve it.
         if from_env && let Some(run_id) = env_run_id {
             let draft = EventDraft {
+                id: None,
                 kind,
                 namespace,
                 session: session_name,
@@ -105,6 +106,7 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
                 block_id: None,
                 parent_id,
                 data,
+                preview: None,
             };
             let event = events::stamp_orphan_event(draft);
             let tender_root = root
@@ -132,6 +134,7 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
     };
 
     let draft = EventDraft {
+        id: None,
         kind,
         namespace,
         session: session_name,
@@ -141,6 +144,7 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
         block_id: None,
         parent_id,
         data,
+        preview: None,
     };
     let mut writer = EventWriter::new(dir.path());
     writer
