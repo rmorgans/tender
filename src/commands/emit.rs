@@ -74,9 +74,9 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
     // TENDER_BLOCK_ID; parent_id from --parent > TENDER_PARENT_EVENT_ID >
     // TENDER_BLOCK_ID. Ambient env never hard-fails: malformed values warn
     // and are ignored.
-    let block_id = env_uuid7("TENDER_BLOCK_ID");
+    let block_id = events::env_uuid7("TENDER_BLOCK_ID");
     let parent_id = parent_id
-        .or_else(|| env_uuid7("TENDER_PARENT_EVENT_ID"))
+        .or_else(|| events::env_uuid7("TENDER_PARENT_EVENT_ID"))
         .or(block_id);
 
     // 3: session context from --session or the supervised-run environment.
@@ -160,19 +160,6 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
         .append(draft, opts.durable)
         .map_err(|e| fail(1, format!("event append failed: {e}")))?;
     Ok(())
-}
-
-/// A UUIDv7 from an ambient env var. Malformed values warn on stderr and
-/// return `None` — a polluted environment must never fail an emit.
-fn env_uuid7(var: &str) -> Option<Uuid7> {
-    let value = std::env::var(var).ok()?;
-    match value.parse::<Uuid7>() {
-        Ok(id) => Some(id),
-        Err(e) => {
-            eprintln!("tender emit: ignoring malformed {var}: {e}");
-            None
-        }
-    }
 }
 
 /// Payload from exactly one of `--data` / `--data-file` / `--data-stdin`

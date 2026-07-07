@@ -1124,3 +1124,196 @@ fn exec_python_result_file_cleaned() {
 
     let _ = harness::tender(&root).args(["kill", "py", "--force"]).assert();
 }
+
+// --- Slice 3: exec.started / exec.result events (plan scope 1) ---
+
+/// exec emits exec.started + exec.result sharing a block_id, one writer,
+/// contiguous seq, source tender.exec, with the pinned data shapes.
+#[test]
+fn exec_emits_started_and_result_events() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "event brigade"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // The JSON stdout envelope is frozen: exactly the shipped fields
+    // (serde_json yields keys alphabetically).
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let keys: Vec<&str> = envelope.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        ["cwd_after", "exit_code", "session", "stderr", "stdout", "timed_out", "truncated"],
+        "exec JSON envelope field set is frozen"
+    );
+
+    let events = harness::read_events(&root, "shell");
+    let started = events.iter().find(|e| e["kind"] == "exec.started").expect("exec.started");
+    let result = events.iter().find(|e| e["kind"] == "exec.result").expect("exec.result");
+
+    assert_eq!(started["source"], "tender.exec");
+    assert_eq!(result["source"], "tender.exec");
+    assert_eq!(started["data"]["command"], serde_json::json!(["echo", "event brigade"]));
+    assert_eq!(started["data"]["exec_target"], "PosixShell");
+    assert!(started["data"].get("timeout_ms").is_none(), "no timeout flag → no field");
+    assert_eq!(result["data"]["exit_code"], 0);
+    assert!(result["data"]["stdout"].as_str().unwrap().contains("event brigade"));
+    assert_eq!(result["data"]["timed_out"], false);
+    assert_eq!(result["data"]["truncated"], false);
+    assert!(!result["data"]["cwd_after"].as_str().unwrap().is_empty());
+
+    let block = started["block_id"].as_str().expect("started has block_id");
+    assert_eq!(result["block_id"].as_str().unwrap(), block, "one block, both events");
+    assert_eq!(started["writer"], result["writer"], "one writer for the pair");
+    assert_eq!(
+        started["seq"].as_u64().unwrap() + 1,
+        result["seq"].as_u64().unwrap(),
+        "contiguous seq"
+    );
+    assert_eq!(started["gen"], 1);
+    assert!(started.get("parent_id").is_none(), "no ambient chain → no parent");
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// A tender exec running inside an outer block chains upward: parent_id
+/// from the exec process's own env, block_id freshly minted.
+#[test]
+fn exec_events_inherit_parent_from_env_chain() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let outer = uuid::Uuid::now_v7().to_string();
+    harness::tender(&root)
+        .env("TENDER_BLOCK_ID", &outer)
+        .args(["exec", "shell", "--", "true"])
+        .assert()
+        .success();
+
+    let events = harness::read_events(&root, "shell");
+    let started = events.iter().find(|e| e["kind"] == "exec.started").unwrap();
+    let result = events.iter().find(|e| e["kind"] == "exec.result").unwrap();
+    for event in [started, result] {
+        assert_eq!(event["parent_id"].as_str().unwrap(), outer);
+        assert_ne!(event["block_id"].as_str().unwrap(), outer, "fresh block per exec");
+    }
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// The exec A-line carries additive event_id (= exec.result id) and
+/// block_id — same linkage contract as wrap (spec §0).
+#[test]
+fn exec_aline_links_event_id_and_block_id() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "linked"])
+        .assert()
+        .success();
+
+    let events = harness::read_events(&root, "shell");
+    let result = events.iter().find(|e| e["kind"] == "exec.result").unwrap();
+
+    let log_path = root.path().join(".tender/sessions/default/shell/output.log");
+    let content = std::fs::read_to_string(&log_path).unwrap();
+    let ann_line: serde_json::Value = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|line| line["tag"] == "A" && line["content"]["source"] == "agent.exec")
+        .expect("annotation line exists");
+    let ann = &ann_line["content"];
+    assert_eq!(ann["event_id"], result["id"], "A-line links the exec.result event");
+    assert_eq!(ann["block_id"], result["block_id"]);
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// A timed-out exec still records its exec.result (timed_out true) and the
+/// process exit code stays 124.
+#[test]
+fn exec_timeout_still_emits_result_event() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--timeout", "1", "--", "sleep", "3"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(124));
+
+    let events = harness::read_events(&root, "shell");
+    let started = events.iter().find(|e| e["kind"] == "exec.started").unwrap();
+    let result = events.iter().find(|e| e["kind"] == "exec.result").unwrap();
+    assert_eq!(started["data"]["timeout_ms"], 1000);
+    assert_eq!(result["data"]["timed_out"], true);
+    assert_eq!(result["data"]["exit_code"], -1);
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}
+
+/// Event emission is best-effort: an unwritable events dir warns but never
+/// changes exec's output or exit code.
+#[cfg(unix)]
+#[test]
+fn exec_event_append_is_best_effort() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let events_dir = root.path().join(".tender/sessions/default/shell/events");
+    std::fs::set_permissions(&events_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--", "echo", "still fine"])
+        .output()
+        .unwrap();
+
+    std::fs::set_permissions(&events_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(output.status.success(), "append failure never fails exec");
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(envelope["stdout"].as_str().unwrap().contains("still fine"));
+
+    let _ = harness::tender(&root).args(["kill", "shell", "--force"]).assert();
+}

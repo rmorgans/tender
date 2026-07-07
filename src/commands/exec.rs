@@ -2,9 +2,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::time::{Duration, Instant};
 
+use tender::events::{self, EventDraft, EventWriter};
 use tender::exec_frame;
 use tender::log::LogLine;
-use tender::model::ids::{Namespace, SessionName};
+use tender::model::event::{Event, Kind, Uuid7};
+use tender::model::ids::{Namespace, SessionName, Source};
+use tender::model::meta::Meta;
 use tender::model::spec::StdinMode;
 use tender::model::state::RunStatus;
 use tender::platform::{Current, Platform};
@@ -137,6 +140,30 @@ pub fn cmd_exec(
         anyhow::bail!("no command specified");
     }
 
+    // The command block (spec §2): fresh block_id per invocation; parent
+    // from exec's own ambient chain, so nested producers chain upward.
+    let block_id = Uuid7::new();
+    let parent_id = events::env_parent_chain();
+    let mut event_writer = EventWriter::new(session.path());
+
+    let mut started_data = serde_json::json!({
+        "command": &cmd,
+        "exec_target": meta.launch_spec().exec_target,
+    });
+    if let Some(t) = timeout {
+        started_data["timeout_ms"] = serde_json::json!(t.saturating_mul(1000));
+    }
+    emit_exec_event(
+        &mut event_writer,
+        &meta,
+        namespace,
+        "exec.started",
+        started_data,
+        None,
+        block_id,
+        parent_id,
+    );
+
     let token = exec_frame::generate_token();
     let result = run_exec(&session, &meta, &cmd, &token, timeout)?;
 
@@ -163,53 +190,81 @@ pub fn cmd_exec(
         }
     }
 
-    // Write annotation event to output.log (bounded by MAX_LINE)
+    // The authoritative record (spec §6): exec.result with the ExecResult
+    // fields; oversize output spills with a structured preview that keeps
+    // exit_code/cwd_after queryable inline (spec example (d)).
+    let result_event = {
+        use tender::annotation;
+
+        let result_data = serde_json::json!({
+            "exit_code": result.exit_code,
+            "cwd_after": &result.cwd_after,
+            "timed_out": result.timed_out,
+            "stderr": &result.stderr,
+            "stdout": &result.stdout,
+            "truncated": false,
+        });
+        let result_preview = serde_json::json!({
+            "exit_code": result.exit_code,
+            "cwd_after": &result.cwd_after,
+            "timed_out": result.timed_out,
+            "stderr": annotation::truncate_string(&result.stderr, 1024),
+            "stdout_preview": annotation::truncate_string(&result.stdout, 2048),
+            "truncated": true,
+        });
+        emit_exec_event(
+            &mut event_writer,
+            &meta,
+            namespace,
+            "exec.result",
+            result_data,
+            Some(result_preview),
+            block_id,
+            parent_id,
+        )
+    };
+
+    // The output.log A-line projection (bounded by MAX_LINE), linked to the
+    // authoritative event by event_id (spec §0). Shape additive-only.
     {
         use tender::annotation;
 
         let run_id = meta.run_id().to_string();
         let hook_stdin = shell_words::join(&cmd);
         let log_path = session.path().join("output.log");
-        // Try full payload first
-        let payload = serde_json::json!({
-            "source": "agent.exec",
-            "event": "exec",
-            "run_id": run_id,
-            "data": {
-                "hook_stdin": hook_stdin,
-                "command": &cmd,
-                "hook_stdout": &result.stdout,
-                "hook_stderr": &result.stderr,
-                "hook_exit_code": result.exit_code,
-                "cwd_after": &result.cwd_after,
-                "sentinel": format!("TENDER_EXEC_{token}"),
-                "timed_out": result.timed_out,
-                "truncated": result.truncated,
+        let annotation_payload = |stdout: &str, stderr: &str, truncated: bool| {
+            let mut payload = serde_json::json!({
+                "source": "agent.exec",
+                "event": "exec",
+                "run_id": run_id,
+                "block_id": block_id.to_string(),
+                "data": {
+                    "hook_stdin": &hook_stdin,
+                    "command": &cmd,
+                    "hook_stdout": stdout,
+                    "hook_stderr": stderr,
+                    "hook_exit_code": result.exit_code,
+                    "cwd_after": &result.cwd_after,
+                    "sentinel": format!("TENDER_EXEC_{token}"),
+                    "timed_out": result.timed_out,
+                    "truncated": truncated,
+                }
+            });
+            if let Some(event) = &result_event {
+                payload["event_id"] = serde_json::json!(event.id.to_string());
             }
-        });
+            payload
+        };
 
+        // Try full payload first
+        let payload = annotation_payload(&result.stdout, &result.stderr, result.truncated);
         if !annotation::write_annotation_line(&log_path, &payload)? {
             // Truncate and retry
             let trunc_stdout =
                 annotation::truncate_string(&result.stdout, annotation::MAX_FIELD_BYTES);
             let trunc_stderr =
                 annotation::truncate_string(&result.stderr, annotation::MAX_FIELD_BYTES);
-            let payload = serde_json::json!({
-                "source": "agent.exec",
-                "event": "exec",
-                "run_id": run_id,
-                "data": {
-                    "hook_stdin": hook_stdin,
-                    "command": &cmd,
-                    "hook_stdout": trunc_stdout,
-                    "hook_stderr": trunc_stderr,
-                    "hook_exit_code": result.exit_code,
-                    "cwd_after": &result.cwd_after,
-                    "sentinel": format!("TENDER_EXEC_{token}"),
-                    "timed_out": result.timed_out,
-                    "truncated": true,
-                }
-            });
+            let payload = annotation_payload(&trunc_stdout, &trunc_stderr, true);
             if !annotation::write_annotation_line(&log_path, &payload)? {
                 eprintln!("tender exec: annotation too large even after truncation, dropping");
             }
@@ -228,6 +283,43 @@ pub fn cmd_exec(
     }
 
     Ok(())
+}
+
+/// Best-effort append of a tender-stamped exec event (spec §6). `exec.` is
+/// a reserved prefix — this internal call site is its only permitted writer
+/// (grammar-only `Kind::new`). Failures warn on stderr and never alter
+/// exec's output or exit code.
+#[allow(clippy::too_many_arguments)]
+fn emit_exec_event(
+    writer: &mut EventWriter,
+    meta: &Meta,
+    namespace: &Namespace,
+    kind: &str,
+    data: serde_json::Value,
+    preview: Option<serde_json::Value>,
+    block_id: Uuid7,
+    parent_id: Option<Uuid7>,
+) -> Option<Event> {
+    let draft = EventDraft {
+        id: None,
+        kind: Kind::new(kind).expect("exec kinds are grammatical"),
+        namespace: namespace.clone(),
+        session: meta.session().clone(),
+        run_id: meta.run_id(),
+        generation: Some(meta.generation().as_u64()),
+        source: Source::trusted("tender.exec").expect("tender.exec is grammatical"),
+        block_id: Some(block_id),
+        parent_id,
+        data: Some(data),
+        preview,
+    };
+    match writer.append(draft, false) {
+        Ok(event) => Some(event),
+        Err(e) => {
+            eprintln!("tender exec: {kind} event append failed: {e}");
+            None
+        }
+    }
 }
 
 fn run_exec(

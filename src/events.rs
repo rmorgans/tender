@@ -191,6 +191,28 @@ fn prepare_data(
     }
 }
 
+/// A UUIDv7 from an ambient env var (the spec §2 chaining vars).
+/// Malformed values warn on stderr and are ignored — a polluted
+/// environment must never fail a producer.
+#[must_use]
+pub fn env_uuid7(var: &str) -> Option<Uuid7> {
+    let value = std::env::var(var).ok()?;
+    match value.parse::<Uuid7>() {
+        Ok(id) => Some(id),
+        Err(e) => {
+            eprintln!("tender: ignoring malformed {var}: {e}");
+            None
+        }
+    }
+}
+
+/// The ambient causal parent (spec §2 chaining rule):
+/// `TENDER_PARENT_EVENT_ID` > `TENDER_BLOCK_ID`.
+#[must_use]
+pub fn env_parent_chain() -> Option<Uuid7> {
+    env_uuid7("TENDER_PARENT_EVENT_ID").or_else(|| env_uuid7("TENDER_BLOCK_ID"))
+}
+
 /// The caller's structured preview when it fits `MAX_PREVIEW_BYTES`,
 /// else the generic head-of-JSON preview of the full payload.
 fn effective_preview(supplied: Option<serde_json::Value>, serialized: &[u8]) -> serde_json::Value {
