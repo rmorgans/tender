@@ -1,4 +1,6 @@
 mod attach;
+mod emit;
+mod events;
 mod exec;
 mod kill;
 mod list;
@@ -14,6 +16,8 @@ mod watch;
 mod wrap;
 
 pub use attach::cmd_attach;
+pub use emit::{EmitOptions, cmd_emit};
+pub use events::{EventsOptions, cmd_events};
 pub use exec::cmd_exec;
 pub use kill::cmd_kill;
 pub use list::cmd_list;

@@ -21,6 +21,12 @@ impl RunId {
         Self(uuid::Uuid::now_v7())
     }
 
+    /// The inner UUID (always v7). Used to derive event writer identity.
+    #[must_use]
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+
     #[cfg(test)]
     pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
@@ -298,17 +304,32 @@ pub enum SourceError {
 const MAX_SOURCE_LEN: usize = 128;
 
 impl Source {
-    /// Create a new validated source.
+    /// Create a new validated source from user input.
     ///
     /// # Errors
     /// Returns `SourceError` if the source is empty, missing a dot,
     /// contains invalid characters, or uses the reserved `tender.*` prefix.
     pub fn new(s: &str) -> Result<Self, SourceError> {
-        Self::validate(s)?;
+        Self::validate_grammar(s)?;
+        if s.starts_with("tender.") {
+            return Err(SourceError::ReservedPrefix);
+        }
         Ok(Self(s.to_owned()))
     }
 
-    fn validate(s: &str) -> Result<(), SourceError> {
+    /// Create a source at a tender-internal call site. Grammar is still
+    /// enforced, but the `tender.*` reservation is not — internal writers
+    /// (`tender.sidecar`, `tender.exec`, `tender.cli`) are the only
+    /// legitimate users of the reserved prefix.
+    ///
+    /// # Errors
+    /// Returns `SourceError` on grammar violations.
+    pub fn trusted(s: &str) -> Result<Self, SourceError> {
+        Self::validate_grammar(s)?;
+        Ok(Self(s.to_owned()))
+    }
+
+    fn validate_grammar(s: &str) -> Result<(), SourceError> {
         if s.is_empty() {
             return Err(SourceError::Empty);
         }
@@ -326,9 +347,6 @@ impl Source {
         }
         if s.starts_with('.') || s.ends_with('.') || s.contains("..") {
             return Err(SourceError::EmptySegment);
-        }
-        if s.starts_with("tender.") {
-            return Err(SourceError::ReservedPrefix);
         }
         Ok(())
     }
@@ -353,8 +371,11 @@ impl Serialize for Source {
 
 impl<'de> Deserialize<'de> for Source {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Grammar only: the `tender.*` reservation is a user-input-boundary
+        // rule (`Source::new`). Stored records legitimately carry internal
+        // sources like `tender.sidecar` and must round-trip.
         let s = String::deserialize(deserializer)?;
-        Self::validate(&s).map_err(serde::de::Error::custom)?;
+        Self::validate_grammar(&s).map_err(serde::de::Error::custom)?;
         Ok(Self(s))
     }
 }

@@ -1,4 +1,5 @@
 pub mod dep_fail;
+pub mod event;
 pub mod ids;
 pub mod meta;
 pub mod provenance;

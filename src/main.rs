@@ -258,6 +258,56 @@ enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Replay session event logs as envelope NDJSON
+    Events {
+        /// Namespace to filter (all namespaces if omitted)
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Session as <namespace>/<name> or bare <name>; repeatable
+        #[arg(long = "session")]
+        sessions: Vec<String>,
+        /// Kind prefix filter (e.g. "hook."); repeatable
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+        /// Source prefix filter (e.g. "claude."); repeatable
+        #[arg(long = "source")]
+        sources: Vec<String>,
+        /// Exit 65 when unparseable lines were skipped
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Append an event to a session's event log
+    Emit {
+        /// Event kind (dotted, e.g. "hook.post_tool_use"; tender-owned
+        /// prefixes like "run." are reserved)
+        #[arg(long)]
+        kind: String,
+        /// Inline JSON object payload
+        #[arg(long, group = "data_src")]
+        data: Option<String>,
+        /// Read JSON object payload from a file
+        #[arg(long = "data-file", group = "data_src")]
+        data_file: Option<PathBuf>,
+        /// Read JSON object payload from stdin
+        #[arg(long = "data-stdin", group = "data_src")]
+        data_stdin: bool,
+        /// Semantic emitter (default: "user.emit"; "tender.*" is reserved)
+        #[arg(long)]
+        source: Option<String>,
+        /// Target session as <namespace>/<name> or bare <name> (default
+        /// namespace); defaults to the supervised-run environment
+        #[arg(long)]
+        session: Option<String>,
+        /// Causal parent event id (UUIDv7)
+        #[arg(long)]
+        parent: Option<String>,
+        /// fdatasync the segment before returning
+        #[arg(long)]
+        durable: bool,
+        /// Exit 0 on every failure (for hooks that must never fail their host)
+        #[arg(long = "best-effort")]
+        best_effort: bool,
+    },
     /// Delete terminal sessions older than a threshold
     Prune {
         /// Delete sessions ended more than DURATION ago (e.g. 7d, 24h, 30m)
@@ -482,6 +532,8 @@ impl Commands {
             Commands::Attach { .. } => "attach",
             Commands::Run { .. } => "run",
             Commands::Exec { .. } => "exec",
+            Commands::Events { .. } => "events",
+            Commands::Emit { .. } => "emit",
             Commands::Wrap { .. } => "wrap",
             Commands::Prune { .. } => "prune",
             Commands::Sidecar { .. } => "_sidecar",
@@ -652,6 +704,40 @@ fn main() {
             from_now,
         } => parse_optional_namespace(namespace)
             .and_then(|ns| commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now)),
+        Commands::Events {
+            namespace,
+            sessions,
+            kinds,
+            sources,
+            strict,
+        } => commands::cmd_events(commands::EventsOptions {
+            namespace,
+            sessions,
+            kinds,
+            sources,
+            strict,
+        }),
+        Commands::Emit {
+            kind,
+            data,
+            data_file,
+            data_stdin,
+            source,
+            session,
+            parent,
+            durable,
+            best_effort,
+        } => commands::cmd_emit(commands::EmitOptions {
+            kind,
+            data,
+            data_file,
+            data_stdin,
+            source,
+            session,
+            parent,
+            durable,
+            best_effort,
+        }),
         Commands::Prune {
             older_than,
             all,
