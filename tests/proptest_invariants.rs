@@ -87,7 +87,7 @@ proptest! {
         // Serialize as JSON, deserialize back
         let ts = serde_json::json!(secs.to_string());
         let parsed: EpochTimestamp = serde_json::from_value(ts).unwrap();
-        let serialized = serde_json::to_value(&parsed).unwrap();
+        let serialized = serde_json::to_value(parsed).unwrap();
         // EpochTimestamp serializes as string
         prop_assert_eq!(serialized.as_str().unwrap(), &secs.to_string());
     }
