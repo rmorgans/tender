@@ -176,7 +176,7 @@ None of these are Tender's responsibility to ship. They are *enabled* by the pro
 |--------------|--------------|
 | [boundary-metadata](../backlog/boundary-metadata.md) | Blocks gain a `boundary` field via `LaunchSpec.boundary`. No conflict. |
 | [provenance-on-lifecycle-transitions](../completed/2026-04-16-provenance-on-lifecycle-transitions.md) | The `transition_provenance` becomes a first-class field on every emitted lifecycle event. Aligns. |
-| [skill-claude-code](../backlog/skill-claude-code.md) | The skill should teach hooks → `tender event emit` as the primary integration pattern for Claude Code. |
+| [skill-agent-block-runtime](../backlog/skill-agent-block-runtime.md) | The skill should teach hooks → `tender emit` as the primary integration pattern for hook-capable agents. |
 | [pty-automation](../backlog/pty-automation.md) | Orthogonal — automation is layer 3 control; events are layer 3 observation. |
 
 No backlog item is contradicted. Several are amplified.

@@ -81,9 +81,10 @@ then `tender events --kind hook.` replaying it with correct
 - `kill -9` a supervised run; after reboot, `tender events` replays
   `run.starting → run.started → run.sidecar_lost` with occurrence-time
   timestamps and `provenance:"inferred"` on the last.
-- A terminal transition (`run.exited`) present in meta is **always**
-  present in the event log (WAL invariant), verified by a crash-injection
-  test between the two writes.
+- A terminal transition (`run.exited`) is appended before terminal meta and
+  durably logged for the crash window between those writes; if the event-log
+  append itself fails, the fully-addressed terminal event is salvaged to
+  `~/.tender/lost+found/events.jsonl` and meta carries a warning.
 - Two concurrent `tender emit` processes × 1000 events each: zero torn or
   interleaved lines (POSIX: flock; Windows: append contract), all 2000
   present, per-writer `seq` contiguous.

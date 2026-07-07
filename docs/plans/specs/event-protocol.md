@@ -187,9 +187,12 @@ terminal transitions** use `fdatasync` (`F_FULLFSYNC` on macOS).
 ### 3.6 WAL ordering (graft from the single-writer design)
 
 The sidecar appends the lifecycle event **before** `write_meta_atomic`, and
-fdatasyncs the segment before any *terminal* meta write. Invariant:
-**terminal meta ⇒ terminal event durably logged** — the crash window can no
-longer eat the history record for a transition that meta asserts happened.
+fdatasyncs the segment before any *terminal* meta write. This is an ordering
+guarantee against the crash window: a sidecar that dies between the two writes
+leaves the event, not terminal meta alone. It is not an IO-failure guarantee:
+if the append itself fails, supervision still writes terminal meta (current
+state remains authoritative), records a meta warning, and salvages the
+fully-addressed terminal event to `~/.tender/lost+found/events.jsonl`.
 Reconciliation gains `Evidence::EventLogTerminal`: before the CLI infers
 `run.sidecar_lost`, it reads the event-log tail; if the sidecar's own
 terminal event exists, meta is healed from it instead of inferred.
