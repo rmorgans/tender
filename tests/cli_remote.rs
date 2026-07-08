@@ -533,80 +533,6 @@ fn parse_fallback_argv(stderr: &str, host: &str) -> Vec<String> {
     shell_words::split(&local[2]).expect("remote command string parses")
 }
 
-/// `--host` on exec exits 2 (usage, not runtime) and prints the exact
-/// ssh fallback pre-filled with the user's session and payload.
-#[test]
-fn host_exec_exits_2_with_prefilled_ssh_fallback() {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-
-    let tmp = poison_ssh();
-    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-        .args([
-            "--host",
-            "nerevar",
-            "exec",
-            "ddb",
-            "--timeout",
-            "30",
-            "--",
-            "SELECT count(*) FROM t;",
-        ])
-        .env("PATH", tmp.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(2), "usage error exits 2");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("'exec' does not support --host yet"),
-        "names the verb, says yet (slice 2 will add it): {stderr}"
-    );
-    let remote = parse_fallback_argv(&stderr, "nerevar");
-    assert_eq!(
-        remote,
-        [
-            "tender",
-            "exec",
-            "ddb",
-            "--timeout",
-            "30",
-            "--",
-            "SELECT count(*) FROM t;"
-        ],
-        "fallback carries the user's session and payload verbatim"
-    );
-    assert!(
-        !stderr.contains("SSH_MUST_NOT_RUN"),
-        "rejection must not invoke ssh: {stderr}"
-    );
-}
-
-/// The fallback survives quoting torture: single quotes, double quotes,
-/// `$vars`, and backslashes round-trip both shell layers byte-exact.
-#[test]
-fn host_exec_fallback_survives_quoting_torture() {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-
-    let payload = r#"echo 'single' "double" $VAR back\slash"#;
-    let tmp = poison_ssh();
-    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-        .args([
-            "--host", "user@box", "exec", "s1", "--", "sh", "-c", payload,
-        ])
-        .env("PATH", tmp.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let remote = parse_fallback_argv(&stderr, "user@box");
-    assert_eq!(
-        remote,
-        ["tender", "exec", "s1", "--", "sh", "-c", payload],
-        "payload survives both quoting layers byte-exact"
-    );
-}
-
 /// run/wrap/prune stay local-only permanently: exit 2, verb named,
 /// local-only stated, fallback line present.
 #[test]
@@ -714,7 +640,7 @@ fn host_local_only_rejection_spawns_no_ssh() {
     std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
 
     let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-        .args(["--host", "user@box", "exec", "s1", "--", "ls"])
+        .args(["--host", "user@box", "prune", "--all"])
         .env("PATH", tmp.path())
         .output()
         .unwrap();
@@ -743,4 +669,271 @@ fn host_events_keeps_generic_rejection() {
         stderr.contains("not supported over SSH"),
         "generic message unchanged: {stderr}"
     );
+}
+
+// -- Slice 2 (00_remote-exec-host-parity.md): remote exec via frame-from-stdin --
+
+/// A fake ssh that drops everything up to and including the "tender"
+/// argv token, then executes the real tender binary with the remainder —
+/// the frame arrives on real stdin, the session root rides in on HOME.
+/// This exercises the full frame path end-to-end on one machine.
+fn fake_ssh_frame_shim() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let fake_ssh = tmp.path().join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        "#!/bin/sh\n\
+         while [ $# -gt 0 ]; do a=\"$1\"; shift; [ \"$a\" = tender ] && break; done\n\
+         exec \"$TENDER_TEST_BIN\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
+    tmp
+}
+
+fn shim_path_env(tmp: &TempDir) -> String {
+    format!("{}:/usr/bin:/bin", tmp.path().display())
+}
+
+/// `tender --host h exec …` works end-to-end: the envelope comes back on
+/// stdout and the exec ran against the (shim-local) remote session.
+#[test]
+fn host_exec_frame_end_to_end() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let tmp = fake_ssh_frame_shim();
+    let output = harness::tender(&root)
+        .args(["--host", "box", "exec", "shell", "--", "echo", "remote hi"])
+        .env("PATH", shim_path_env(&tmp))
+        .env(
+            "TENDER_TEST_BIN",
+            assert_cmd::cargo::cargo_bin("tender").to_str().unwrap(),
+        )
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "remote exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["exit_code"], 0);
+    assert!(envelope["stdout"].as_str().unwrap().contains("remote hi"));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// Non-zero inner exit codes propagate through ssh natively.
+#[test]
+fn host_exec_inner_exit_code_propagates() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let tmp = fake_ssh_frame_shim();
+    let output = harness::tender(&root)
+        .args(["--host", "box", "exec", "shell", "--", "sh", "-c", "exit 7"])
+        .env("PATH", shim_path_env(&tmp))
+        .env(
+            "TENDER_TEST_BIN",
+            assert_cmd::cargo::cargo_bin("tender").to_str().unwrap(),
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(7), "inner exit code survives");
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// Timeout propagates: remote exits 124, envelope says timed_out.
+#[test]
+fn host_exec_timeout_propagates() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let tmp = fake_ssh_frame_shim();
+    let output = harness::tender(&root)
+        .args([
+            "--host",
+            "box",
+            "exec",
+            "shell",
+            "--timeout",
+            "1",
+            "--",
+            "sleep",
+            "3",
+        ])
+        .env("PATH", shim_path_env(&tmp))
+        .env(
+            "TENDER_TEST_BIN",
+            assert_cmd::cargo::cargo_bin("tender").to_str().unwrap(),
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(124));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["timed_out"], true);
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// The acceptance fixture: a payload full of quoting hazards produces
+/// byte-identical results run locally and run through the remote frame
+/// path — zero shell-quoting traversal, both directions.
+#[test]
+fn host_exec_torture_payload_matches_local() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // %s\n in printf's FORMAT: trailing newline without a newline byte
+    // in argv (a newline-less payload trips the pre-existing sentinel
+    // merge quirk and hangs exec); --timeout guards regressions.
+    let torture = r#"it's a "test" $VAR `tick` back\slash ;&|"#;
+    let argv = ["printf", "%s\\n", torture];
+
+    let local = harness::tender(&root)
+        .args(["exec", "shell", "--timeout", "30", "--"])
+        .args(argv)
+        .output()
+        .unwrap();
+    assert!(local.status.success());
+
+    let tmp = fake_ssh_frame_shim();
+    let remote = harness::tender(&root)
+        .args(["--host", "box", "exec", "shell", "--timeout", "30", "--"])
+        .args(argv)
+        .env("PATH", shim_path_env(&tmp))
+        .env(
+            "TENDER_TEST_BIN",
+            assert_cmd::cargo::cargo_bin("tender").to_str().unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        remote.status.success(),
+        "remote: {}",
+        String::from_utf8_lossy(&remote.stderr)
+    );
+
+    let local_env: serde_json::Value = serde_json::from_slice(&local.stdout).unwrap();
+    let remote_env: serde_json::Value = serde_json::from_slice(&remote.stdout).unwrap();
+    assert_eq!(
+        local_env["stdout"], remote_env["stdout"],
+        "local and remote exec agree byte-exact"
+    );
+    assert_eq!(
+        local_env["stdout"].as_str().unwrap().trim_end_matches('\n'),
+        torture
+    );
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// The remote argv contains nothing user-controlled: the payload rides
+/// only on stdin. (The echo shim also exits without reading stdin, so
+/// this pins that a dead remote never panics the local writer.)
+#[test]
+fn host_exec_remote_argv_carries_no_payload() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    let tmp = fake_ssh_echo();
+    let payload = "SELECT count(*) FROM t;";
+    let output = harness::tender(&root)
+        .args(["--host", "box", "exec", "ddb", "--", payload])
+        .env("PATH", shim_path_env(&tmp))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let args = parse_remote_argv(&stdout);
+    assert_eq!(
+        args,
+        vec!["tender", "exec", "--frame-from-stdin"],
+        "remote argv is constant — nothing user-controlled"
+    );
+    assert!(
+        !stdout.contains(payload),
+        "payload must not appear in argv: {stdout}"
+    );
+}
+
+/// --host composes with --frame-from-stdin: the local frame passes
+/// through to the remote verbatim (scripting-friendly).
+#[test]
+fn host_exec_frame_stdin_passes_through() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let tmp = fake_ssh_frame_shim();
+    let frame = r#"{"v":1,"session":"shell","cmd":["echo","piped frame"]}"#;
+    let output = harness::tender(&root)
+        .args(["--host", "box", "exec", "--frame-from-stdin"])
+        .env("PATH", shim_path_env(&tmp))
+        .env(
+            "TENDER_TEST_BIN",
+            assert_cmd::cargo::cargo_bin("tender").to_str().unwrap(),
+        )
+        .write_stdin(frame)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "passthrough failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(envelope["stdout"].as_str().unwrap().contains("piped frame"));
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
 }

@@ -212,15 +212,23 @@ enum Commands {
     /// exec calls or wrap explicitly with `bash -c '...'`.
     Exec {
         /// Session name
-        name: String,
+        #[arg(required_unless_present = "frame_from_stdin")]
+        name: Option<String>,
         /// Namespace for session grouping
         #[arg(long)]
         namespace: Option<String>,
         /// Timeout in seconds (client-side only)
         #[arg(long)]
         timeout: Option<u64>,
+        /// Read the entire exec request as one JSON frame from stdin
+        /// (the frame carries session/namespace/cmd/timeout)
+        #[arg(
+            long = "frame-from-stdin",
+            conflicts_with_all = ["name", "namespace", "timeout", "cmd"]
+        )]
+        frame_from_stdin: bool,
         /// Command and arguments
-        #[arg(trailing_var_arg = true, required = true)]
+        #[arg(trailing_var_arg = true, required_unless_present = "frame_from_stdin")]
         cmd: Vec<String>,
     },
     /// Watch session events as an NDJSON stream
@@ -541,7 +549,7 @@ impl Commands {
         }
     }
 
-    /// Reconstruct CLI args for the four local-only verbs, for the
+    /// Reconstruct CLI args for the local-only verbs (run/wrap/prune), for the
     /// pre-filled `ssh <host> 'tender …'` fallback printed when `--host`
     /// is rejected. Reconstructed from clap-parsed state — never raw
     /// argv, which would corrupt child args after `--`. Returns `None`
@@ -609,23 +617,6 @@ impl Commands {
                     args.push("--".to_string());
                 }
                 args.extend(script_args.iter().cloned());
-                Some(args)
-            }
-            Commands::Exec {
-                name,
-                namespace,
-                timeout,
-                cmd,
-            } => {
-                let mut args = vec!["exec".to_string(), name.clone()];
-                if let Some(ns) = namespace {
-                    args.extend(["--namespace".to_string(), ns.clone()]);
-                }
-                if let Some(t) = timeout {
-                    args.extend(["--timeout".to_string(), t.to_string()]);
-                }
-                args.push("--".to_string());
-                args.extend(cmd.iter().cloned());
                 Some(args)
             }
             Commands::Wrap {
@@ -728,23 +719,51 @@ fn main() {
 
     // If --host is set, dispatch to SSH transport.
     if let Some(ref host) = cli.host {
+        // exec goes remote via the frame transport
+        // (00_remote-exec-host-parity.md slice 2): the whole request is
+        // one JSON frame on the SSH stdin channel; the remote argv is
+        // constant, so the payload never traverses a shell.
+        if let Commands::Exec {
+            name,
+            namespace,
+            timeout,
+            cmd,
+            frame_from_stdin,
+        } = &cli.command
+        {
+            // With --frame-from-stdin, local stdin already is the frame:
+            // inherit it straight through. Otherwise build the frame
+            // from the parsed args.
+            let frame = (!frame_from_stdin).then(|| {
+                tender::exec_request::ExecRequestFrame {
+                    v: tender::exec_request::EXEC_FRAME_VERSION,
+                    session: name.clone().expect("clap: name required without frame"),
+                    namespace: namespace.clone(),
+                    cmd: cmd.clone(),
+                    timeout: *timeout,
+                }
+                .to_json()
+            });
+            match tender::ssh::exec_ssh_frame(host, frame.as_deref()) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         let cmd_name = cli.command.name();
         if !tender::ssh::is_remote_supported(cmd_name) {
-            // The four local-only verbs are a usage error (exit 2) with a
+            // The local-only verbs are a usage error (exit 2) with a
             // pre-filled, copy-pasteable fallback — rejected before any
             // connection or side effect (00_remote-exec-host-parity.md
-            // slice 1). exec says "yet": slice 2 makes it work remotely.
+            // slice 1).
             if let Some(args) = cli.command.local_fallback_args() {
-                let phrasing = if cmd_name == "exec" {
-                    "does not support --host yet"
-                } else {
-                    "is local-only and does not support --host"
-                };
                 let mut full = vec!["tender".to_string()];
                 full.extend(args);
                 let remote_cmd = shell_words::join(&full);
                 eprintln!(
-                    "error: '{cmd_name}' {phrasing}\n\
+                    "error: '{cmd_name}' is local-only and does not support --host\n\
                      try:  ssh {} {}",
                     shell_words::quote(host),
                     shell_words::quote(&remote_cmd)
@@ -754,9 +773,8 @@ fn main() {
             eprintln!(
                 "command '{cmd_name}' is not supported over SSH (--host).\n\
                  Supported remote commands: {}.\n\
-                 Local-only commands (run, exec, wrap, prune) rely on local FIFO,\n\
-                 process context, or filesystem state that cannot tunnel through ssh -T.\n\
-                 For exec against a remote session, ssh to the host and run tender there.",
+                 Local-only commands (run, wrap, prune) rely on local FIFO,\n\
+                 process context, or filesystem state that cannot tunnel through ssh -T.",
                 tender::ssh::REMOTE_COMMANDS.join(", ")
             );
             std::process::exit(1);
@@ -872,8 +890,15 @@ fn main() {
             namespace,
             timeout,
             cmd,
+            frame_from_stdin,
         } => {
-            resolve_namespace(namespace).and_then(|ns| commands::cmd_exec(&name, cmd, timeout, &ns))
+            if frame_from_stdin {
+                commands::cmd_exec_frame_from_stdin()
+            } else {
+                let name = name.expect("clap: name required without --frame-from-stdin");
+                resolve_namespace(namespace)
+                    .and_then(|ns| commands::cmd_exec(&name, cmd, timeout, &ns))
+            }
         }
         Commands::Watch {
             namespace,

@@ -18,7 +18,7 @@ mod wrap;
 pub use attach::cmd_attach;
 pub use emit::{EmitOptions, cmd_emit};
 pub use events::{EventsOptions, cmd_events};
-pub use exec::cmd_exec;
+pub use exec::{cmd_exec, cmd_exec_frame_from_stdin};
 pub use kill::cmd_kill;
 pub use list::cmd_list;
 pub use log::cmd_log;

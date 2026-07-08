@@ -99,6 +99,36 @@ struct SideChannelResult {
     traceback: Option<String>,
 }
 
+/// Execute one exec request read as a JSON frame from stdin
+/// (`--frame-from-stdin`, 00_remote-exec-host-parity.md slice 2). The
+/// frame is the whole request; a malformed or wrong-version frame is a
+/// usage error (exit 2) before any side effect. After decoding this is
+/// exactly `cmd_exec` — same exec lock, same session semantics.
+pub fn cmd_exec_frame_from_stdin() -> anyhow::Result<()> {
+    use std::io::Read;
+
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+    let frame = match tender::exec_request::ExecRequestFrame::from_json(&buf) {
+        Ok(frame) => frame,
+        Err(e) => {
+            eprintln!("tender exec: {e}");
+            std::process::exit(2);
+        }
+    };
+    let namespace = match frame.namespace {
+        Some(ns) => match Namespace::new(&ns) {
+            Ok(ns) => ns,
+            Err(e) => {
+                eprintln!("tender exec: invalid exec frame: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => Namespace::default_namespace(),
+    };
+    cmd_exec(&frame.session, frame.cmd, frame.timeout, &namespace)
+}
+
 pub fn cmd_exec(
     name: &str,
     cmd: Vec<String>,
