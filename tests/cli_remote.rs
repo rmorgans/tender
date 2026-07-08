@@ -660,6 +660,43 @@ fn host_run_wrap_prune_exit_2_and_say_local_only() {
     }
 }
 
+/// run's fallback keeps the `--` separator before script args: a script
+/// arg like --stdin must not re-parse as tender's own flag when the
+/// fallback is pasted (review finding on PR #12). clap consumes the
+/// first `--` but keeps any later one in the captured args, so exactly
+/// one separator is re-inserted.
+#[test]
+fn host_run_fallback_keeps_separator_before_script_args() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = poison_ssh();
+    for (cli_args, expected_remote) in [
+        (
+            vec!["--host", "user@box", "run", "deploy.sh", "--", "--stdin"],
+            vec!["tender", "run", "deploy.sh", "--", "--stdin"],
+        ),
+        (
+            // A second `--` inside script args survives in place.
+            vec!["--host", "user@box", "run", "d.sh", "--", "a", "--", "b"],
+            vec!["tender", "run", "d.sh", "--", "a", "--", "b"],
+        ),
+    ] {
+        let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+            .args(&cli_args)
+            .env("PATH", tmp.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let remote = parse_fallback_argv(&stderr, "user@box");
+        assert_eq!(
+            remote, expected_remote,
+            "script args re-parse as script args, not tender flags"
+        );
+    }
+}
+
 /// The rejection happens before any connection or side effect: a PATH'd
 /// ssh shim that records invocation is never run.
 #[test]

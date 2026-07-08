@@ -602,6 +602,12 @@ impl Commands {
                     args.push("--any-exit".to_string());
                 }
                 args.push(script.display().to_string());
+                // clap consumed the user's first `--` (later ones stay in
+                // the captured args) — re-insert exactly one so hyphen
+                // script args don't re-parse as tender flags on paste.
+                if !script_args.is_empty() {
+                    args.push("--".to_string());
+                }
                 args.extend(script_args.iter().cloned());
                 Some(args)
             }
