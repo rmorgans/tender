@@ -541,6 +541,135 @@ impl Commands {
         }
     }
 
+    /// Reconstruct CLI args for the four local-only verbs, for the
+    /// pre-filled `ssh <host> 'tender …'` fallback printed when `--host`
+    /// is rejected. Reconstructed from clap-parsed state — never raw
+    /// argv, which would corrupt child args after `--`. Returns `None`
+    /// for every other command (those keep the generic rejection).
+    fn local_fallback_args(&self) -> Option<Vec<String>> {
+        match self {
+            Commands::Run {
+                script,
+                shell,
+                detach,
+                foreground,
+                namespace,
+                stdin,
+                replace,
+                timeout,
+                cwd,
+                env_vars,
+                on_exit,
+                after,
+                any_exit,
+                args: script_args,
+            } => {
+                let mut args = vec!["run".to_string()];
+                if let Some(s) = shell {
+                    args.extend(["--shell".to_string(), s.clone()]);
+                }
+                if *detach {
+                    args.push("--detach".to_string());
+                }
+                if *foreground {
+                    args.push("--foreground".to_string());
+                }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if *stdin {
+                    args.push("--stdin".to_string());
+                }
+                if *replace {
+                    args.push("--replace".to_string());
+                }
+                if let Some(t) = timeout {
+                    args.extend(["--timeout".to_string(), t.to_string()]);
+                }
+                if let Some(c) = cwd {
+                    args.extend(["--cwd".to_string(), c.display().to_string()]);
+                }
+                for e in env_vars {
+                    args.extend(["--env".to_string(), e.clone()]);
+                }
+                for o in on_exit {
+                    args.extend(["--on-exit".to_string(), o.clone()]);
+                }
+                for a in after {
+                    args.extend(["--after".to_string(), a.clone()]);
+                }
+                if *any_exit {
+                    args.push("--any-exit".to_string());
+                }
+                args.push(script.display().to_string());
+                args.extend(script_args.iter().cloned());
+                Some(args)
+            }
+            Commands::Exec {
+                name,
+                namespace,
+                timeout,
+                cmd,
+            } => {
+                let mut args = vec!["exec".to_string(), name.clone()];
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if let Some(t) = timeout {
+                    args.extend(["--timeout".to_string(), t.to_string()]);
+                }
+                args.push("--".to_string());
+                args.extend(cmd.iter().cloned());
+                Some(args)
+            }
+            Commands::Wrap {
+                session,
+                namespace,
+                source,
+                event,
+                cmd,
+            } => {
+                let mut args = vec!["wrap".to_string()];
+                if let Some(s) = session {
+                    args.extend(["--session".to_string(), s.clone()]);
+                }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                args.extend(["--source".to_string(), source.clone()]);
+                args.extend(["--event".to_string(), event.clone()]);
+                args.push("--".to_string());
+                args.extend(cmd.iter().cloned());
+                Some(args)
+            }
+            Commands::Prune {
+                older_than,
+                all,
+                namespace,
+                dry_run,
+            } => {
+                let mut args = vec!["prune".to_string()];
+                if let Some(d) = older_than {
+                    args.extend([
+                        "--older-than".to_string(),
+                        humantime::format_duration(*d).to_string(),
+                    ]);
+                }
+                if *all {
+                    args.push("--all".to_string());
+                }
+                if let Some(ns) = namespace {
+                    args.extend(["--namespace".to_string(), ns.clone()]);
+                }
+                if *dry_run {
+                    args.push("--dry-run".to_string());
+                }
+                Some(args)
+            }
+            _ => None,
+        }
+    }
+
     /// Return the subcommand name string for allowlist checking.
     fn name(&self) -> &'static str {
         match self {
@@ -595,6 +724,27 @@ fn main() {
     if let Some(ref host) = cli.host {
         let cmd_name = cli.command.name();
         if !tender::ssh::is_remote_supported(cmd_name) {
+            // The four local-only verbs are a usage error (exit 2) with a
+            // pre-filled, copy-pasteable fallback — rejected before any
+            // connection or side effect (00_remote-exec-host-parity.md
+            // slice 1). exec says "yet": slice 2 makes it work remotely.
+            if let Some(args) = cli.command.local_fallback_args() {
+                let phrasing = if cmd_name == "exec" {
+                    "does not support --host yet"
+                } else {
+                    "is local-only and does not support --host"
+                };
+                let mut full = vec!["tender".to_string()];
+                full.extend(args);
+                let remote_cmd = shell_words::join(&full);
+                eprintln!(
+                    "error: '{cmd_name}' {phrasing}\n\
+                     try:  ssh {} {}",
+                    shell_words::quote(host),
+                    shell_words::quote(&remote_cmd)
+                );
+                std::process::exit(2);
+            }
             eprintln!(
                 "command '{cmd_name}' is not supported over SSH (--host).\n\
                  Supported remote commands: {}.\n\
