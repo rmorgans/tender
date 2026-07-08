@@ -499,43 +499,248 @@ fn host_flag_forwards_exec_target() {
     );
 }
 
-// -- Task 11: Allowlist rejection --
+// -- Slice 1 (00_remote-exec-host-parity.md): local-only verbs exit 2
+//    with a pre-filled ssh fallback, before any connection --
 
+/// A poison ssh shim: running it is the failure the slice exists to
+/// prevent, so it exits loudly. Returns the PATH dir.
+fn poison_ssh() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let fake_ssh = tmp.path().join("ssh");
+    std::fs::write(&fake_ssh, "#!/bin/sh\necho SSH_MUST_NOT_RUN >&2\nexit 99\n").unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
+    tmp
+}
+
+/// Extract the `try:` line's fallback and re-split it twice — once as the
+/// local shell would (yielding `ssh <host> <remote-string>`), once as the
+/// remote login shell would — returning the remote tender argv. This pins
+/// that the printed fallback is copy-paste correct, not just plausible.
+fn parse_fallback_argv(stderr: &str, host: &str) -> Vec<String> {
+    let try_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with("try:"))
+        .unwrap_or_else(|| panic!("no try: line in stderr: {stderr}"));
+    let cmd = try_line.trim_start().strip_prefix("try:").unwrap().trim();
+    let local = shell_words::split(cmd).expect("try: line parses as shell words");
+    assert_eq!(local[0], "ssh", "fallback is an ssh command: {cmd}");
+    assert_eq!(local[1], host, "fallback targets the requested host");
+    assert_eq!(
+        local.len(),
+        3,
+        "ssh + host + one remote command string: {local:?}"
+    );
+    shell_words::split(&local[2]).expect("remote command string parses")
+}
+
+/// `--host` on exec exits 2 (usage, not runtime) and prints the exact
+/// ssh fallback pre-filled with the user's session and payload.
 #[test]
-fn host_flag_rejects_unsupported_commands() {
+fn host_exec_exits_2_with_prefilled_ssh_fallback() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
-    for cmd_args in &[
-        vec!["--host", "user@box", "run", "script.sh"],
-        vec!["--host", "user@box", "exec", "session", "--", "ls"],
-        vec![
+    let tmp = poison_ssh();
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args([
             "--host",
-            "user@box",
-            "wrap",
-            "--source",
-            "test.hook",
-            "--event",
-            "test",
+            "nerevar",
+            "exec",
+            "ddb",
+            "--timeout",
+            "30",
             "--",
-            "true",
+            "SELECT count(*) FROM t;",
+        ])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "usage error exits 2");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("'exec' does not support --host yet"),
+        "names the verb, says yet (slice 2 will add it): {stderr}"
+    );
+    let remote = parse_fallback_argv(&stderr, "nerevar");
+    assert_eq!(
+        remote,
+        [
+            "tender",
+            "exec",
+            "ddb",
+            "--timeout",
+            "30",
+            "--",
+            "SELECT count(*) FROM t;"
         ],
-        vec!["--host", "user@box", "prune", "--all"],
+        "fallback carries the user's session and payload verbatim"
+    );
+    assert!(
+        !stderr.contains("SSH_MUST_NOT_RUN"),
+        "rejection must not invoke ssh: {stderr}"
+    );
+}
+
+/// The fallback survives quoting torture: single quotes, double quotes,
+/// `$vars`, and backslashes round-trip both shell layers byte-exact.
+#[test]
+fn host_exec_fallback_survives_quoting_torture() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let payload = r#"echo 'single' "double" $VAR back\slash"#;
+    let tmp = poison_ssh();
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args([
+            "--host", "user@box", "exec", "s1", "--", "sh", "-c", payload,
+        ])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let remote = parse_fallback_argv(&stderr, "user@box");
+    assert_eq!(
+        remote,
+        ["tender", "exec", "s1", "--", "sh", "-c", payload],
+        "payload survives both quoting layers byte-exact"
+    );
+}
+
+/// run/wrap/prune stay local-only permanently: exit 2, verb named,
+/// local-only stated, fallback line present.
+#[test]
+fn host_run_wrap_prune_exit_2_and_say_local_only() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = poison_ssh();
+    for (verb, cmd_args) in [
+        (
+            "run",
+            vec!["--host", "user@box", "run", "deploy.sh", "--stdin"],
+        ),
+        (
+            "wrap",
+            vec![
+                "--host",
+                "user@box",
+                "wrap",
+                "--source",
+                "test.hook",
+                "--event",
+                "pre-tool-use",
+                "--",
+                "true",
+            ],
+        ),
+        (
+            "prune",
+            vec!["--host", "user@box", "prune", "--all", "--dry-run"],
+        ),
     ] {
         let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
-            .args(cmd_args)
+            .args(&cmd_args)
+            .env("PATH", tmp.path())
             .output()
             .unwrap();
 
-        assert!(
-            !output.status.success(),
-            "command {:?} should be rejected over SSH",
-            cmd_args
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{verb} --host is a usage error"
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("not supported"),
-            "should mention 'not supported' for {:?}, got: {stderr}",
-            cmd_args
+            stderr.contains(&format!("'{verb}' is local-only")),
+            "{verb} names itself and says local-only: {stderr}"
+        );
+        let remote = parse_fallback_argv(&stderr, "user@box");
+        assert_eq!(remote[0], "tender");
+        assert_eq!(remote[1], verb, "fallback reconstructs the verb");
+    }
+}
+
+/// run's fallback keeps the `--` separator before script args: a script
+/// arg like --stdin must not re-parse as tender's own flag when the
+/// fallback is pasted (review finding on PR #12). clap consumes the
+/// first `--` but keeps any later one in the captured args, so exactly
+/// one separator is re-inserted.
+#[test]
+fn host_run_fallback_keeps_separator_before_script_args() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = poison_ssh();
+    for (cli_args, expected_remote) in [
+        (
+            vec!["--host", "user@box", "run", "deploy.sh", "--", "--stdin"],
+            vec!["tender", "run", "deploy.sh", "--", "--stdin"],
+        ),
+        (
+            // A second `--` inside script args survives in place.
+            vec!["--host", "user@box", "run", "d.sh", "--", "a", "--", "b"],
+            vec!["tender", "run", "d.sh", "--", "a", "--", "b"],
+        ),
+    ] {
+        let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+            .args(&cli_args)
+            .env("PATH", tmp.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let remote = parse_fallback_argv(&stderr, "user@box");
+        assert_eq!(
+            remote, expected_remote,
+            "script args re-parse as script args, not tender flags"
         );
     }
+}
+
+/// The rejection happens before any connection or side effect: a PATH'd
+/// ssh shim that records invocation is never run.
+#[test]
+fn host_local_only_rejection_spawns_no_ssh() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("ssh-was-run");
+    let fake_ssh = tmp.path().join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, PermissionsExt::from_mode(0o755)).unwrap();
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args(["--host", "user@box", "exec", "s1", "--", "ls"])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!marker.exists(), "ssh must not be spawned on rejection");
+}
+
+/// Commands outside the plan's four verbs (`events`, `emit`) keep the
+/// generic unsupported-over-SSH rejection untouched — spec §8 defers
+/// their local-only help text to slice 5.
+#[test]
+fn host_events_keeps_generic_rejection() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = poison_ssh();
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("tender"))
+        .args(["--host", "user@box", "events"])
+        .env("PATH", tmp.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "generic path unchanged");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not supported over SSH"),
+        "generic message unchanged: {stderr}"
+    );
 }
