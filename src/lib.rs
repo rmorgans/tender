@@ -3,6 +3,7 @@ pub mod attach_proto;
 pub mod directive;
 pub mod events;
 pub mod exec_frame;
+pub mod exec_request;
 pub mod log;
 pub mod model;
 pub mod platform;

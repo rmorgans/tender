@@ -17,12 +17,14 @@ pub enum SshError {
     Abnormal,
 }
 
-/// Commands that are supported over SSH transport.
+/// Commands whose argv is forwarded verbatim over SSH transport.
 ///
-/// Local-only commands (`run`, `exec`, `wrap`, `prune`) are rejected when
-/// `--host` is set. `exec` and `wrap` rely on local FIFO/process context
-/// that does not tunnel through `ssh -T`; `run` reads a local script file;
-/// `prune` walks the local session root.
+/// `exec` is deliberately absent: it is remote-capable, but travels via
+/// the frame transport (`exec_ssh_frame`) — the request rides the SSH
+/// stdin channel as one JSON frame, never the remote argv. Local-only
+/// commands (`run`, `wrap`, `prune`) are rejected when `--host` is set:
+/// `wrap` relies on local process context, `run` reads a local script
+/// file, `prune` walks the local session root.
 pub const REMOTE_COMMANDS: &[&str] = &[
     "start", "status", "list", "log", "push", "kill", "wait", "watch", "attach",
 ];
@@ -90,9 +92,90 @@ pub fn exec_ssh(host: &str, tender_args: &[String], allocate_tty: bool) -> Resul
     }
 }
 
+/// The remote argv for frame-transport exec — constant by construction:
+/// nothing user-controlled rides in argv, so there is no shell-quoting
+/// layer to traverse (00_remote-exec-host-parity.md slice 2). The frame
+/// itself travels on the SSH stdin channel as opaque bytes.
+fn build_ssh_exec_frame_command(host: &str, inherit_stdin: bool) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-T",
+        "-o",
+        "ConnectTimeout=10",
+        host,
+        "tender",
+        "exec",
+        "--frame-from-stdin",
+    ]);
+    cmd.stdin(if inherit_stdin {
+        Stdio::inherit()
+    } else {
+        Stdio::piped()
+    })
+    .stdout(Stdio::inherit())
+    .stderr(Stdio::inherit());
+    cmd
+}
+
+/// Execute a remote exec by shipping the frame over the SSH stdin
+/// channel. `frame` = `None` inherits local stdin (the
+/// `--frame-from-stdin` passthrough form — the caller's stdin already
+/// is the frame).
+///
+/// A failed write to the remote's stdin is deliberately ignored: it
+/// means the remote died early (EPIPE), and the remote's exit status is
+/// the authoritative outcome either way.
+///
+/// # Errors
+/// `SshError::TransportFailed` on ssh exit 255 (which shadows a remote
+/// command genuinely exiting 255 — an inherent ssh limitation),
+/// `SshError::SpawnFailed`/`Abnormal` as for `exec_ssh`.
+pub fn exec_ssh_frame(host: &str, frame: Option<&[u8]>) -> Result<i32, SshError> {
+    let mut child = build_ssh_exec_frame_command(host, frame.is_none())
+        .spawn()
+        .map_err(SshError::SpawnFailed)?;
+
+    if let Some(bytes) = frame
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        use std::io::Write;
+        let _ = stdin.write_all(bytes);
+        // Dropping stdin closes the channel — the remote sees EOF.
+    }
+
+    let status = child.wait().map_err(SshError::SpawnFailed)?;
+    match status.code() {
+        Some(255) => Err(SshError::TransportFailed),
+        Some(code) => Ok(code),
+        None => Err(SshError::Abnormal),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frame-transport argv is constant: the payload never appears.
+    #[test]
+    fn exec_frame_argv_is_constant() {
+        let cmd = build_ssh_exec_frame_command("user@box", false);
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv,
+            [
+                "-T",
+                "-o",
+                "ConnectTimeout=10",
+                "user@box",
+                "tender",
+                "exec",
+                "--frame-from-stdin"
+            ]
+        );
+    }
 
     /// Helper: extract the args that `build_ssh_command` would pass to the ssh binary.
     fn ssh_argv(host: &str, tender_args: &[&str]) -> Vec<String> {

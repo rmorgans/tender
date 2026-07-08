@@ -1407,3 +1407,183 @@ fn exec_payload_sees_block_id_env() {
         .args(["kill", "shell", "--force"])
         .assert();
 }
+
+// --- Slice 2 (00_remote-exec-host-parity.md): exec --frame-from-stdin ---
+
+/// A valid v1 frame on stdin runs exactly like the argv form: same
+/// envelope, same exit code, session named by the frame.
+#[test]
+fn exec_frame_from_stdin_runs_payload() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let frame = r#"{"v":1,"session":"shell","cmd":["echo","framed hello"]}"#;
+    let output = harness::tender(&root)
+        .args(["exec", "--frame-from-stdin"])
+        .write_stdin(frame)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "frame exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["exit_code"], 0);
+    assert!(
+        envelope["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("framed hello")
+    );
+    assert_eq!(envelope["session"], "shell");
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// The frame carries argv as a JSON array, so quoting-hostile payloads
+/// never touch a shell on the way in: the payload byte-for-byte matches
+/// what the in-session command receives.
+#[test]
+fn exec_frame_payload_survives_quoting_torture() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // printf's FORMAT string interprets \n (the payload arg does not),
+    // giving a trailing newline without a newline byte in argv — a
+    // payload that ends without one trips the pre-existing sentinel
+    // merge quirk and hangs exec. timeout guards regressions.
+    let torture = r#"it's a "test" with $VAR and back\slash"#;
+    let frame = serde_json::json!({
+        "v": 1,
+        "session": "shell",
+        "cmd": ["printf", "%s\\n", torture],
+        "timeout": 30,
+    });
+    let output = harness::tender(&root)
+        .args(["exec", "--frame-from-stdin"])
+        .write_stdin(frame.to_string())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["stdout"].as_str().unwrap().trim_end_matches('\n'),
+        torture,
+        "payload survives byte-exact"
+    );
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// Frame timeout behaves like --timeout: exit 124, timed_out true.
+#[test]
+fn exec_frame_timeout_exits_124() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    harness::tender(&root)
+        .args(["start", "shell", "--stdin", "--", "bash"])
+        .assert()
+        .success();
+    harness::wait_running(&root, "shell");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let frame = r#"{"v":1,"session":"shell","cmd":["sleep","3"],"timeout":1}"#;
+    let output = harness::tender(&root)
+        .args(["exec", "--frame-from-stdin"])
+        .write_stdin(frame)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(124));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["timed_out"], true);
+
+    let _ = harness::tender(&root)
+        .args(["kill", "shell", "--force"])
+        .assert();
+}
+
+/// Malformed frames are a usage error before any side effect: exit 2
+/// with a message that names the frame, not a clap error.
+#[test]
+fn exec_frame_bad_json_exits_2() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    let output = harness::tender(&root)
+        .args(["exec", "--frame-from-stdin"])
+        .write_stdin("this is not json")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid exec frame"),
+        "frame parse error names the frame: {stderr}"
+    );
+}
+
+/// An unsupported frame version is rejected loudly (exit 2, names the
+/// version) so schema evolution stays honest.
+#[test]
+fn exec_frame_unsupported_version_exits_2() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    let frame = r#"{"v":2,"session":"shell","cmd":["true"]}"#;
+    let output = harness::tender(&root)
+        .args(["exec", "--frame-from-stdin"])
+        .write_stdin(frame)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("version"),
+        "version rejection names the problem: {stderr}"
+    );
+}
+
+/// --frame-from-stdin conflicts with the argv surface: the frame is the
+/// whole request, nothing rides in argv beside it.
+#[test]
+fn exec_frame_conflicts_with_positional_args() {
+    let _lock = lock();
+    let root = tempfile::TempDir::new().unwrap();
+
+    let output = harness::tender(&root)
+        .args(["exec", "shell", "--frame-from-stdin", "--", "ls"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "clap reports the conflict: {stderr}"
+    );
+}
