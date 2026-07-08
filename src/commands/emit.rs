@@ -70,6 +70,15 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
         })
         .transpose()?;
 
+    // Ambient causality — one chaining rule (spec §2, §6): block_id from
+    // TENDER_BLOCK_ID; parent_id from --parent > TENDER_PARENT_EVENT_ID >
+    // TENDER_BLOCK_ID. Ambient env never hard-fails: malformed values warn
+    // and are ignored.
+    let block_id = events::env_uuid7("TENDER_BLOCK_ID");
+    let parent_id = parent_id
+        .or_else(|| events::env_uuid7("TENDER_PARENT_EVENT_ID"))
+        .or(block_id);
+
     // 3: session context from --session or the supervised-run environment.
     let (namespace, session_name, from_env) = resolve_context(opts)?;
 
@@ -96,15 +105,17 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
         // environment still has a fully-addressed event — preserve it.
         if from_env && let Some(run_id) = env_run_id {
             let draft = EventDraft {
+                id: None,
                 kind,
                 namespace,
                 session: session_name,
                 run_id,
                 generation: env_generation,
                 source,
-                block_id: None,
+                block_id,
                 parent_id,
                 data,
+                preview: None,
             };
             let event = events::stamp_orphan_event(draft);
             let tender_root = root
@@ -132,15 +143,17 @@ fn emit_inner(opts: &EmitOptions) -> Result<(), EmitFailure> {
     };
 
     let draft = EventDraft {
+        id: None,
         kind,
         namespace,
         session: session_name,
         run_id,
         generation,
         source,
-        block_id: None,
+        block_id,
         parent_id,
         data,
+        preview: None,
     };
     let mut writer = EventWriter::new(dir.path());
     writer

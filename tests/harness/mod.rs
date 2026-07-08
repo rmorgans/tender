@@ -56,6 +56,39 @@ pub fn echo_env_cmd(path: &Path) -> String {
     format!("{} echo-env {quoted}", test_callback_bin_quoted())
 }
 
+/// Read all stored events for a default-namespace session, merged by
+/// (ts, writer, seq) — the spec §4 merge rule.
+#[allow(dead_code)]
+pub fn read_events(root: &TempDir, session: &str) -> Vec<serde_json::Value> {
+    let events_dir = root
+        .path()
+        .join(format!(".tender/sessions/default/{session}/events"));
+    let mut segments: Vec<_> = std::fs::read_dir(&events_dir)
+        .expect("events dir exists")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    segments.sort();
+
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    for seg in segments {
+        for line in std::fs::read_to_string(&seg).unwrap().lines() {
+            if !line.is_empty() {
+                events.push(serde_json::from_str(line).expect("event line parses"));
+            }
+        }
+    }
+    events.sort_by_key(|e| {
+        (
+            e["ts"].as_str().unwrap().to_owned(),
+            e["writer"].as_str().unwrap().to_owned(),
+            e["seq"].as_u64().unwrap(),
+        )
+    });
+    events
+}
+
 /// Wait for meta.json to show Running state on disk.
 #[allow(dead_code)]
 pub fn wait_running(root: &TempDir, session: &str) {

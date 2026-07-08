@@ -631,3 +631,379 @@ fn wrap_forwards_sigterm_and_writes_annotation() {
         .unwrap();
     wait_terminal(&root, "wrap-sigterm");
 }
+
+// --- Slice 3: dual-write — stored event + A-line linked by event_id (plan scope 3) ---
+
+/// wrap with a valid event kind dual-writes: the stored event (spec
+/// example (b) data shape) and an A-line carrying event_id/block_id.
+#[test]
+fn wrap_dual_writes_event_and_linked_aline() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-dual", "default");
+    let run_id = read_run_id(&root, "default", "wrap-dual");
+
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .env("TENDER_GENERATION", "1")
+        .args([
+            "wrap",
+            "--session",
+            "wrap-dual",
+            "--source",
+            "claude.hook",
+            "--event",
+            "hook.post_tool_use",
+            "--",
+            "echo",
+            "ok",
+        ])
+        .write_stdin(r#"{"tool_name":"Bash"}"#)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let events = harness::read_events(&root, "wrap-dual");
+    let hook = events
+        .iter()
+        .find(|e| e["kind"] == "hook.post_tool_use")
+        .expect("stored hook event");
+    assert_eq!(hook["source"], "claude.hook");
+    assert_eq!(hook["run_id"].as_str().unwrap(), run_id);
+    assert_eq!(hook["gen"], 1);
+    assert_eq!(hook["data"]["hook_stdin"]["tool_name"], "Bash");
+    assert_eq!(hook["data"]["hook_stdout"], "ok\n");
+    assert_eq!(hook["data"]["hook_exit_code"], 0);
+    assert_eq!(hook["data"]["command"], serde_json::json!(["echo", "ok"]));
+    assert_eq!(hook["data"]["truncated"], false);
+    let block = hook["block_id"].as_str().expect("event carries its block");
+
+    let ann_lines = read_annotation_lines(&root, "default", "wrap-dual");
+    assert_eq!(ann_lines.len(), 1);
+    let ann = &ann_lines[0];
+    assert_eq!(ann["event_id"], hook["id"], "A-line links the stored event");
+    assert_eq!(ann["block_id"].as_str().unwrap(), block);
+    assert_eq!(ann["source"], "claude.hook", "legacy A-line shape intact");
+    assert_eq!(ann["data"]["hook_exit_code"], 0);
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-dual"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-dual");
+}
+
+/// The child sees TENDER_BLOCK_ID (wrap's block) and TENDER_PARENT_EVENT_ID
+/// — the id of the event wrap WILL write (pre-minted, spec §2).
+#[test]
+fn wrap_sets_child_env_chain() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-env", "default");
+    let run_id = read_run_id(&root, "default", "wrap-env");
+
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .args([
+            "wrap",
+            "--session",
+            "wrap-env",
+            "--source",
+            "test.src",
+            "--event",
+            "hook.env_probe",
+            "--",
+            "sh",
+            "-c",
+            "printenv TENDER_BLOCK_ID; printenv TENDER_PARENT_EVENT_ID",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let events = harness::read_events(&root, "wrap-env");
+    let hook = events
+        .iter()
+        .find(|e| e["kind"] == "hook.env_probe")
+        .expect("stored event");
+    let seen: Vec<&str> = hook["data"]["hook_stdout"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(seen.len(), 2, "child saw both vars");
+    assert_eq!(seen[0], hook["block_id"].as_str().unwrap());
+    assert_eq!(
+        seen[1],
+        hook["id"].as_str().unwrap(),
+        "TENDER_PARENT_EVENT_ID names the event wrap wrote"
+    );
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-env"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-env");
+}
+
+/// A hook-spawned emit chains to the wrap event automatically — the causal
+/// tree needs no flags anywhere (spec §2).
+#[test]
+fn wrap_child_emit_chains_to_hook_event() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-chain", "default");
+    let run_id = read_run_id(&root, "default", "wrap-chain");
+
+    let tender_bin = assert_cmd::cargo::cargo_bin("tender");
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .env("TENDER_SESSION", "wrap-chain")
+        .env("TENDER_NAMESPACE", "default")
+        .args([
+            "wrap",
+            "--session",
+            "wrap-chain",
+            "--source",
+            "claude.hook",
+            "--event",
+            "hook.post_tool_use",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{} emit --kind hook.note --data '{{\"note\":1}}' --best-effort",
+                shell_words::quote(tender_bin.to_str().unwrap())
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let events = harness::read_events(&root, "wrap-chain");
+    let hook = events
+        .iter()
+        .find(|e| e["kind"] == "hook.post_tool_use")
+        .expect("hook event");
+    let note = events
+        .iter()
+        .find(|e| e["kind"] == "hook.note")
+        .expect("child emit stored");
+    assert_eq!(
+        note["parent_id"], hook["id"],
+        "child event chains to the hook event"
+    );
+    assert_eq!(
+        note["block_id"], hook["block_id"],
+        "child event lands in wrap's block"
+    );
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-chain"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-chain");
+}
+
+/// A reserved --event is argument validation: exit 6 before any side
+/// effect — child not spawned, nothing written anywhere.
+#[test]
+fn wrap_reserved_event_exits_6_without_side_effects() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-res", "default");
+    let run_id = read_run_id(&root, "default", "wrap-res");
+
+    let marker = root.path().join("side-effect-marker");
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .args([
+            "wrap",
+            "--session",
+            "wrap-res",
+            "--source",
+            "test.src",
+            "--event",
+            "run.hijack",
+            "--",
+            "touch",
+            marker.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(6));
+    assert!(!marker.exists(), "child must not have run");
+    assert!(
+        read_annotation_lines(&root, "default", "wrap-res").is_empty(),
+        "no A-line"
+    );
+    let events = harness::read_events(&root, "wrap-res");
+    assert!(
+        !events.iter().any(|e| e["kind"] == "run.hijack"),
+        "no stored event"
+    );
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-res"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-res");
+}
+
+/// A legacy dotless --event keeps the exact pre-slice-3 behavior: A-line
+/// only, no stored event, no env chain for the child, child exit intact.
+#[test]
+fn wrap_legacy_dotless_event_keeps_aline_only() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-legacy", "default");
+    let run_id = read_run_id(&root, "default", "wrap-legacy");
+
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .args([
+            "wrap",
+            "--session",
+            "wrap-legacy",
+            "--source",
+            "test.src",
+            "--event",
+            "pre-tool-use",
+            "--",
+            "sh",
+            "-c",
+            "printenv TENDER_BLOCK_ID || echo no-block-env",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("annotation only"),
+        "legacy path says what it does"
+    );
+
+    let ann_lines = read_annotation_lines(&root, "default", "wrap-legacy");
+    assert_eq!(ann_lines.len(), 1);
+    let ann = &ann_lines[0];
+    assert_eq!(ann["event"], "pre-tool-use");
+    assert!(ann.get("event_id").is_none(), "no linkage without an event");
+    assert!(ann.get("block_id").is_none());
+    assert!(
+        ann["data"]["hook_stdout"]
+            .as_str()
+            .unwrap()
+            .contains("no-block-env"),
+        "legacy path sets no env chain"
+    );
+
+    let events = harness::read_events(&root, "wrap-legacy");
+    assert!(
+        events.iter().all(|e| e["source"] != "test.src"),
+        "no stored event on the legacy path"
+    );
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-legacy"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-legacy");
+}
+
+/// wrap inside an outer block chains its event upward via parent_id.
+#[test]
+fn wrap_chains_parent_from_ambient_env() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-outer", "default");
+    let run_id = read_run_id(&root, "default", "wrap-outer");
+
+    let outer = uuid::Uuid::now_v7().to_string();
+    tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .env("TENDER_BLOCK_ID", &outer)
+        .args([
+            "wrap",
+            "--session",
+            "wrap-outer",
+            "--source",
+            "test.src",
+            "--event",
+            "hook.nested",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+
+    let events = harness::read_events(&root, "wrap-outer");
+    let hook = events.iter().find(|e| e["kind"] == "hook.nested").unwrap();
+    assert_eq!(hook["parent_id"].as_str().unwrap(), outer);
+    assert_ne!(hook["block_id"].as_str().unwrap(), outer, "fresh block");
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-outer"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-outer");
+}
+
+/// Event append failure is best-effort: the child exit code passes through
+/// and the A-line is still written — without an event_id link.
+#[cfg(unix)]
+#[test]
+fn wrap_event_append_failure_is_best_effort() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+
+    create_running_session(&root, "wrap-ro", "default");
+    let run_id = read_run_id(&root, "default", "wrap-ro");
+
+    let events_dir = root.path().join(".tender/sessions/default/wrap-ro/events");
+    std::fs::set_permissions(&events_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = tender(&root)
+        .env("TENDER_RUN_ID", &run_id)
+        .args([
+            "wrap",
+            "--session",
+            "wrap-ro",
+            "--source",
+            "test.src",
+            "--event",
+            "hook.roevents",
+            "--",
+            "sh",
+            "-c",
+            "exit 7",
+        ])
+        .output()
+        .unwrap();
+
+    std::fs::set_permissions(&events_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(out.status.code(), Some(7), "child exit passes through");
+    let ann_lines = read_annotation_lines(&root, "default", "wrap-ro");
+    assert_eq!(ann_lines.len(), 1, "A-line still written");
+    assert!(
+        ann_lines[0].get("event_id").is_none(),
+        "no event_id when the event never landed"
+    );
+    assert!(
+        ann_lines[0].get("block_id").is_some(),
+        "block context still recorded"
+    );
+
+    tender(&root)
+        .args(["kill", "--force", "wrap-ro"])
+        .output()
+        .unwrap();
+    wait_terminal(&root, "wrap-ro");
+}

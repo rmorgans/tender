@@ -10,7 +10,7 @@ use anyhow::Context;
 
 use crate::events::{self, EventDraft, EventWriter};
 use crate::model::dep_fail::DepFailReason;
-use crate::model::event::Uuid7;
+use crate::model::event::{Kind, Uuid7};
 use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName, Source};
 use crate::model::meta::Meta;
 use crate::model::pty::PtyMeta;
@@ -367,12 +367,34 @@ impl LifecycleEvents {
         }
     }
 
+    /// Like `new`, but with a freshly minted writer identity — for sidecar
+    /// threads that append concurrently with the lifecycle writer (the
+    /// attach listener). The protocol is multi-writer by design: each
+    /// writer keeps its own contiguous `seq` chain (spec §1).
+    fn with_fresh_writer(
+        session_dir: &Path,
+        namespace: &Namespace,
+        session: &SessionName,
+        run_id: RunId,
+        generation: Generation,
+    ) -> Self {
+        Self {
+            session_dir: session_dir.to_path_buf(),
+            writer: EventWriter::new(session_dir),
+            namespace: namespace.clone(),
+            session: session.clone(),
+            run_id,
+            generation,
+        }
+    }
+
     /// Append the lifecycle event for meta's CURRENT status. Never fails the
     /// run: an append failure becomes a meta warning and the record is
     /// salvaged to lost+found — supervision must not die, and the history
     /// record must not silently vanish, because the event log is unwritable.
     fn emit(&mut self, meta: &mut Meta, durable: bool) {
         let draft = EventDraft {
+            id: None,
             kind: events::lifecycle_kind(meta.status()),
             namespace: self.namespace.clone(),
             session: self.session.clone(),
@@ -382,11 +404,36 @@ impl LifecycleEvents {
             block_id: None,
             parent_id: None,
             data: Some(events::lifecycle_data(meta.status(), "direct")),
+            preview: None,
         };
         if let Err(e) = self.writer.append(draft.clone(), durable) {
             meta.add_warning(format!("event log append failed: {e}"));
             self.salvage_to_lost_found(draft);
         }
+    }
+
+    /// Append a non-lifecycle sidecar fact (`callback.finished`, spec §1)
+    /// through the same writer, so `seq` stays contiguous after the
+    /// terminal transition. Best-effort by design (plan slice 3): no
+    /// salvage, no meta warning — these are not terminal transitions.
+    fn append_fact(&mut self, kind: &str, data: serde_json::Value) {
+        let Ok(kind) = Kind::new(kind) else {
+            return;
+        };
+        let draft = EventDraft {
+            id: None,
+            kind,
+            namespace: self.namespace.clone(),
+            session: self.session.clone(),
+            run_id: self.run_id,
+            generation: Some(self.generation.as_u64()),
+            source: Source::trusted("tender.sidecar").expect("tender.sidecar is grammatical"),
+            block_id: None,
+            parent_id: None,
+            data: Some(data),
+            preview: None,
+        };
+        let _ = self.writer.append(draft, false);
     }
 
     /// Last-resort preservation when the session's event log is unwritable:
@@ -690,6 +737,13 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
         let attach_sink_clone = Arc::clone(&attach_sink);
         let session_path = session_dir.to_path_buf();
         let resize_fd = pty_resize_fd.take();
+        let facts = LifecycleEvents::with_fresh_writer(
+            session_dir,
+            &namespace,
+            &session_name,
+            run_id,
+            generation,
+        );
         std::thread::spawn(move || {
             run_attach_listener(
                 &sock_path,
@@ -697,6 +751,7 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
                 attach_sink_clone,
                 &session_path,
                 resize_fd,
+                facts,
             );
         });
     }
@@ -862,6 +917,9 @@ fn run_inner(session_dir: &Path, ready: &mut Option<ReadyWriter>) -> anyhow::Res
                     })
                 }
             };
+            // The durable per-callback fact (plan scope 5): emitted as each
+            // callback finishes, same record shape as the batch file.
+            lifecycle.append_fact("callback.finished", record.clone());
             callback_results.push(record);
         }
 
@@ -1085,6 +1143,7 @@ fn run_attach_listener(
     attach_sink: AttachSink,
     session_dir: &Path,
     resize_fd: Option<std::fs::File>,
+    mut facts: LifecycleEvents,
 ) {
     use crate::attach_proto;
     use std::os::unix::net::UnixListener;
@@ -1113,6 +1172,14 @@ fn run_attach_listener(
         // Set attach sink -- capture thread starts teeing output
         *attach_sink.lock().unwrap() = Some(Box::new(write_half));
 
+        // WAL-ordered control fact before the meta flip (spec §3.6); the
+        // append itself is best-effort, not fsynced.
+        // Minimal by design: who owns the PTY's input, nothing else —
+        // screen-state semantics are adapter territory (plan boundary note).
+        facts.append_fact(
+            "pty.control_changed",
+            serde_json::json!({"control": "HumanControl", "trigger": "attach"}),
+        );
         // Update meta to HumanControl
         update_pty_control(session_dir, "HumanControl");
 
@@ -1140,6 +1207,10 @@ fn run_attach_listener(
         // Clear attach sink -- capture thread stops teeing
         *attach_sink.lock().unwrap() = None;
 
+        facts.append_fact(
+            "pty.control_changed",
+            serde_json::json!({"control": "AgentControl", "trigger": "detach"}),
+        );
         // Update meta to AgentControl
         update_pty_control(session_dir, "AgentControl");
     }

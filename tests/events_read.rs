@@ -15,6 +15,7 @@ use tender::model::ids::{Namespace, RunId, SessionName, Source};
 
 fn draft(kind: &str, data: serde_json::Value) -> EventDraft {
     EventDraft {
+        id: None,
         kind: Kind::new(kind).unwrap(),
         namespace: Namespace::new("default").unwrap(),
         session: SessionName::new("s1").unwrap(),
@@ -24,6 +25,7 @@ fn draft(kind: &str, data: serde_json::Value) -> EventDraft {
         block_id: None,
         parent_id: None,
         data: Some(data),
+        preview: None,
     }
 }
 

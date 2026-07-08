@@ -25,15 +25,25 @@ pub fn python_frame(code: &str, result_path: &str) -> String {
 /// The command is escaped using shell_words::join, then appended with a sentinel
 /// trailer that captures exit code and cwd.
 ///
-/// Token must be hex-only (as produced by `generate_token`).
-pub fn unix_frame(argv: &[String], token: &str) -> String {
+/// `TENDER_BLOCK_ID` is exported for exactly the payload's duration
+/// (spec §2): set before it, exit code captured first, unset before the
+/// sentinel — so a payload spawning `tender emit` chains to the exec
+/// block, and the session shell is not left polluted.
+///
+/// Token must be hex-only (as produced by `generate_token`); block_id is
+/// a UUID (hex + dashes).
+pub fn unix_frame(argv: &[String], token: &str, block_id: &str) -> String {
     debug_assert!(
         token.bytes().all(|b| b.is_ascii_hexdigit()),
         "token must be hex-only, got: {token}"
     );
+    debug_assert!(
+        block_id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+        "block_id must be a uuid, got: {block_id}"
+    );
     let cmd = shell_words::join(argv);
     format!(
-        "{cmd}; __tender_s=$?; printf '__TENDER_EXEC__ %s %s %s\\n' '{token}' \"$__tender_s\" \"$(pwd)\"\n"
+        "export TENDER_BLOCK_ID='{block_id}'; {cmd}; __tender_s=$?; unset TENDER_BLOCK_ID; printf '__TENDER_EXEC__ %s %s %s\\n' '{token}' \"$__tender_s\" \"$(pwd)\"\n"
     )
 }
 
@@ -116,9 +126,11 @@ pub fn generate_token() -> String {
 mod tests {
     use super::*;
 
+    const BLOCK: &str = "01981f32-5550-7abc-8def-111122223333";
+
     #[test]
     fn unix_frame_simple_command() {
-        let frame = unix_frame(&["echo".into(), "hello".into()], "a1b2c3");
+        let frame = unix_frame(&["echo".into(), "hello".into()], "a1b2c3", BLOCK);
         assert!(frame.contains("echo hello"));
         assert!(frame.contains("__TENDER_EXEC__ %s %s %s"));
         assert!(frame.contains("a1b2c3"));
@@ -127,9 +139,28 @@ mod tests {
 
     #[test]
     fn unix_frame_command_with_special_chars() {
-        let frame = unix_frame(&["echo".into(), "it's a \"test\"".into()], "a1b2c3");
+        let frame = unix_frame(&["echo".into(), "it's a \"test\"".into()], "a1b2c3", BLOCK);
         assert!(frame.contains("__TENDER_EXEC__"));
         assert!(frame.contains("a1b2c3"));
+    }
+
+    #[test]
+    fn unix_frame_exports_block_id_around_payload() {
+        // Spec §2 / plan scope 2: set before the payload, capture the exit
+        // code first, unset before the sentinel — the session shell is not
+        // left polluted.
+        let frame = unix_frame(&["echo".into(), "hi".into()], "a1b2c3", BLOCK);
+        let export = frame
+            .find(&format!("export TENDER_BLOCK_ID='{BLOCK}'"))
+            .expect("export present");
+        let cmd = frame.find("echo hi").expect("payload present");
+        let status = frame.find("__tender_s=$?").expect("exit capture present");
+        let unset = frame.find("unset TENDER_BLOCK_ID").expect("unset present");
+        let sentinel = frame.find("printf").expect("sentinel present");
+        assert!(export < cmd, "export precedes payload");
+        assert!(cmd < status, "exit captured after payload");
+        assert!(status < unset, "unset after exit capture");
+        assert!(unset < sentinel, "unset before the sentinel prints");
     }
 
     #[test]

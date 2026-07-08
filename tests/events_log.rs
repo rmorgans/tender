@@ -9,6 +9,7 @@ use tender::model::ids::{Namespace, RunId, SessionName, Source};
 
 fn draft(kind: &str, data: serde_json::Value) -> EventDraft {
     EventDraft {
+        id: None,
         kind: Kind::new(kind).unwrap(),
         namespace: Namespace::new("default").unwrap(),
         session: SessionName::new("s1").unwrap(),
@@ -18,6 +19,7 @@ fn draft(kind: &str, data: serde_json::Value) -> EventDraft {
         block_id: None,
         parent_id: None,
         data: Some(data),
+        preview: None,
     }
 }
 
@@ -214,6 +216,114 @@ fn small_data_stays_inline_untouched() {
     assert!(event.data_ref.is_none());
     assert!(event.truncated.is_none());
     assert!(!session_dir.join("events").join("blobs").exists());
+}
+
+// --- Slice 3: caller-supplied identity + structured spill preview ---
+
+#[test]
+fn append_honors_pre_minted_id() {
+    let tmp = TempDir::new().unwrap();
+    let session_dir = tmp.path().join("s1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let minted = Uuid7::new();
+    let mut d = draft("hook.post_tool_use", serde_json::json!({"ok": true}));
+    d.id = Some(minted);
+    let mut writer = EventWriter::new(&session_dir);
+    let event = writer.append(d, false).unwrap();
+
+    assert_eq!(event.id, minted, "caller-supplied id is stamped verbatim");
+    let segs = segment_files(&session_dir);
+    let parsed: Event = serde_json::from_str(&read_lines(&segs[0])[0]).unwrap();
+    assert_eq!(parsed.id, minted, "pre-minted id round-trips the segment");
+}
+
+#[test]
+fn orphan_stamp_honors_pre_minted_id() {
+    let minted = Uuid7::new();
+    let mut d = draft("hook.post_tool_use", serde_json::json!({}));
+    d.id = Some(minted);
+    let event = tender::events::stamp_orphan_event(d);
+    assert_eq!(event.id, minted);
+}
+
+#[test]
+fn oversize_spill_uses_caller_supplied_structured_preview() {
+    let tmp = TempDir::new().unwrap();
+    let session_dir = tmp.path().join("s1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let big = serde_json::json!({
+        "exit_code": 0,
+        "cwd_after": "/data",
+        "timed_out": false,
+        "stderr": "",
+        "stdout": "x".repeat(1024 * 1024),
+        "truncated": false,
+    });
+    let structured = serde_json::json!({
+        "exit_code": 0,
+        "cwd_after": "/data",
+        "timed_out": false,
+        "stderr": "",
+        "stdout_preview": "x".repeat(512),
+        "truncated": true,
+    });
+    let mut d = draft("exec.result", big.clone());
+    d.preview = Some(structured.clone());
+    let mut writer = EventWriter::new(&session_dir);
+    let event = writer.append(d, false).unwrap();
+
+    assert_eq!(
+        event.data.as_ref().unwrap(),
+        &structured,
+        "inline data is the caller's structured preview"
+    );
+    assert_eq!(event.truncated, Some(true));
+    let data_ref = event.data_ref.as_ref().expect("full data spilled to blob");
+    let blob = std::fs::read(session_dir.join(&data_ref.path)).unwrap();
+    let full: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+    assert_eq!(full, big, "blob holds the full untruncated data");
+}
+
+#[test]
+fn oversize_caller_preview_degrades_to_generic() {
+    let tmp = TempDir::new().unwrap();
+    let session_dir = tmp.path().join("s1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let big = serde_json::json!({"stdout": "y".repeat(64 * 1024)});
+    let mut d = draft("exec.result", big);
+    // Supplied preview itself busts MAX_PREVIEW_BYTES — fall back to generic.
+    d.preview = Some(serde_json::json!({"stdout_preview": "y".repeat(8 * 1024)}));
+    let mut writer = EventWriter::new(&session_dir);
+    let event = writer.append(d, false).unwrap();
+
+    assert_eq!(event.truncated, Some(true));
+    let inline = event.data.as_ref().unwrap();
+    assert!(
+        inline.get("preview").is_some(),
+        "generic head-of-JSON preview shape used, got: {inline}"
+    );
+    let serialized = serde_json::to_string(inline).unwrap();
+    assert!(serialized.len() <= 4 * 1024 + 64);
+}
+
+#[test]
+fn preview_ignored_when_data_fits_inline() {
+    let tmp = TempDir::new().unwrap();
+    let session_dir = tmp.path().join("s1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let data = serde_json::json!({"exit_code": 0, "stdout": "small"});
+    let mut d = draft("exec.result", data.clone());
+    d.preview = Some(serde_json::json!({"never": "used"}));
+    let mut writer = EventWriter::new(&session_dir);
+    let event = writer.append(d, false).unwrap();
+
+    assert_eq!(event.data.as_ref().unwrap(), &data, "inline data untouched");
+    assert!(event.data_ref.is_none());
+    assert!(event.truncated.is_none());
 }
 
 // --- Concurrency (acceptance criterion: 2 writers × 1000, zero torn lines) ---
