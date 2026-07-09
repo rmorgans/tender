@@ -13,7 +13,7 @@ use crate::model::dep_fail::DepFailReason;
 use crate::model::event::{Kind, Uuid7};
 use crate::model::ids::{EpochTimestamp, Generation, Namespace, RunId, SessionName, Source};
 use crate::model::meta::Meta;
-use crate::model::pty::PtyMeta;
+use crate::model::pty::{PtyControl, PtyMeta};
 use crate::model::spec::{IoMode, LaunchSpec, StdinMode};
 use crate::model::state::ExitReason;
 use crate::platform::{Current, Platform};
@@ -1181,7 +1181,7 @@ fn run_attach_listener(
             serde_json::json!({"control": "HumanControl", "trigger": "attach"}),
         );
         // Update meta to HumanControl
-        update_pty_control(session_dir, "HumanControl");
+        set_pty_control_on_disk(session_dir, PtyControl::HumanControl);
 
         // Read input from human
         loop {
@@ -1212,7 +1212,7 @@ fn run_attach_listener(
             serde_json::json!({"control": "AgentControl", "trigger": "detach"}),
         );
         // Update meta to AgentControl
-        update_pty_control(session_dir, "AgentControl");
+        set_pty_control_on_disk(session_dir, PtyControl::AgentControl);
     }
 }
 
@@ -1232,23 +1232,92 @@ fn apply_pty_resize(fd: &std::fs::File, rows: u16, cols: u16) {
     }
 }
 
-fn update_pty_control(session_dir: &Path, control: &str) {
-    // Best-effort: read meta, update control, write back
+/// Best-effort: flip the PTY control state in the session's `meta.json` through
+/// a typed `Meta` round-trip (read → `set_pty_control` → write). Keeps meta.json
+/// a valid typed `Meta` — consistent with how the sidecar serializes meta
+/// everywhere else — instead of hand-patching an untyped JSON value with a raw
+/// string. Persistence is the same best-effort tmp+rename the attach path has
+/// always used (no fsync): a control flip must not block the attach thread, and
+/// the durable lifecycle writes go through `write_meta_atomic` elsewhere.
+fn set_pty_control_on_disk(session_dir: &Path, control: PtyControl) {
     let meta_path = session_dir.join("meta.json");
-    if let Ok(content) = std::fs::read_to_string(&meta_path) {
-        if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(pty) = meta.get_mut("pty") {
-                pty["control"] = serde_json::Value::String(control.to_string());
-                let tmp = session_dir.join("meta.json.tmp");
-                if std::fs::write(
-                    &tmp,
-                    serde_json::to_string_pretty(&meta).unwrap_or_default(),
-                )
-                .is_ok()
-                {
-                    let _ = std::fs::rename(&tmp, &meta_path);
-                }
-            }
-        }
+    let Ok(content) = std::fs::read_to_string(&meta_path) else {
+        return;
+    };
+    let Ok(mut meta) = serde_json::from_str::<Meta>(&content) else {
+        return;
+    };
+    meta.set_pty_control(control);
+    let Ok(json) = serde_json::to_string_pretty(&meta) else {
+        return;
+    };
+    let tmp = session_dir.join("meta.json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, &meta_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ids::{EpochTimestamp, Generation, ProcessIdentity, RunId, SessionName};
+    use crate::model::pty::PtyControl;
+    use crate::model::spec::LaunchSpec;
+    use std::num::NonZeroU32;
+
+    /// Write a PTY-enabled meta.json (AgentControl by default) into `dir`.
+    fn write_pty_meta(dir: &Path) -> Meta {
+        let mut meta = Meta::new_starting(
+            SessionName::new("ptytest").unwrap(),
+            RunId::new(),
+            Generation::first(),
+            LaunchSpec::new(vec!["bash".into()]).unwrap(),
+            ProcessIdentity {
+                pid: NonZeroU32::new(100).unwrap(),
+                start_time_ns: 1000,
+            },
+            EpochTimestamp::now(),
+        );
+        meta.set_pty(PtyMeta::new());
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        meta
+    }
+
+    /// attach -> HumanControl and detach -> AgentControl each leave meta.json a
+    /// valid typed Meta carrying the expected pty.control, other fields intact.
+    #[test]
+    fn set_pty_control_round_trips_as_typed_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = write_pty_meta(dir.path());
+        assert_eq!(original.pty().unwrap().control, PtyControl::AgentControl);
+
+        // attach
+        set_pty_control_on_disk(dir.path(), PtyControl::HumanControl);
+        let after_attach: Meta =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("meta.json")).unwrap())
+                .expect("meta.json still deserializes as typed Meta after attach");
+        assert_eq!(
+            after_attach.pty().unwrap().control,
+            PtyControl::HumanControl
+        );
+        assert_eq!(
+            after_attach.run_id().to_string(),
+            original.run_id().to_string(),
+            "a control flip must not disturb other meta fields"
+        );
+
+        // detach
+        set_pty_control_on_disk(dir.path(), PtyControl::AgentControl);
+        let after_detach: Meta =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            after_detach.pty().unwrap().control,
+            PtyControl::AgentControl
+        );
     }
 }
