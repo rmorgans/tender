@@ -394,11 +394,50 @@ enum Commands {
         #[arg(long)]
         namespace: Option<String>,
     },
+    /// Print the usage guide (embedded), optionally a single topic
+    ///
+    /// `tender guide` prints the whole guide; `tender guide <topic>` prints one
+    /// section. Topics: exec, remote, python, duckdb, powershell, boundary.
+    /// Local-only.
+    Guide {
+        /// Topic to print (omit for the whole guide)
+        topic: Option<String>,
+    },
+    /// Manage the embedded `using-tender` agent skill stub
+    ///
+    /// Print the stub, install it as a Claude Code skill file, or show where
+    /// install would write. Local-only.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
     /// Internal: sidecar process (not for direct use)
     #[command(name = "_sidecar", hide = true)]
     Sidecar {
         #[arg(long)]
         session_dir: PathBuf,
+    },
+}
+
+/// Subcommands of `tender skill`.
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Print the embedded skill stub to stdout
+    Print,
+    /// Write the skill stub to a skill file
+    Install {
+        /// Install under $HOME/.claude instead of ./.claude (project-local)
+        #[arg(long)]
+        global: bool,
+        /// Overwrite an existing file even if it differs from the stub
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print where install would write, without creating anything
+    Path {
+        /// Report the $HOME/.claude path instead of the project-local one
+        #[arg(long)]
+        global: bool,
     },
 }
 
@@ -731,6 +770,35 @@ impl Commands {
                 }
                 Some(args)
             }
+            Commands::Guide { topic } => {
+                let mut args = vec!["guide".to_string()];
+                if let Some(t) = topic {
+                    args.push(t.clone());
+                }
+                Some(args)
+            }
+            Commands::Skill { action } => {
+                let mut args = vec!["skill".to_string()];
+                match action {
+                    SkillAction::Print => args.push("print".to_string()),
+                    SkillAction::Install { global, force } => {
+                        args.push("install".to_string());
+                        if *global {
+                            args.push("--global".to_string());
+                        }
+                        if *force {
+                            args.push("--force".to_string());
+                        }
+                    }
+                    SkillAction::Path { global } => {
+                        args.push("path".to_string());
+                        if *global {
+                            args.push("--global".to_string());
+                        }
+                    }
+                }
+                Some(args)
+            }
             _ => None,
         }
     }
@@ -754,6 +822,8 @@ impl Commands {
             Commands::Emit { .. } => "emit",
             Commands::Wrap { .. } => "wrap",
             Commands::Prune { .. } => "prune",
+            Commands::Guide { .. } => "guide",
+            Commands::Skill { .. } => "skill",
             Commands::Sidecar { .. } => "_sidecar",
         }
     }
@@ -1074,6 +1144,12 @@ fn main() {
         Commands::Attach { name, namespace } => {
             resolve_namespace(namespace).and_then(|ns| commands::cmd_attach(&name, &ns))
         }
+        Commands::Guide { topic } => commands::cmd_guide(topic.as_deref()),
+        Commands::Skill { action } => match action {
+            SkillAction::Print => commands::cmd_skill_print(),
+            SkillAction::Install { global, force } => commands::cmd_skill_install(global, force),
+            SkillAction::Path { global } => commands::cmd_skill_path(global),
+        },
         Commands::Sidecar { session_dir } => commands::cmd_sidecar(session_dir),
     };
 
