@@ -11,20 +11,22 @@ disconnects; same child-tree ownership + termination guarantees; same pipe/PTY
 capabilities; same remote behavior **independent of login shell**; regressions
 gated by CI.
 
-## Status (2026-07-10, after v0.2.1)
+## Status (2026-07-11, after Phase 0)
 
 At parity: **distribution** (native x64+ARM64 binaries, checksums, attestations),
-**remote `exec`** (constant-argv frame, shell-neutral). Strong-but-not-absolute:
-**local supervision** (Job Objects, ctrl-break — but see lifecycle gaps below),
-**PowerShell exec** (works, but ordinary `$x` doesn't persist). Not yet:
-**general `--host` control, PTY/attach, lifecycle edge cases, CI**.
+**remote `exec`** (constant-argv frame, shell-neutral), and **required PR CI**
+(lint plus native Ubuntu, macOS, Windows x64, and Windows ARM64 test lanes).
+Strong-but-not-absolute: **local supervision** (Job Objects, ctrl-break — but
+see lifecycle gaps below), **PowerShell exec** (works, but ordinary `$x`
+doesn't persist). Not yet: **general `--host` control, PTY/attach, and lifecycle
+edge cases**.
 
 ## Gap inventory
 
 | Track | Current | Parity gap |
 |---|---|---|
 | General `--host` | only `exec` framed | other ops traverse POSIX shell quoting |
-| PR CI | release builds only (`release.yml` on tag) | no regression gate on any platform |
+| PR CI | `ci.yml`: lint + Ubuntu/macOS/Windows x64/Windows ARM64 | **Shipped in Phase 0 (PR #41); all five checks required on `main`** |
 | Windows child containment | Job Objects work | child briefly runs **before** Job assignment (`windows.rs:145`) |
 | SSH durability | breakaway works when permitted | forbidden-breakaway **silently** accepts reduced lifetime (`windows.rs:480`) — a "successful" remote start can die on SSH disconnect |
 | Orphan recovery | root PID killable | tree-kill/graceful weaker without the live Job handle |
@@ -39,7 +41,7 @@ At parity: **distribution** (native x64+ARM64 binaries, checksums, attestations)
 ## Dependency plan
 
 ```
-Required PR CI (Phase 0)
+Required PR CI (Phase 0 — shipped)
     ├── Typed RemoteOperation IR (P1) → framed endpoint (P2) → migrate ops (P3)
     │       unary+stream → push body → delete reconstructed argv
     └── Raw suspended Windows launcher (P4)
@@ -51,14 +53,14 @@ Remote framing (P1–3) and Windows PTY (P4–5) proceed independently **once CI
 exists**. ConPTY follows the launcher hardening — both need raw `CreateProcessW`
 + `STARTUPINFOEXW`.
 
-## Phase 0 — Install the gates first (immediate next PR)
+## Phase 0 — Install the gates first — Shipped 2026-07-11 (PR #41)
 
 `.github/workflows/ci.yml`, trigger on every PR + push to main; all jobs `--locked`:
 - **ubuntu-latest**: fmt, clippy, full suite, `cargo package --locked`
 - **macos-latest**: full suite
 - **windows-latest**: full native x64 suite
 - **windows-11-arm**: full native ARM64 suite
-- Then make these **required** via branch protection.
+- These five checks are **required** via branch protection on `main`.
 
 Initial Windows CI will surface cfg-specific warnings + missing test tooling —
 **fix those, don't weaken the matrix.**
@@ -168,7 +170,7 @@ test or explicit platform-independence proof), for every user-facing command:
 
 ## Recommended order
 
-1. Required PR CI (Ubuntu, macOS, Win x64, Win ARM64) — **Phase 0, next**
+1. Required PR CI (Ubuntu, macOS, Win x64, Win ARM64) — **Phase 0 shipped**
 2. Replace the Unix-only fake-SSH harness
 3. Typed DTOs + shared dispatch (Phase 1)
 4. Remote frame in operation-sized slices (Phases 2–3)
