@@ -206,11 +206,14 @@ tests above.
   pre-resolution and is **not** the same type as the post-resolution `LaunchSpec`.
 - **Versioning lives on the envelope, not the DTOs.** `RemoteOperation` /
   `StartRequest` are unversioned domain types; a single outer
-  `RemoteFrame { v, operation }` owns wire-versioning. (The shipped
-  `ExecRequestFrame`'s inner `v` is the compat exception, not the pattern.)
-- **No secret leakage via `Debug`.** Secret-bearing DTOs (env values, stdin /
-  `push` bytes) do not `#[derive(Debug)]` unless the derive explicitly redacts
-  those values; error/log rendering uses `Display`, which must not print them.
+  `RemoteFrame { v, operation }` owns wire-versioning, with `operation`
+  flattened on the wire to preserve the documented `{ "v", "op", "params" }`
+  shape. (The shipped `ExecRequestFrame`'s inner `v` is the compat exception,
+  not the pattern.)
+- **No secret leakage via `Debug`.** DTOs/envelopes carrying user payloads (env
+  values, argv, stdin / `push` bytes) get no raw derived `Debug`. Use a manual
+  redacted implementation, or field wrapper types whose own `Debug` redacts;
+  error/log rendering uses `Display`, which must not print those values.
 - **Local-only commands are unrepresentable.** `run` / `wrap` / `prune` /
   `query` / `guide` / `skill` / `emit` / `events` cannot be constructed as a
   `RemoteOperation` (`TryFrom<Commands>` returns `Err`) — replacing the runtime
