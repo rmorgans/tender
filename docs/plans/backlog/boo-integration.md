@@ -171,7 +171,9 @@ screen reads by composition, which is the whole point of the stack.
 
 ## Acceptance criteria (first slice = paths 1 + 2)
 
-- [x] **Done** — using-tender skill has a tender-vs-boo routing section.
+- [x] **Done** — the tender-vs-boo routing section is documented (now in `docs/guide.md`
+  under "Tender and Boo", surfaced by `tender guide`). It moved out of the `using-tender`
+  skill when that became a thin router to `tender guide` in the 2026-07-10 guide rework.
 - [x] **Done** — no tender code changes required.
 - [ ] **Open** — the `BOO_FOREGROUND=1` composition pattern is *documented* with
   its limitations, but **live validation against a pinned Boo build** (a real
