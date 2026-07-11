@@ -6,8 +6,8 @@ name: release
 # Cargo.toml), attaches a SHA256 sidecar, attests build provenance (keyless SLSA),
 # and uploads everything to the GitHub Release for the tag.
 #
-# NOTE: unvalidated until the first real tag. The org must allow Actions with
-# `id-token: write` for the attestation step to succeed.
+# Validated by the v0.2.0 and v0.2.1 releases across all six target lanes.
+# The first tagged release after an action-version change remains its live test.
 
 on:
   push:
@@ -85,7 +85,7 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.pkg.outputs.archive }}
 
