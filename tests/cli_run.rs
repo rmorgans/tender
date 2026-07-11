@@ -353,26 +353,21 @@ fn run_session_rejects_exec() {
 // ── Harness deadline diagnostics ────────────────────────────────────────
 
 // A foreground run blocks until its child finishes. With a deliberately tiny
-// deadline the shared harness helper must KILL the command and panic with an
-// EXPLICIT timeout that names the command and the deadline — not surface the
-// killed process's empty output + exit 1 as an opaque assertion failure (the
-// Windows-CI flake that motivated the shared deadline helper).
+// deadline the shared harness helper must report an explicit timeout that names
+// the command and the deadline — not surface an overrun's empty output + exit 1
+// as an opaque assertion failure (the Windows-CI flake that motivated the
+// shared deadline helper).
 #[test]
 fn harness_deadline_reports_timeout_with_command_and_deadline() {
     let root = TempDir::new().unwrap();
     let script = write_py_script(root.path(), "hang.py", "import time; time.sleep(2)");
     let script_str = script.to_str().unwrap().to_owned();
 
-    // Silence the default panic hook so the intentional panic doesn't clutter
-    // test output; restore it afterwards.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut cmd = tender(&root);
         cmd.args(["run", "--foreground", &script_str]);
         harness::assert_within(&mut cmd, std::time::Duration::from_millis(500));
     }));
-    std::panic::set_hook(prev_hook);
 
     let payload =
         result.expect_err("command outlived the deadline; expected a HARNESS TIMEOUT panic");

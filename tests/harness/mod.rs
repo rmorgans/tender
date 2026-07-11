@@ -12,11 +12,10 @@ use tempfile::TempDir;
 /// This is NOT a performance assertion. A normal detached start completes in
 /// ~20 ms (warm) to ~570 ms (cold); this bound exists only to fail a genuine
 /// hang (deadlock) rather than let it stall CI forever. It is deliberately
-/// generous: loaded CI runners have been observed running sub-second operations
-/// 150x+ slower, so the old hard-coded 5 s per-command deadline false-fired
-/// under contention — `assert_cmd` killed the still-starting `tender` process,
-/// which on Windows surfaces as `TerminateProcess`-exit-1 with empty output. 30 s
-/// keeps ample headroom over a cold start while still surfacing a true hang
+/// generous: the old hard-coded 5 s per-command deadline false-fired on a
+/// loaded Windows CI runner — `assert_cmd` killed the still-starting `tender`
+/// process, which surfaced as exit 1 with empty output. 30 s keeps substantial
+/// headroom over observed individual starts while still surfacing a true hang
 /// promptly. Fixed and shared — raise this one value only if a real environment
 /// proves it insufficient.
 #[allow(dead_code)]
@@ -38,10 +37,11 @@ impl DeadlineAssertExt for Command {
 }
 
 /// Like [`assert_within_deadline`] but with an explicit deadline (used by the
-/// deadline's own regression test). If the command outlives `deadline` it is
-/// killed and this panics with an EXPLICIT message naming the command and the
-/// deadline — so a loaded-runner timeout is never misread as a product failure
-/// with empty output and exit code 1.
+/// deadline's own regression test). If the invocation returns at or beyond
+/// `deadline`, this panics with an explicit message naming the command and the
+/// deadline. `assert_cmd` normally enforces that bound by killing an overrun,
+/// but the diagnostic intentionally states only the wall-clock fact we can
+/// observe rather than inferring how the process ended.
 #[allow(dead_code)]
 pub fn assert_within(cmd: &mut Command, deadline: Duration) -> Assert {
     let desc = format!("{cmd:?}");
@@ -50,9 +50,9 @@ pub fn assert_within(cmd: &mut Command, deadline: Duration) -> Assert {
     let elapsed = start.elapsed();
     if elapsed >= deadline {
         panic!(
-            "HARNESS TIMEOUT: command exceeded the {:.1}s harness deadline and was killed \
-             after {:.1}s.\n  command: {desc}\n  This is the harness hang-detector firing — on a \
-             loaded runner it usually means the process was starved, not a product failure. \
+            "HARNESS TIMEOUT: command exceeded the {:.1}s harness deadline; the invocation \
+             returned after {:.1}s.\n  command: {desc}\n  This is the harness hang-detector \
+             firing — on a loaded runner it may mean the process was starved, not a product failure. \
              Raise harness::CMD_DEADLINE only after ruling out a real hang.",
             deadline.as_secs_f64(),
             elapsed.as_secs_f64(),
