@@ -5,7 +5,8 @@
 //! [`state`](crate::model::state) transitions into
 //! [`Meta`], captures the child's output into the
 //! append-only log, watches for kill requests, and classifies the exit. The
-//! CLI only ever *asks*; the sidecar *decides*.
+//! CLI normally only *asks*; after the sidecar is gone, the narrowly scoped
+//! [`reconcile`](crate::reconcile) path may heal or infer terminal state.
 
 use std::fs::{File, OpenOptions};
 use std::io;

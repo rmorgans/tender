@@ -2,20 +2,22 @@
 //!
 //! Tender supervises *runs*, not processes: a command executes under a durable
 //! per-session sidecar so its lifecycle, output, and exit survive the CLI
-//! invocation that launched it. The `tender` binary is a thin, transactional
-//! CLI over that sidecar; this crate is the library it is built from.
+//! invocation that launched it. The `tender` binary is a transactional CLI
+//! over that durable session model; this crate is the library it is built
+//! from.
 //!
 //! ## Responsibility split
 //!
 //! - **CLI (transactional).** Parses arguments, resolves namespaces, writes
-//!   control requests, reads persisted state, and exits. It is *not* the
-//!   lifecycle authority.
-//! - **Sidecar (lifecycle authority).** Holds the session lock, spawns the
-//!   child, writes run-state transitions, captures output, and classifies the
-//!   exit. See [`sidecar`].
-//! - **Durable record.** `meta.json` and the append-only `output.log` are the
-//!   source of truth for a session; every view is *derived* from them. See
-//!   [`session`] and [`log`].
+//!   control requests, reads persisted state, and exits. It writes lifecycle
+//!   state only during [`reconcile`] after the sidecar is gone.
+//! - **Sidecar (normal lifecycle authority).** Holds the session lock, spawns
+//!   the child, writes run-state transitions, captures output, and classifies
+//!   the exit. See [`sidecar`].
+//! - **Durable record.** `meta.json` is the current run snapshot, `output.log`
+//!   is the append-only child-output record, and the segmented [`events`] log
+//!   is lifecycle/provenance history. Views are derived from those authorities;
+//!   see [`session`] and [`log`].
 //! - **Transport is a wrapper, not a second model.** `--host` forwards an
 //!   allowlisted subset of commands to a remote `tender` over SSH; the remote
 //!   runs the *same* local lifecycle. See [`ssh`].
