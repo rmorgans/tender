@@ -78,8 +78,10 @@ Tender should persist authoritative facts and derive views from them. It should 
 
 Current examples:
 
-- `meta.json` and `output.log` are the durable session record.
-- `status`, `list`, `log`, and `watch` are projections over that durable state.
+- `meta.json` is the current run snapshot, `output.log` is the child-output
+  record, and the segmented event log is lifecycle/provenance history.
+- `status`, `list`, `log`, `watch`, `events`, and `query` are projections over
+  those durable authorities.
 - Any future `graph` or `check` command should remain a projection over session dirs, not add a second store.
 
 Use in review:
