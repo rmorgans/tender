@@ -266,6 +266,10 @@ enum Commands {
         /// Skip initial state snapshot, only emit new events
         #[arg(long = "from-now")]
         from_now: bool,
+        /// Atomically create this file once the initial scan/snapshot is
+        /// flushed and watch enters steady-state polling
+        #[arg(long = "ready-file")]
+        ready_file: Option<PathBuf>,
     },
     /// Run a command and record an annotation in the session's event log
     Wrap {
@@ -324,6 +328,10 @@ enum Commands {
         /// Exit 65 when unparseable lines were skipped
         #[arg(long)]
         strict: bool,
+        /// Atomically create this file once the follower's baseline is
+        /// established and initial replay is flushed (requires --follow)
+        #[arg(long = "ready-file", requires = "follow")]
+        ready_file: Option<PathBuf>,
     },
     /// Query the event log with DuckDB SQL (analytical surface)
     ///
@@ -610,6 +618,8 @@ impl Commands {
                 logs,
                 annotations,
                 from_now,
+                // ready-file is a local orchestration signal; not forwarded.
+                ready_file: _,
             } => {
                 let mut args = vec!["watch".to_string()];
                 if let Some(ns) = namespace {
@@ -1069,8 +1079,10 @@ fn main() {
             logs,
             annotations,
             from_now,
-        } => parse_optional_namespace(namespace)
-            .and_then(|ns| commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now)),
+            ready_file,
+        } => parse_optional_namespace(namespace).and_then(|ns| {
+            commands::cmd_watch(ns.as_ref(), events, logs, annotations, from_now, ready_file)
+        }),
         Commands::Events {
             namespace,
             sessions,
@@ -1084,6 +1096,7 @@ fn main() {
             cursors,
             include_logs,
             strict,
+            ready_file,
         } => commands::cmd_events(commands::EventsOptions {
             namespace,
             sessions,
@@ -1097,6 +1110,7 @@ fn main() {
             cursors,
             include_logs,
             strict,
+            ready_file,
         }),
         Commands::Query {
             sql,

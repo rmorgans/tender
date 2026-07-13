@@ -1,29 +1,11 @@
 mod harness;
 
 use harness::tender;
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::TempDir;
 
 static SERIAL: Mutex<()> = Mutex::new(());
-
-/// Run `tender watch` with given args, let it poll for `timeout_secs`, then kill it
-/// and return whatever it wrote to stdout.
-fn run_watch_with_timeout(root: &TempDir, args: &[&str], timeout_secs: u64) -> String {
-    let bin = assert_cmd::cargo::cargo_bin("tender");
-    let mut child = Command::new(bin)
-        .args(args)
-        .env("HOME", root.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn tender watch");
-
-    std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
-    let _ = child.kill();
-    let output = child.wait_with_output().expect("failed to wait on child");
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
 
 /// Wait for meta.json to reach a terminal state under a specific namespace.
 fn wait_terminal_ns(root: &TempDir, namespace: &str, session: &str) -> serde_json::Value {
@@ -64,15 +46,16 @@ fn watch_emits_initial_state_snapshot() {
         .unwrap();
     wait_terminal_default(&root, "snap-echo");
 
-    // Run watch — it should emit initial snapshot of the completed session.
-    let output = run_watch_with_timeout(&root, &["watch", "--events"], 1);
+    // The initial snapshot is flushed before the follower signals readiness.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "snap-echo" && r["name"] == "run.exited"
+    });
+    let records = follower.records();
+    follower.stop();
 
-    assert!(!output.is_empty(), "watch should emit at least one line");
-
-    // Each line should be valid NDJSON.
-    for line in output.lines() {
-        let event: serde_json::Value =
-            serde_json::from_str(line).expect("each line should be valid JSON");
+    assert!(!records.is_empty(), "watch should emit at least one line");
+    for event in &records {
         assert_eq!(event["source"], "tender.sidecar");
         assert_eq!(event["kind"], "run");
         assert!(
@@ -88,12 +71,11 @@ fn watch_emits_initial_state_snapshot() {
         assert!(event["name"].is_string(), "name should be present");
     }
 
-    // The snapshot should be for snap-echo.
-    let first: serde_json::Value = serde_json::from_str(output.lines().next().unwrap()).unwrap();
+    // The snapshot should be for snap-echo, a terminal session -> run.exited.
+    let first = &records[0];
     assert_eq!(first["session"], "snap-echo");
     assert_eq!(first["namespace"], "default");
     assert_eq!(first["kind"], "run");
-    // Terminal session — should be run.exited.
     assert_eq!(first["name"], "run.exited");
 }
 
@@ -109,25 +91,22 @@ fn watch_emits_log_events() {
         .unwrap();
     wait_terminal_default(&root, "log-echo");
 
-    // Run watch with --logs only (no run events cluttering output).
-    let output = run_watch_with_timeout(&root, &["watch", "--logs"], 1);
-
-    assert!(!output.is_empty(), "watch should emit log events");
-
-    // Find a log event containing the output.
-    let mut found_log = false;
-    for line in output.lines() {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
-        if event["kind"] == "log" && event["name"] == "log.stdout" {
-            let content = event["data"]["content"].as_str().unwrap_or("");
-            if content.contains("hello-watch") {
-                found_log = true;
-            }
-        }
-    }
+    // Watch with --logs only; the log.stdout snapshot must surface.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--logs"]);
+    let rec = follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "log"
+            && r["name"] == "log.stdout"
+            && r["data"]["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("hello-watch"))
+    });
+    follower.stop();
     assert!(
-        found_log,
-        "should find a log.stdout event with 'hello-watch', got:\n{output}"
+        rec["data"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("hello-watch"),
+        "should find a log.stdout event with 'hello-watch'"
     );
 }
 
@@ -165,12 +144,16 @@ fn watch_filters_by_namespace() {
     wait_terminal_ns(&root, "ns-b", "beta");
 
     // Watch only ns-a.
-    let output = run_watch_with_timeout(&root, &["watch", "--namespace", "ns-a", "--events"], 1);
+    let follower =
+        harness::ReadyFollower::spawn(&root, "watch", &["--namespace", "ns-a", "--events"]);
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "alpha" && r["kind"] == "run"
+    });
+    let records = follower.records();
+    follower.stop();
 
-    assert!(!output.is_empty(), "should emit events for ns-a");
-
-    for line in output.lines() {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert!(!records.is_empty(), "should emit events for ns-a");
+    for event in &records {
         assert_eq!(
             event["namespace"], "ns-a",
             "all events should be from ns-a, got: {event}"
@@ -190,18 +173,30 @@ fn watch_from_now_skips_existing() {
         .unwrap();
     wait_terminal_default(&root, "old-session");
 
-    // Run watch with --from-now — should not emit any events for the already-terminal session.
-    let output = run_watch_with_timeout(&root, &["watch", "--from-now"], 1);
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--from-now"]);
 
-    // There should be no run events for old-session.
-    for line in output.lines() {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+    // A sentinel started strictly after readiness: once its run event surfaces,
+    // the stream has advanced past any (incorrect) emission for the pre-existing
+    // session, so an absence assertion is now sound rather than a race.
+    tender(&root)
+        .args(["start", "sentinel", "--", "echo", "sentinel-out"])
+        .output()
+        .unwrap();
+    wait_terminal_default(&root, "sentinel");
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "sentinel" && r["kind"] == "run"
+    });
+    let records = follower.records();
+    follower.stop();
+
+    for event in &records {
         if event["kind"] == "run" {
-            panic!(
-                "from-now should not emit run events for existing terminal sessions, got: {event}"
+            assert_ne!(
+                event["session"], "old-session",
+                "from-now must not emit run events for existing terminal sessions, got: {event}"
             );
         }
-        // Log events from existing content should also be skipped.
+        // Log lines from existing content should also be skipped.
         if event["kind"] == "log" {
             let content = event["data"]["content"].as_str().unwrap_or("");
             assert!(
@@ -224,13 +219,18 @@ fn watch_both_events_and_logs_by_default() {
         .unwrap();
     wait_terminal_default(&root, "both-echo");
 
-    // Run watch with no --events or --logs flags — should emit both.
-    let output = run_watch_with_timeout(&root, &["watch"], 1);
+    // No --events/--logs -> both. The run snapshot precedes the log snapshot,
+    // so waiting for the log proves both are downstream.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &[]);
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "log" && r["session"] == "both-echo"
+    });
+    let records = follower.records();
+    follower.stop();
 
     let mut has_run = false;
     let mut has_log = false;
-    for line in output.lines() {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+    for event in &records {
         match event["kind"].as_str() {
             Some("run") => has_run = true,
             Some("log") => has_log = true,
@@ -239,55 +239,35 @@ fn watch_both_events_and_logs_by_default() {
     }
     assert!(
         has_run,
-        "default watch should emit run events, got:\n{output}"
+        "default watch should emit run events, got:\n{records:?}"
     );
     assert!(
         has_log,
-        "default watch should emit log events, got:\n{output}"
+        "default watch should emit log events, got:\n{records:?}"
     );
 }
 
+/// Readiness handshake for `watch`: the ready-file is published only after the
+/// initial scan/snapshot, so a session started strictly afterwards is a genuine
+/// post-baseline discovery and must surface.
 #[test]
-fn watch_from_now_includes_sessions_started_after_watch() {
+fn watch_from_now_surfaces_new_session() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
-    // Start watch --from-now FIRST (before any sessions exist)
-    let bin = assert_cmd::cargo::cargo_bin("tender");
-    let mut watch_child = Command::new(bin)
-        .args(["watch", "--from-now"])
-        .env("HOME", root.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn watch");
-
-    // Give watch time to start polling
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    // Now start a session AFTER watch is running
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--from-now"]);
+    // Baseline established: a session started now is not skipped by --from-now.
     tender(&root)
         .args(["start", "after-watch", "--", "echo", "post-watch-output"])
         .output()
         .unwrap();
     wait_terminal_default(&root, "after-watch");
 
-    // Give watch time to discover and emit
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let _ = watch_child.kill();
-    let output = watch_child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Sessions started AFTER watch should be visible (not skipped by --from-now)
-    let has_run_event = stdout.lines().any(|line| {
-        serde_json::from_str::<serde_json::Value>(line)
-            .map(|e| e["kind"] == "run" && e["session"] == "after-watch")
-            .unwrap_or(false)
+    let rec = follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "run" && r["session"] == "after-watch"
     });
-    assert!(
-        has_run_event,
-        "watch --from-now should include sessions started after watch began, got:\n{stdout}"
-    );
+    assert_eq!(rec["session"], "after-watch");
+    follower.stop();
 }
 
 #[test]
@@ -295,27 +275,17 @@ fn watch_detects_replace_and_resets_log_offset() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
-    // Start a session that produces output
+    // Start a session that produces output.
     tender(&root)
         .args(["start", "replace-watch", "--", "echo", "first-run-output"])
         .output()
         .unwrap();
     wait_terminal_default(&root, "replace-watch");
 
-    // Start watch (includes initial snapshot)
-    let bin = assert_cmd::cargo::cargo_bin("tender");
-    let mut watch_child = Command::new(&bin)
-        .args(["watch"])
-        .env("HOME", root.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn watch");
+    // Watch's initial snapshot of the first run is flushed before readiness.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &[]);
 
-    // Give watch time to read initial state + logs
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Replace with a new run that produces different output
+    // Replace with a new run (new run_id) that produces different output.
     tender(&root)
         .args([
             "start",
@@ -329,25 +299,13 @@ fn watch_detects_replace_and_resets_log_offset() {
         .unwrap();
     wait_terminal_default(&root, "replace-watch");
 
-    // Give watch time to detect replacement
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let _ = watch_child.kill();
-    let output = watch_child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Should see second-run-output in log events (offset was reset on run_id change)
-    let has_second_run_log = stdout.lines().any(|line| {
-        serde_json::from_str::<serde_json::Value>(line)
-            .map(|e| {
-                e["kind"] == "log"
-                    && e["data"]["content"]
-                        .as_str()
-                        .is_some_and(|s| s.contains("second-run-output"))
-            })
-            .unwrap_or(false)
+    // The replaced run's log surfacing proves the offset was reset on run_id
+    // change; read_until is the assertion.
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "log"
+            && r["data"]["content"]
+                .as_str()
+                .is_some_and(|s| s.contains("second-run-output"))
     });
-    assert!(
-        has_second_run_log,
-        "watch should see logs from replaced run (offset reset), got:\n{stdout}"
-    );
+    follower.stop();
 }

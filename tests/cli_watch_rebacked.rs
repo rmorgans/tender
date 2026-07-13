@@ -5,37 +5,14 @@
 
 mod harness;
 
-use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use harness::{tender, wait_terminal};
 use tempfile::TempDir;
 use tender::model::event::EventTimestamp;
 
 static SERIAL: Mutex<()> = Mutex::new(());
-
-fn spawn_watch(root: &TempDir, args: &[&str]) -> Child {
-    let bin = assert_cmd::cargo::cargo_bin("tender");
-    Command::new(bin)
-        .arg("watch")
-        .args(args)
-        .env("HOME", root.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn tender watch")
-}
-
-fn kill_and_read(mut child: Child) -> Vec<serde_json::Value> {
-    let _ = child.kill();
-    let output = child.wait_with_output().expect("failed to wait on child");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).expect("NDJSON line parses"))
-        .collect()
-}
 
 fn run_names(records: &[serde_json::Value], session: &str) -> Vec<String> {
     records
@@ -50,9 +27,8 @@ fn fast_exit_session_shows_all_three_transitions_uncollapsed() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
 
-    // Watch starts BEFORE the session exists.
-    let child = spawn_watch(&root, &["--events"]);
-    std::thread::sleep(Duration::from_millis(400));
+    // Watch starts (baseline established) BEFORE the session exists.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
 
     // A session that exits faster than any meta-diff poll could observe.
     tender(&root)
@@ -60,9 +36,12 @@ fn fast_exit_session_shows_all_three_transitions_uncollapsed() {
         .assert()
         .success();
     wait_terminal(&root, "fast");
-    std::thread::sleep(Duration::from_millis(800));
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "fast" && r["name"] == "run.exited"
+    });
+    let records = follower.records();
+    follower.stop();
 
-    let records = kill_and_read(child);
     assert_eq!(
         run_names(&records, "fast"),
         ["run.starting", "run.started", "run.exited"],
@@ -92,9 +71,12 @@ fn preexisting_session_still_gets_current_state_snapshot_only() {
         .success();
     wait_terminal(&root, "done");
 
-    let child = spawn_watch(&root, &["--events"]);
-    std::thread::sleep(Duration::from_millis(700));
-    let records = kill_and_read(child);
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "done" && r["name"] == "run.exited"
+    });
+    let records = follower.records();
+    follower.stop();
 
     assert_eq!(
         run_names(&records, "done"),
@@ -134,15 +116,12 @@ fn rebacked_snapshot_carries_the_true_timestamp() {
 
     // Watch starts later; its snapshot must carry the occurrence time, not
     // poll-detection time.
-    std::thread::sleep(Duration::from_millis(300));
-    let child = spawn_watch(&root, &["--events"]);
-    std::thread::sleep(Duration::from_millis(700));
-    let records = kill_and_read(child);
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
+    let snapshot = follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "run" && r["session"] == "stamped"
+    });
+    follower.stop();
 
-    let snapshot = records
-        .iter()
-        .find(|r| r["kind"] == "run" && r["session"] == "stamped")
-        .expect("snapshot emitted");
     let watch_micros = (snapshot["ts"].as_f64().unwrap() * 1e6).round() as u64;
     let drift = watch_micros.abs_diff(stored_micros);
     assert!(
@@ -165,9 +144,12 @@ fn session_without_events_dir_keeps_legacy_meta_diff_synthesis() {
     let events_dir = root.path().join(".tender/sessions/default/legacy/events");
     std::fs::remove_dir_all(&events_dir).unwrap();
 
-    let child = spawn_watch(&root, &["--events"]);
-    std::thread::sleep(Duration::from_millis(700));
-    let records = kill_and_read(child);
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "legacy" && r["name"] == "run.exited"
+    });
+    let records = follower.records();
+    follower.stop();
 
     assert_eq!(
         run_names(&records, "legacy"),
@@ -191,17 +173,19 @@ fn from_now_skips_existing_but_streams_new_sessions_uncollapsed() {
         .success();
     wait_terminal(&root, "old");
 
-    let child = spawn_watch(&root, &["--events", "--from-now"]);
-    std::thread::sleep(Duration::from_millis(400));
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events", "--from-now"]);
 
     tender(&root)
         .args(["start", "fresh", "--", "echo", "hi"])
         .assert()
         .success();
     wait_terminal(&root, "fresh");
-    std::thread::sleep(Duration::from_millis(800));
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "fresh" && r["name"] == "run.exited"
+    });
+    let records = follower.records();
+    follower.stop();
 
-    let records = kill_and_read(child);
     assert!(
         run_names(&records, "old").is_empty(),
         "--from-now skips pre-existing sessions, got: {records:?}"
@@ -223,22 +207,35 @@ fn replaced_session_streams_the_new_generation_uncollapsed() {
         .success();
     wait_terminal(&root, "swap");
 
-    let child = spawn_watch(&root, &["--events"]);
-    std::thread::sleep(Duration::from_millis(500));
+    // gen-1's snapshot (run.exited) is flushed before readiness.
+    let follower = harness::ReadyFollower::spawn(&root, "watch", &["--events"]);
 
     tender(&root)
         .args(["start", "swap", "--replace", "--", "echo", "second"])
         .assert()
         .success();
     wait_terminal(&root, "swap");
-    std::thread::sleep(Duration::from_millis(800));
 
-    let records = kill_and_read(child);
-    let names = run_names(&records, "swap");
+    // Two run.exited events occur (gen-1 snapshot, gen-2 exit), so wait on the
+    // full count rather than a single terminal marker.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let names = loop {
+        let names = run_names(&follower.records(), "swap");
+        if names.len() >= 4 {
+            break names;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected gen-1 snapshot + gen-2 lifecycle for swap, got: {names:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    follower.stop();
+
     // Snapshot of gen 1, then gen 2's full lifecycle from its fresh log.
     assert_eq!(
         names,
         ["run.exited", "run.starting", "run.started", "run.exited"],
-        "got: {records:?}"
+        "got: {names:?}"
     );
 }
