@@ -196,6 +196,7 @@ pub fn cmd_watch(
     logs: bool,
     annotations: bool,
     from_now: bool,
+    ready_file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let root = SessionRoot::default_path()?;
 
@@ -467,6 +468,22 @@ pub fn cmd_watch(
             .map(|(ns, name)| (ns.as_str().to_owned(), name.as_str().to_owned()))
             .collect();
         watchers.retain(|key, _| current_keys.contains(key));
+
+        if first_scan {
+            // First full scan complete and initial snapshots flushed: publish
+            // the out-of-band readiness signal (never on stdout) before
+            // entering steady-state polling. Runs exactly once.
+            if let Some(ready_path) = &ready_file {
+                // A dead consumer stops the watch, same as emit_event's flush
+                // handling; only signal readiness while someone is reading.
+                if stdout.flush().is_err() {
+                    return Ok(());
+                }
+                tender::ready_file::create_ready_file(ready_path).map_err(|e| {
+                    anyhow::anyhow!("failed to create ready-file {}: {e}", ready_path.display())
+                })?;
+            }
+        }
 
         first_scan = false;
         std::thread::sleep(POLL_INTERVAL);

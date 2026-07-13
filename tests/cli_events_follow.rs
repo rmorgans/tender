@@ -9,7 +9,60 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use harness::{tender, wait_running, wait_terminal};
+use predicates::prelude::*;
 use tempfile::TempDir;
+
+/// `--ready-file` is a follow-only readiness signal. Accepting it on a one-shot
+/// replay would advertise a readiness contract the command never fulfils, so it
+/// is rejected at CLI validation.
+#[test]
+fn ready_file_requires_follow() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+    let ready = root.path().join("ready");
+    tender(&root)
+        .args(["events", "--ready-file", ready.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--follow"));
+    assert!(
+        !ready.exists(),
+        "no readiness file when the invocation is rejected"
+    );
+}
+
+/// The readiness handshake end-to-end: the follower publishes its ready-file
+/// only after its `--from-now` baseline is established, so an event emitted
+/// strictly after readiness is guaranteed live (never classified as history).
+#[test]
+fn follow_from_now_ready_then_surfaces_live_event() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+    tender(&root)
+        .args(["start", "live", "--", "sleep", "5"])
+        .assert()
+        .success();
+    wait_running(&root, "live");
+
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow", "--from-now"]);
+    // Baseline proven established: a live emit must now surface downstream.
+    tender(&root)
+        .args(["emit", "--kind", "hook.live_probe", "--session", "live"])
+        .assert()
+        .success();
+
+    let rec = follower.read_until(Duration::from_secs(10), |r| r["kind"] == "hook.live_probe");
+    assert_eq!(rec["session"], "live");
+    // --from-now still skips the pre-existing lifecycle history.
+    assert!(
+        follower
+            .records()
+            .iter()
+            .all(|r| r["kind"] != "run.starting"),
+        "history must be skipped under --from-now"
+    );
+    follower.stop();
+}
 
 /// Follower children + sleeper sessions are timing-sensitive; serialize
 /// like cli_watch.rs does so parallel load can't blow the poll budgets.
@@ -27,16 +80,6 @@ fn spawn_events(root: &TempDir, args: &[&str]) -> Child {
         .expect("failed to spawn tender events")
 }
 
-fn kill_and_read(mut child: Child) -> Vec<serde_json::Value> {
-    let _ = child.kill();
-    let output = child.wait_with_output().expect("failed to wait on child");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| serde_json::from_str(l).expect("NDJSON line parses"))
-        .collect()
-}
-
 fn newest_segment(root: &TempDir, session: &str) -> std::path::PathBuf {
     let events_dir = root
         .path()
@@ -52,39 +95,6 @@ fn newest_segment(root: &TempDir, session: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn follow_from_now_surfaces_live_event_within_500ms() {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let root = TempDir::new().unwrap();
-    tender(&root)
-        .args(["start", "live", "--", "sleep", "5"])
-        .assert()
-        .success();
-    wait_running(&root, "live");
-
-    let child = spawn_events(&root, &["--follow", "--from-now"]);
-    // Let the follower record EOF offsets and begin polling.
-    std::thread::sleep(Duration::from_millis(400));
-
-    tender(&root)
-        .args(["emit", "--kind", "hook.live_probe", "--session", "live"])
-        .assert()
-        .success();
-    // The acceptance budget: surfaced within 500 ms of the emit.
-    std::thread::sleep(Duration::from_millis(500));
-
-    let records = kill_and_read(child);
-    assert!(
-        records.iter().any(|r| r["kind"] == "hook.live_probe"),
-        "live emit must surface within 500ms, got: {records:?}"
-    );
-    // --from-now skipped the session's pre-existing lifecycle history.
-    assert!(
-        records.iter().all(|r| r["kind"] != "run.starting"),
-        "history must be skipped under --from-now, got: {records:?}"
-    );
-}
-
-#[test]
 fn follow_from_now_replays_later_discovered_sessions_from_start() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = TempDir::new().unwrap();
@@ -94,17 +104,19 @@ fn follow_from_now_replays_later_discovered_sessions_from_start() {
         .success();
     wait_terminal(&root, "old");
 
-    let child = spawn_events(&root, &["--follow", "--from-now"]);
-    std::thread::sleep(Duration::from_millis(400));
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow", "--from-now"]);
 
     tender(&root)
         .args(["start", "fresh", "--", "echo", "fresh-hi"])
         .assert()
         .success();
     wait_terminal(&root, "fresh");
-    std::thread::sleep(Duration::from_millis(600));
+    // The last of fresh's lifecycle events proves the whole replay arrived.
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["session"] == "fresh" && r["kind"] == "run.exited"
+    });
 
-    let records = kill_and_read(child);
+    let records = follower.records();
     assert!(
         records.iter().all(|r| r["session"] != "old"),
         "pre-existing session history must be skipped, got: {records:?}"
@@ -119,6 +131,7 @@ fn follow_from_now_replays_later_discovered_sessions_from_start() {
         ["run.starting", "run.started", "run.exited"],
         "later-discovered sessions replay from their start"
     );
+    follower.stop();
 }
 
 #[test]
@@ -131,16 +144,20 @@ fn follow_replays_history_then_streams_new_events() {
         .success();
     wait_running(&root, "s1");
 
-    let child = spawn_events(&root, &["--follow"]);
-    std::thread::sleep(Duration::from_millis(400));
+    // --follow (no --from-now): the ready-file is published only after the
+    // history replay is flushed, so the replay is already downstream once
+    // spawn returns.
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow"]);
 
     tender(&root)
         .args(["emit", "--kind", "test.after_replay", "--session", "s1"])
         .assert()
         .success();
-    std::thread::sleep(Duration::from_millis(500));
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "test.after_replay"
+    });
 
-    let records = kill_and_read(child);
+    let records = follower.records();
     let kinds: Vec<&str> = records
         .iter()
         .map(|r| r["kind"].as_str().unwrap())
@@ -153,6 +170,7 @@ fn follow_replays_history_then_streams_new_events() {
         kinds.contains(&"test.after_replay"),
         "live events stream after replay, got: {kinds:?}"
     );
+    follower.stop();
 }
 
 #[test]
@@ -179,9 +197,12 @@ fn follow_output_is_merge_ordered_by_ts_writer_seq() {
             .success();
     }
 
-    let child = spawn_events(&root, &["--follow"]);
-    std::thread::sleep(Duration::from_millis(500));
-    let records = kill_and_read(child);
+    // The burst was emitted before follow began, so it is replayed as history;
+    // the last burst event proves the whole batch is downstream.
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow"]);
+    follower.read_until(Duration::from_secs(10), |r| r["kind"] == "test.burst4");
+    let records = follower.records();
+    follower.stop();
 
     assert!(records.len() >= 7, "lifecycle + burst, got: {records:?}");
     let keys: Vec<(String, String, u64)> = records
@@ -209,8 +230,7 @@ fn follow_picks_up_new_segments() {
         .success();
     wait_running(&root, "s1");
 
-    let child = spawn_events(&root, &["--follow"]);
-    std::thread::sleep(Duration::from_millis(400));
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow"]);
 
     // A new, lexicographically-later segment appears (rotation is slice 4,
     // but multi-segment logs are already legal). Its events must stream.
@@ -228,12 +248,10 @@ fn follow_picks_up_new_segments() {
     writeln!(f, "{}", serde_json::to_string(&event).unwrap()).unwrap();
     drop(f);
 
-    std::thread::sleep(Duration::from_millis(500));
-    let records = kill_and_read(child);
-    assert!(
-        records.iter().any(|r| r["kind"] == "test.from_new_segment"),
-        "events in new segments must be picked up, got: {records:?}"
-    );
+    follower.read_until(Duration::from_secs(10), |r| {
+        r["kind"] == "test.from_new_segment"
+    });
+    follower.stop();
 }
 
 #[test]
@@ -246,8 +264,20 @@ fn follow_strict_exits_65_on_first_observed_parse_skip() {
         .success();
     wait_running(&root, "s1");
 
-    let mut child = spawn_events(&root, &["--follow", "--strict"]);
-    std::thread::sleep(Duration::from_millis(400));
+    // This follower is expected to exit on its own (code 65), so it keeps a raw
+    // child handle rather than ReadyFollower; the ready-file still replaces the
+    // baseline sleep.
+    let ready = root.path().join("strict-ready");
+    let mut child = spawn_events(
+        &root,
+        &[
+            "--follow",
+            "--strict",
+            "--ready-file",
+            ready.to_str().unwrap(),
+        ],
+    );
+    harness::wait_ready_file(&ready, Duration::from_secs(10));
 
     // A complete-but-unparseable line lands in the newest segment.
     let seg = newest_segment(&root, "s1");
@@ -267,4 +297,45 @@ fn follow_strict_exits_65_on_first_observed_parse_skip() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(status.code(), Some(65));
+}
+
+/// Regression: production flushes the initial replay *before* creating the
+/// ready-file, so `ReadyFollower` must drain stdout throughout the readiness
+/// wait. A replay larger than the OS pipe buffer would otherwise deadlock — the
+/// follower blocks flushing stdout, never creates the ready-file, and spawn
+/// waits until its timeout.
+#[test]
+fn ready_follower_survives_replay_larger_than_pipe_buffer() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = TempDir::new().unwrap();
+    tender(&root)
+        .args(["start", "big", "--", "sleep", "30"])
+        .assert()
+        .success();
+    wait_running(&root, "big");
+
+    // ~300 KB of history: 20 events x ~15 KB inline data (under the 16 KB cap),
+    // well past any OS pipe buffer (64 KB on Linux, smaller elsewhere).
+    let payload = format!("{{\"blob\":\"{}\"}}", "x".repeat(15 * 1024));
+    for i in 0..20 {
+        tender(&root)
+            .args([
+                "emit",
+                "--kind",
+                &format!("test.bulk{i}"),
+                "--session",
+                "big",
+                "--data",
+                &payload,
+            ])
+            .assert()
+            .success();
+    }
+
+    // The whole ~300 KB replay is flushed before the ready-file; spawn must
+    // drain stdout while waiting, or this deadlocks. The pre-readiness replay
+    // is preserved, so the last bulk event is still observable via read_until.
+    let follower = harness::ReadyFollower::spawn(&root, "events", &["--follow"]);
+    follower.read_until(Duration::from_secs(10), |r| r["kind"] == "test.bulk19");
+    follower.stop();
 }

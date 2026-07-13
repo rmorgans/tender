@@ -2,7 +2,15 @@
 use assert_cmd::Command;
 use assert_cmd::assert::{Assert, OutputAssertExt};
 #[allow(unused_imports)]
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read};
+#[allow(unused_imports)]
+use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
+use std::process::{Child, Stdio};
+#[allow(unused_imports)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[allow(unused_imports)]
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use tempfile::TempDir;
@@ -279,4 +287,203 @@ pub fn duckdb_or_skip() -> bool {
         eprintln!("skipped: duckdb not on PATH (set TENDER_REQUIRE_DUCKDB_TESTS to enforce)");
     }
     available
+}
+
+/// Distinguishes ready-file paths when a test spawns several followers.
+#[allow(dead_code)]
+static FOLLOWER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Poll until `path` exists or `deadline` elapses (panicking). The follower
+/// publishes its `--ready-file` only after its baseline is established, so this
+/// is the deterministic "safe to mutate now" barrier that replaces a fixed
+/// post-spawn sleep.
+#[allow(dead_code)]
+pub fn wait_ready_file(path: &Path, deadline: Duration) {
+    let end = Instant::now() + deadline;
+    while !path.exists() {
+        assert!(
+            Instant::now() < end,
+            "timed out waiting for ready-file {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// An opaque handle to a running follower (`tender events --follow` or
+/// `tender watch`) whose initial baseline is *proven* established: [`spawn`]
+/// returns only after the follower publishes its `--ready-file`. Holding one
+/// means "safe to perform live mutations now."
+///
+/// [`read_until`](Self::read_until) waits for a specific streamed record with a
+/// deadline; [`stop`](Self::stop) consumes the handle and reaps the child; and
+/// `Drop` reaps the child even on panic, so a failing test never leaks a
+/// follower process.
+///
+/// [`spawn`]: Self::spawn
+#[allow(dead_code)]
+pub struct ReadyFollower {
+    child: Child,
+    label: String,
+    records: Arc<Mutex<Vec<serde_json::Value>>>,
+    stdout_reader: Option<std::thread::JoinHandle<()>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
+}
+
+#[allow(dead_code)]
+impl ReadyFollower {
+    /// Spawn `tender <subcommand> <args...> --ready-file <temp>` and block until
+    /// the follower signals readiness. Panics — after killing/reaping the child
+    /// — if the follower exits before readiness or the 10 s barrier elapses,
+    /// surfacing the follower's captured stderr rather than a bare timeout.
+    pub fn spawn(root: &TempDir, subcommand: &str, args: &[&str]) -> Self {
+        let bin = assert_cmd::cargo::cargo_bin("tender");
+        let seq = FOLLOWER_SEQ.fetch_add(1, Ordering::Relaxed);
+        let ready_path = root.path().join(format!("follower-ready-{seq}"));
+        let label = format!("tender {subcommand} {}", args.join(" "));
+
+        let mut child = std::process::Command::new(bin)
+            .arg(subcommand)
+            .args(args)
+            .arg("--ready-file")
+            .arg(&ready_path)
+            .env("HOME", root.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn follower `{label}`: {e}"));
+
+        // Drain stdout AND stderr immediately — before waiting for readiness.
+        // Production flushes the initial replay/snapshot *before* creating the
+        // ready-file, so a replay larger than the OS pipe buffer would deadlock
+        // if we waited first: the follower blocks flushing stdout and never
+        // reaches the ready-file. Records accumulated here (the replay) are
+        // preserved for later read_until calls.
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut stdout_reader = {
+            let records = Arc::clone(&records);
+            let stdout = child.stdout.take().expect("piped stdout");
+            Some(std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                        records.lock().unwrap().push(v);
+                    }
+                }
+            }))
+        };
+        // stderr is drained so a premature exit is reported with its diagnostics
+        // and a chatty stderr can't wedge on a full pipe.
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let mut stderr_reader = {
+            let buf = Arc::clone(&stderr_buf);
+            let mut err = child.stderr.take().expect("piped stderr");
+            Some(std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = err.read_to_string(&mut s);
+                *buf.lock().unwrap() = s;
+            }))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if ready_path.exists() {
+                break;
+            }
+            // On failure, reap the child and join both readers so the captured
+            // stderr is complete (the pipes EOF once the child is gone), instead
+            // of sampling it after a fixed sleep.
+            if let Ok(Some(status)) = child.try_wait() {
+                if let Some(h) = stdout_reader.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = stderr_reader.take() {
+                    let _ = h.join();
+                }
+                let stderr = stderr_buf.lock().unwrap().clone();
+                panic!("follower `{label}` exited before readiness ({status}); stderr:\n{stderr}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(h) = stdout_reader.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = stderr_reader.take() {
+                    let _ = h.join();
+                }
+                let stderr = stderr_buf.lock().unwrap().clone();
+                panic!(
+                    "follower `{label}` never published its ready-file within 10s; stderr:\n{stderr}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        ReadyFollower {
+            child,
+            label,
+            records,
+            stdout_reader,
+            stderr_reader,
+        }
+    }
+
+    /// Block until a streamed record satisfies `pred`, returning it. Panics on
+    /// `deadline`. Rescans every record seen so far each poll, so a record that
+    /// arrived just before the call is never missed — this is the delivery
+    /// barrier that replaces a fixed pre-kill sleep.
+    pub fn read_until(
+        &self,
+        deadline: Duration,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let end = Instant::now() + deadline;
+        loop {
+            if let Some(found) = self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| pred(r))
+                .cloned()
+            {
+                return found;
+            }
+            assert!(
+                Instant::now() < end,
+                "follower `{}` produced no matching record within {deadline:?}",
+                self.label
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Snapshot of every record streamed so far (for negative assertions such as
+    /// "history was skipped"). Take it only after a `read_until` has proven the
+    /// stream reached the point you care about.
+    pub fn records(&self) -> Vec<serde_json::Value> {
+        self.records.lock().unwrap().clone()
+    }
+
+    /// Kill and reap the follower, consuming the handle.
+    pub fn stop(mut self) {
+        self.terminate();
+    }
+
+    fn terminate(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(handle) = self.stdout_reader.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr_reader.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ReadyFollower {
+    fn drop(&mut self) {
+        self.terminate();
+    }
 }

@@ -66,6 +66,7 @@ pub mod exec_request;
 pub mod log;
 pub mod model;
 pub mod platform;
+pub mod ready_file;
 pub mod reconcile;
 pub mod session;
 pub mod sidecar;

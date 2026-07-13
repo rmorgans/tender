@@ -36,6 +36,9 @@ pub struct EventsOptions {
     pub cursors: bool,
     pub include_logs: bool,
     pub strict: bool,
+    /// Follow-only: atomically publish this file once the baseline is
+    /// established and initial replay is flushed. See [`ready_file`](tender::ready_file).
+    pub ready_file: Option<PathBuf>,
 }
 
 /// Kind/source/since filters, applied uniformly to stored and derived
@@ -564,6 +567,20 @@ pub fn cmd_events(opts: EventsOptions) -> anyhow::Result<()> {
             let _ = write_bookmark(&mut out, &reader.tracker, &mut mark)?;
         }
         return Ok(());
+    }
+
+    // Baseline captured and initial replay flushed: publish the out-of-band
+    // readiness signal (never on stdout) so callers know it is safe to perform
+    // live mutations before we enter the poll loop.
+    if let Some(ready_path) = &opts.ready_file {
+        // A dead consumer stops the follow, same as emit_batch's flush handling;
+        // the readiness signal only makes sense while someone is reading.
+        if out.flush().is_err() {
+            return Ok(());
+        }
+        tender::ready_file::create_ready_file(ready_path).map_err(|e| {
+            anyhow::anyhow!("failed to create ready-file {}: {e}", ready_path.display())
+        })?;
     }
 
     loop {
