@@ -44,8 +44,9 @@ rejection — in *both* `build_ssh_command` (`ssh.rs:60`) **and the already-ship
 constant-argv frame path** `build_ssh_exec_frame_command` (`ssh.rs:100-109`). So
 `tender --host '-oProxyCommand=<cmd>'` is parsed by the *local* ssh as an option
 → **arbitrary local command execution**, before any remote hop. This does **not**
-reach the remote shell, so the frame redesign does **not** fix it, and it affects
-shipped `0.2.0`. It must be hardened independently (see **Step 0** below).
+reach the remote shell, so the frame redesign does **not** fix it, and it affected
+shipped `0.2.0`. It was hardened independently — **✅ resolved in v0.2.1**
+(`1ee737d` + `b80b510`); see **Step 0** below.
 
 ## Design
 
@@ -153,11 +154,15 @@ only if *local* correlated IPC genuinely needs it — this is not that.
 
 > **Review additions (2026-07-10) marked in bold.**
 
-0. **Harden the `--host` destination — independent of the frame, ship first.**
-   Reject any `--host` value beginning with `-` (or that ssh would parse as an
-   option) at the CLI boundary before spawning ssh. Closes the local
-   ssh-option-injection vector above and **also fixes the already-shipped
-   exec-frame path** (`ssh.rs:100-109`), which the frame work never touches.
+0. **✅ DONE (v0.2.1, `1ee737d` + `b80b510`) — Harden the `--host` destination.**
+   Any `--host` value that is empty or begins with `-` (ssh-option-shaped) is
+   rejected at the CLI boundary (`main.rs:879`) before ssh spawns — exit 2 — and
+   both SSH builders fail closed via `ssh::validate_destination` (`ssh.rs:65`):
+   `build_ssh_command` and the constant-argv `build_ssh_exec_frame_command`, so
+   no caller can bypass it. Regression tests prove ssh is never spawned on
+   rejection for both the general and framed-exec paths (`cli_remote.rs:1070`),
+   plus unit coverage (`ssh.rs:229`/`246`). This closed the local
+   ssh-option-injection vector independent of the frame redesign, as planned.
 1. Add `RemoteOperation` request types + shared `dispatch`. **Pin every DTO's
    completeness here, where it's defined.** `StartRequest` must mirror the FULL
    start/`LaunchSpec` surface: session, namespace, argv, cwd, env, stdin, timeout,
@@ -231,8 +236,9 @@ tests above.
 - Every remote op emits the identical constant SSH argv — mirror the shipped
   `exec_frame_argv_is_constant` test (`ssh.rs:159`) so a future refactor that
   sneaks a user value into argv fails CI.
-- **`--host` values beginning with `-` (ssh-option-shaped) are rejected before
-  ssh spawns** — the local option-injection guard (step 0).
+- **✅ `--host` values beginning with `-` (ssh-option-shaped) are rejected before
+  ssh spawns** — the local option-injection guard (step 0), shipped v0.2.1
+  (`cli_remote.rs:1070`, `ssh.rs:229`).
 - Hostile values round-trip exactly: `` & | $ ; ( ) " ' ` ``, CR/LF, Unicode,
   Windows paths, spaces — **including `log --since`, which round-trips as data,
   never executes.**
