@@ -6,6 +6,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 #[allow(unused_imports)]
 use tempfile::TempDir;
+use tender::model::ids::{Namespace, SessionName};
+use tender::session::{self, LockGuard, SessionRoot};
 
 /// Hang-detector deadline for a single `tender` CLI invocation in tests.
 ///
@@ -189,6 +191,49 @@ pub fn wait_terminal(root: &TempDir, session: &str) -> serde_json::Value {
             panic!("timed out waiting for terminal state in {session}");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Proof that a session is terminal and its sidecar has released ownership.
+///
+/// Construction is private: callers can only obtain this guard through
+/// [`wait_terminal_quiescent`], which observes terminal metadata and then
+/// acquires the session lock. Keeping the lock guard alive prevents another
+/// owner from invalidating that observation while the caller asserts against
+/// the quiescent session.
+#[allow(dead_code)]
+pub struct QuiescentTerminal {
+    _lock: LockGuard,
+}
+
+/// Wait until terminal metadata is durable and the sidecar lock is available.
+///
+/// Terminal metadata alone does not prove that the sidecar has exited: the
+/// sidecar writes its final state immediately before releasing the lock. This
+/// condition handshake acquires the lock instead of relying on a timing gap.
+#[allow(dead_code)]
+pub fn wait_terminal_quiescent(root: &TempDir, session_name: &str) -> QuiescentTerminal {
+    let session_root = SessionRoot::new(root.path().join(".tender/sessions"));
+    let namespace = Namespace::new("default").expect("default namespace is valid");
+    let session_name = SessionName::new(session_name).expect("test session name is valid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        if let Ok(Some(session_dir)) = session::open(&session_root, &namespace, &session_name) {
+            if session::read_meta(&session_dir).is_ok_and(|meta| meta.status().is_terminal()) {
+                match LockGuard::try_acquire(&session_dir) {
+                    Ok(lock) => return QuiescentTerminal { _lock: lock },
+                    Err(session::SessionError::Locked(_)) => {}
+                    Err(error) => panic!("failed to acquire terminal session lock: {error}"),
+                }
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for terminal session {session_name} to become quiescent"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
